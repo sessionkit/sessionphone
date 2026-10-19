@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# dc-call-mix [CALL_DIR] - one stereo wav: the caller left, the agent right.
+#
+# The tape is stored as two mono files at their true rates (16 kHz in,
+# 48 kHz out) so nothing is resampled into the evidence. This makes the
+# stereo view on demand, where a guess costs nothing.
+#
+# Default: the newest call. Output: <dir>/stereo.wav
+
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+DIR="${1:-}"
+if [ -n "$DIR" ]; then                     # named: refuse it by the name given
+  [ -d "$DIR" ] || { echo "dc-call-mix: no call dir: $DIR" >&2; exit 1; }
+else
+  for d in "$DC_CALLS_DIR"/*/; do          # the newest call dir
+    [ -d "$d" ] || continue
+    if [ -z "$DIR" ] || [ "$d" -nt "$DIR" ]; then DIR="$d"; fi
+  done
+  [ -n "$DIR" ] || { echo "dc-call-mix: no call dir under $DC_CALLS_DIR" >&2; exit 1; }
+fi
+IN="$DIR/full-in.wav"; OUT="$DIR/full-out.wav"
+for f in "$IN" "$OUT"; do
+  [ -s "$f" ] || { echo "dc-call-mix: missing $(basename "$f") - was this call recorded?" >&2; exit 1; }
+done
+command -v ffmpeg >/dev/null || { echo "dc-call-mix: ffmpeg not on PATH" >&2; exit 1; }
+MIX="$DIR/stereo.wav"
+ffmpeg -hide_banner -loglevel error -y \
+  -i "$IN" -i "$OUT" \
+  -filter_complex "[0:a]aresample=48000[l];[1:a]aresample=48000[r];[l][r]join=inputs=2:channel_layout=stereo[a]" \
+  -map "[a]" -c:a pcm_s16le "$MIX"
+echo "$MIX"
+echo "  $(du -h "$MIX" | cut -f1)"

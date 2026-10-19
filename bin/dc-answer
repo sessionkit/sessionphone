@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# dc-answer [--profile public] CHAT - pick up a call that is ringing this
+# agent. Only under DC_ANSWER=ring: the bridge mails RINGING and waits
+# DC_RING_WAIT seconds (default 25) for this, else it answers as voicemail.
+# Decline with dc-hangup CHAT. Waits for the bot's yes or no:
+# exit 0 picked up, 3 not picked up (nothing ringing: voicemail took it, or
+# it ended; or no bot took the job), 4 the bot took it and wrote no answer
+# (by NAME: NOT CONFIRMED (no ack)). 1 usage, 2 could not run.
+# CHAT is a chat number or a channel NAME (channels.txt). Answering sends no
+# new words, so a number needs no list; a NAME must be on it, or exit 3.
+
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+[ $# -eq 1 ] || { echo "usage: dc-answer [--profile public] CHAT  (CHAT: a chat number or a channel name)" >&2; exit 1; }
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+# never $1 pasted into JSON: dc_precheck builds the field, JSON-quoted
+dc_precheck end "$1" answer "$PROFILE" || exit $?
+# dc_job names the ack, waits for the take and reads the bot's yes or no; a no
+# (or no take) is exit 3 with the reason on stderr, here through set -e
+dc_job "$OUT" "$DC_DEST"
+case "$DC_DONE" in
+  *"NOT CONFIRMED"*) echo "dc-answer: NO ANSWER from the bot - is it running a build with dc-answer?" >&2; exit 4;;
+esac
+echo "dc-answer: $DC_DONE${PROFILE:+ on profile $PROFILE}"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# dc-ring [--profile public] NAME [VOICE [GREETING...]] - ring a Delta contact
+# the bot already knows (e.g. met in a group) by display name or address.
+# VOICE is a kokoro id or a clone dir under ~/.voicemode/voices; GREETING is
+# the opening line, spoken in VOICE when they answer.
+# NAME may also be a channel NAME from the allow-list (channels.txt), and that
+# comes first: a channel that is chat:N for a GROUP rings the group. Whatever
+# the chat, it must be listed: else REFUSED, exit 3, even with DC_TAKEN_WAIT=0.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+[ $# -ge 1 ] || { echo "usage: dc-ring [--profile public] NAME [VOICE [GREETING...]]  (NAME: a contact, or a channel name)" >&2; exit 1; }
+WHO="$1"; VOICE="${2:-}"; shift; [ $# -gt 0 ] && shift
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck contact "$WHO" "" "$PROFILE" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,sys;j={"call_to":sys.argv[1]};v=sys.argv[2];g=" ".join(sys.argv[3:]);j.update({"voice":v} if v else {});j.update({"greeting":g} if g else {});print(json.dumps(j))' "$WHO" "$VOICE" "$@")"
+echo "dc-ring: $DC_DONE${VOICE:+ as $VOICE}${PROFILE:+ on profile $PROFILE}"

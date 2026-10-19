@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# dc-env - sourced by every dc-* tool: who the bridge is, and where its state lives.
+#
+# The agent comes from DC_AGENT, then CLAUDE_CODE_AGENT, then "claude". The
+# root comes from DC_ROOT, then SESSIONPHONE_ROOT, then ~/.sessionphone.
+# Every path a tool touches derives from the root unless its own DC_X is set.
+# Mirrors src/sessionphone/bridge/dc_env.py exactly - change both or neither.
+# Run on its own (it is on the PATH with the tools), it answers -h/--help with
+# this header and refuses anything else: it is a library, not a tool.
+
+# dc_header FILE: FILE's header comment, '# ' stripped: from line 2, ending at
+# the first line that is not a comment (a blank line ends it too), so no code
+# follows it however the header ends. A bare '#' is an empty line.
+dc_header() { awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$1"; }
+
+if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+  case "${1:-}" in
+    -h|--help) dc_header "$0"; exit 0 ;;
+    *) echo "dc-env: sourced by the dc-* tools, not run (dc-env -h)" >&2; exit 2 ;;
+  esac
+fi
+# shellcheck disable=SC2018,SC2019  # lowers A-Z only, unchanged here (dc_env.py lowers any letter)
+DC_AGENT="$(printf %s "${DC_AGENT:-${CLAUDE_CODE_AGENT:-claude}}" | tr 'A-Z' 'a-z')"
+DC_ROOT="${DC_ROOT:-${SESSIONPHONE_ROOT:-$HOME/.sessionphone}}"
+DC_LIVE="${DC_LIVE:-$DC_ROOT/call-live.json}"
+DC_ACKS="${DC_ACKS:-$DC_ROOT/acks}"
+DC_CALLS_DIR="${DC_CALLS_DIR:-$DC_ROOT/calls}"
+DC_LOG="${DC_LOG:-$DC_ROOT/bot.log}"
+# the undelivered spool (bridge/spool.py): failed agent mail, waiting and dead/
+DC_UNDELIVERED="${DC_UNDELIVERED:-$DC_ROOT/undelivered}"
+# what `pgrep -f` finds: the launchd job runs `python -m sessionphone.bridge.bot AGENT`
+DC_BOT="${DC_BOT:-sessionphone.bridge.bot $DC_AGENT}"
+export DC_AGENT DC_ROOT DC_LIVE DC_ACKS DC_CALLS_DIR DC_LOG DC_UNDELIVERED DC_BOT
+# the heard feed into a webxdc app (bridge/xdc_feed.py): chat ids the
+# heard log may be read out into (unset = none, so no feed binds; list only
+# your own 1:1 chat), and feeds at once. The bot reads them from ITS OWN
+# environment, as it reads the channels list.
+DC_XDC_FEED_CHATS="${DC_XDC_FEED_CHATS:-}"
+DC_XDC_FEEDS_MAX="${DC_XDC_FEEDS_MAX:-2}"
+export DC_XDC_FEED_CHATS DC_XDC_FEEDS_MAX
+# dc_outbox [PROFILE]: "" = the bot's own account; a named profile is a second
+# bot with its own outbox (chat ids are per profile). DC_OUTBOX overrides.
+dc_outbox() {
+  case "${1:-}" in
+    "")     printf %s "${DC_OUTBOX:-$DC_ROOT/outbox}" ;;
+    public) printf %s "${DC_OUTBOX_PUBLIC:-$DC_ROOT/public/outbox}" ;;
+    *) echo "$(basename "$0"): unknown --profile '$1' (known: public)" >&2; return 2 ;;
+  esac
+}
+# >>> channels-precheck
+# NO REFUSED SEND EXITS 0.
+# Before a tool queues a job it asks the one parser, sessionphone.channels,
+# never a second one in shell. The pre-check can only REFUSE: a missing,
+# unreadable or loose list, or a NAME that is not on it, exits 3 with the
+# list's path on stderr and no job written. The bot's gate stays the
+# authority: it reads the list from its OWN environment, so a send
+# the pre-check lets through WAITS for the bot's answer even under
+# DC_TAKEN_WAIT=0, and a refusal there exits 3 too.
+_DC_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_DC_PY="$_DC_HOME/.venv/bin/python"
+# a wheel install: dc-env sits in the env's own bin/, beside its python
+[ -x "$_DC_PY" ] || _DC_PY="$(dirname "${BASH_SOURCE[0]}")/python"
+[ -x "$_DC_PY" ] || _DC_PY=python3
+_DC_SEND=""     # set by dc_precheck: the bot gates this job, so a wait of 0 never applies
+# dc_wait: the seconds to wait for a take. 0 = don't, except for a gated job.
+dc_wait() {
+  local n="${DC_TAKEN_WAIT:-10}"
+  if [ "$n" = 0 ] && [ -n "$_DC_SEND" ]; then n=10; fi
+  printf %s "$n"
+}
+# dc_channels [PROFILE]: the list the pre-check reads. A bot's root holds its
+# outbox and its channels.txt, so it is the one beside the outbox the job goes
+# to. DC_CHANNELS_FILE, if this shell sets it, names the default profile's
+# list. Either way it can only refuse more: what it lets through, the bot judges.
+dc_channels() {
+  local out; out="$(dc_outbox "${1:-}")" || return 2
+  if [ -z "${1:-}" ] && [ -n "${DC_CHANNELS_FILE:-}" ]; then
+    printf %s "$DC_CHANNELS_FILE"
+  elif [ -z "${1:-}" ] && [ -n "${PIP_CHAT_CHANNELS_FILE:-}" ]; then
+    # the deprecated alias, as dc_env reads it: still read, with a warning
+    echo "sessionphone: PIP_CHAT_CHANNELS_FILE is deprecated; rename it DC_CHANNELS_FILE" \
+         "(the old name is read until a later release)" >&2
+    printf %s "$PIP_CHAT_CHANNELS_FILE"
+  else
+    printf %s "$(dirname "$out")/channels.txt"
+  fi
+}
+# dc_precheck KIND REF [FIELD] [PROFILE]: KIND is chat (a CHAT: number or
+# NAME), msg (a message id), contact (dm/ring) or end (hangup/answer). Returns
+# 3 refused, 2 could not run (nothing queued either way). A refusal of the whole
+# list also says whether the bot has mailed the owner's agent. Else 0, sets DC_DEST
+# to the job's destination fields as JSON (a number keeps FIELD, a NAME goes in
+# "chat", JSON-quoted) and marks a gated job so it is always waited for.
+# DC_HOST: dc_env's fallback is a DNS lookup (getfqdn); the pre-check needs none.
+dc_precheck() {
+  local list box out rc
+  list="$(dc_channels "${4:-}")" || return 2
+  box="$(dc_outbox "${4:-}")" || return 2   # its .channels-alert: was the owner mailed?
+  if out=$(DC_HOST="${DC_HOST:-localhost}" "$_DC_PY" -c 'import sys
+sys.path[0] = sys.argv.pop(1)
+from sessionphone.channels import main
+sys.exit(main(sys.argv[1:]))' "$_DC_HOME/src" precheck --list "$list" --outbox "$box" --field "${3:-}" \
+      --tool "$(basename "$0")" -- "$1" "$2"); then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) ;;
+    3) return 3 ;;      # refused: the detail, naming the list, is on stderr
+    *) echo "$(basename "$0"): the allow-list pre-check could not run (exit $rc), so nothing was queued" >&2
+       return 2 ;;
+  esac
+  [ "${out%%$'\n'*}" = wait ] && _DC_SEND=1
+  # shellcheck disable=SC2034  # read by the tool that sourced this
+  DC_DEST="${out#*$'\n'}"
+  return 0
+}
+# <<< channels-precheck
+# >>> job-shape
+# dc_shape OUTBOX JSON: does the bot on OUTBOX read every key in the job JSON?
+# It stamps the keys it reads in OUTBOX/.bot at start; with no stamp, or a dead
+# one, it is judged a bot older than the stamp (sessionphone.jobs.LEGACY_KEYS).
+# A job it would crash on or misread (field case: a bot older than the allow-list and
+# `dc-say NAME`, KeyError 'chat_id') is refused BEFORE it is written: returns 3,
+# "restart the bot" on stderr; 2 when the check could not run. Nothing queued.
+dc_shape() {
+  local rc
+  if "$_DC_PY" -c 'import sys
+sys.path[0] = sys.argv.pop(1)
+from sessionphone.jobs import main
+sys.exit(main(sys.argv[1:]))' "$_DC_HOME/src" check --outbox "$1" --tool "$(basename "$0")" "$2"; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) return 0 ;;
+    3) return 3 ;;      # refused: the detail, saying "restart the bot", is on stderr
+    *) echo "$(basename "$0"): the job-shape check could not run (exit $rc), so nothing was queued" >&2
+       return 2 ;;
+  esac
+}
+# <<< job-shape
+# dc_taken FILE: "queued" must mean a bot took it (else a job can sit in
+# ~/.sessionphone/public/outbox, read by no bot, while the tool says "queued").
+# Every bot polls its outbox each second and unlinks a job
+# once handled, so wait up to DC_TAKEN_WAIT seconds (10; 0 = don't wait, but a
+# job the bot gates is always waited for: dc_wait) for FILE
+# to go. Still there: say so loudly, leave it, and return 3.
+dc_taken() {
+  local f="$1" n i=0
+  n="$(dc_wait)"
+  [ "$n" = 0 ] && return 0
+  while [ -e "$f" ] && [ "$i" -lt $((n * 5)) ]; do sleep 0.2; i=$((i + 1)); done
+  [ -e "$f" ] || return 0
+  echo "$(basename "$0"): NOT TAKEN - no bot took the job in ${n}s, so nothing may read $(dirname "$f") (DC_ROOT=$DC_ROOT). It is still there: $f. Set DC_ROOT to your bot's root, or move the job into its outbox. REMOVE IT before you resend, or it goes twice once a bot reads that outbox." >&2
+  return 3
+}
+# dc_ack ACK: what the bot did with a job it took. "Taken" is not "sent":
+# the bot answers every job in ACK, ok or not, BEFORE it unlinks the job - so
+# once dc_taken returns, the answer is there or it never will be. Sets DC_DONE
+# to the line to report. Returns 3 when the bot says it failed (refused). No
+# ack = whether it went is unknown, never "sent":
+#  - a GATED job (dc_precheck said the bot judges it: every kind with a
+#    destination) returns 4, NOT CONFIRMED: a distinct code lets a script
+#    tell refused (3) from unknown (4). A bot older than the allow-list, or one
+#    that refused but could not write its ack, lands here.
+#  - an ungated job (hangup/answer by chat number) keeps the old answer:
+#    NOT CONFIRMED in DC_DONE, a warning on stderr, return 0.
+# Acks are never deleted: $DC_ACKS is the audit trail of every job.
+dc_ack() {
+  local a="$1" i=0 r ok detail
+  DC_DONE="queued (not waited for)"
+  [ "$(dc_wait)" = 0 ] && return 0
+  # _DC_ACK_TENTHS: a tool whose job the bot answers LATER than it takes it
+  # (dc-xdc-realtime: the realtime sender thread acks when its rpc returns,
+  # see dc-xdc-realtime) waits longer than the 1 s every other job needs.
+  while [ ! -e "$a" ] && [ "$i" -lt "${_DC_ACK_TENTHS:-10}" ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -e "$a" ]; then
+    DC_DONE="taken by the bot, NOT CONFIRMED (no ack)"
+    if [ -n "$_DC_SEND" ]; then
+      echo "$(basename "$0"): NOT CONFIRMED (no ack): the bot took it but never confirmed; nothing may have been sent. Its log: $DC_LOG" >&2
+      return 4
+    fi
+    echo "$(basename "$0"): the bot took the job and wrote no ack, so whether it went is unknown (a bot older than acks? restart it). Its log: $DC_LOG" >&2
+    return 0
+  fi
+  r=$(python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(1 if d.get("ok") else 0); print(" ".join(str(d.get("detail", "")).split()))
+except Exception as e:
+    print(0); print(f"unreadable ack {sys.argv[1]}: {e}")' "$a")
+  ok="${r%%$'\n'*}"; detail="${r#*$'\n'}"
+  # shellcheck disable=SC2034  # read by the tool that sourced this
+  if [ "$ok" = 1 ]; then DC_DONE="${detail:-done}"; return 0; fi
+  echo "$(basename "$0"): FAILED - $detail" >&2
+  return 3
+}
+# dc_job OUTBOX JSON: drop a job for the running bot, which holds the account lock,
+# wait until it takes it (dc_taken), then read its answer (dc_ack). The job is
+# checked against the keys the running bot reads (dc_shape) and only then
+# written whole and renamed in: the bot globs *.json once a second. Returns
+# dc_ack's code: 0 done, 3 refused (by dc_shape too) or not taken, 4 gated and
+# NOT CONFIRMED; 2 when dc_shape could not run.
+dc_job() {
+  mkdir -p "$1" "$DC_ACKS"
+  local f a j; f="$1/$(python3 -c 'import time;print("%.6f"%time.time())').json"
+  a="$DC_ACKS/$(basename "$f" .json)-$(basename "$0")-$$.json"
+  j="$(python3 -c 'import json,sys; j=json.loads(sys.argv[1]); j["ack"]=sys.argv[2]; print(json.dumps(j))' "$2" "$a")"
+  dc_shape "$1" "$j" || return $?     # 3: the running bot would misread it; nothing written
+  printf '%s\n' "$j" > "$f.part"
+  mv "$f.part" "$f"
+  dc_taken "$f" || return 3
+  dc_ack "$a"
+}
+# dc_help: print the header comment when asked
+dc_help() { case "${1:-}" in -h|--help) dc_header "$0"; exit 0;; esac; }

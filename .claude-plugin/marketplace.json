@@ -1,0 +1,23 @@
+{
+  "name": "sessionphone",
+  "metadata": {
+    "description": "Self-hosting marketplace for the sessionphone plugin - add with `claude plugin marketplace add <path or url>`.",
+    "version": "0.2.0"
+  },
+  "owner": {
+    "name": "Mike Bailey",
+    "email": "mike@sessionkit.ai"
+  },
+  "plugins": [
+    {
+      "name": "sessionphone",
+      "description": "Ring your Claude Code session from your phone over Delta Chat",
+      "author": {
+        "name": "Mike Bailey",
+        "email": "mike@sessionkit.ai"
+      },
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

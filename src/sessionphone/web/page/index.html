@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sessionphone</title>
+<!-- One file, no build, no framework, no external fetch.
+     Two taps: Sign in (a passkey), then Call (which becomes Hang up). Safari
+     wants a user gesture for navigator.credentials.* and for getUserMedia and
+     playback, so each gets a tap of its own. -->
+<style>
+  body { font: 18px/1.4 -apple-system, system-ui, sans-serif; max-width: 26em; margin: 2em auto; padding: 0 1em; }
+  #state { font-size: 1.4em; font-weight: 600; margin: .4em 0; }
+  #why { color: #b00020; min-height: 1.4em; }
+  button, input { font: inherit; padding: .7em 1em; width: 100%; box-sizing: border-box; margin: .3em 0; }
+  button { border: 0; border-radius: .5em; background: #0a63c9; color: #fff; }
+  button.end { background: #c62828; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>sessionphone</h1>
+<div id="state">connecting</div>
+<div id="why"></div>
+<input id="code" hidden autocomplete="one-time-code" autocapitalize="characters" placeholder="enrol code from sessionphone web enrol">
+<button id="signin" hidden>Sign in</button>
+<button id="call" hidden>Call</button>
+<audio id="remote" autoplay playsinline></audio>
+<script>
+"use strict";
+var $ = function (id) { return document.getElementById(id); };
+var ws = null, offer = null, enrolOk = false, pc = null, mic = null, refused = false, inCall = false;
+var called = false, held = [], last = "";        // ICE waits for "answer"; last = why the line went
+
+// ---- the enrol code from the QR: /#code=<code>. Read ONCE, then struck from the
+// address bar and the history at once. The fragment never reaches the server; locked() fills it in.
+var fromQr = (function () {
+  var h = new URLSearchParams(location.hash.slice(1));
+  if (!h.has("code")) return "";
+  history.replaceState(null, "", location.pathname + location.search);
+  return h.get("code").trim();
+})();
+
+function b64u(buf) {
+  var s = "", b = new Uint8Array(buf);
+  for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function unb64u(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+  var r = atob(s), b = new Uint8Array(r.length);
+  for (var i = 0; i < r.length; i++) b[i] = r.charCodeAt(i);
+  return b.buffer;
+}
+function show(state, why) { $("state").textContent = state; $("why").textContent = why || ""; }
+function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+
+// ---- the socket: one per sign-in; a closed one is replaced, so a challenge is ready before the tap
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onmessage = function (e) { on(JSON.parse(e.data)); };
+  ws.onclose = function () {
+    if (inCall) { last = "disconnected"; show("ended", last); }
+    endCall();
+    $("signin").hidden = $("call").hidden = $("code").hidden = true;
+    if (refused) return;                       // origin refused: a new socket would be refused too
+    setTimeout(connect, 1000);
+  };
+}
+
+function on(m) {
+  if (m.type === "auth") { offer = m; enrolOk = false; locked(); }
+  else if (m.type === "enrol-ok") { enrolOk = true; $("code").hidden = true; $("signin").textContent = "Make the passkey"; }
+  else if (m.type === "enrol-failed") show("locked", m.why);
+  else if (m.type === "auth-failed") show("locked", m.why);   // a fresh "auth" follows
+  else if (m.type === "refused") { refused = m.why === "origin"; show("refused", m.why); }
+  else if (m.type === "auth-ok") { $("signin").hidden = $("code").hidden = true; last = ""; ready(""); }
+  else if (m.type === "answer") {
+    called = true; held.splice(0).forEach(send);   // a busy line never sees ICE, so no "no call" hides "busy"
+    pc.setRemoteDescription({ type: "answer", sdp: m.sdp }).then(function () {
+      show("live call:" + m.call); $("call").textContent = "Hang up"; $("call").className = "end"; $("call").hidden = false;
+    }, function (e) { send({ type: "hangup" }); show("ended", "answer refused: " + e.name); });
+  }
+  else if (m.type === "busy") { endCall(); ready("busy: another call is live"); }
+  else if (m.type === "error") $("why").textContent = m.why;   // a bad offer is followed by "ended"
+  else if (m.type === "ended") { endCall(); last = m.why; show("ended", m.why); }
+}
+
+function locked() {
+  var enrol = offer.mode === "enrol";
+  show("locked", enrol ? "this device has no passkey here yet: type the enrol code"
+    : last ? "call ended (" + last + "): sign in to call again" : "");
+  $("code").hidden = !enrol; $("code").value = "";
+  if (fromQr) {                                    // after the reset, once: a later offer does not refill it
+    if (enrol) { $("code").value = fromQr; $("why").textContent = "the enrol code is filled in from the QR: tap Check the code"; }
+    fromQr = "";
+  }
+  $("signin").textContent = enrol ? "Check the code" : "Sign in"; $("signin").hidden = false; $("call").hidden = true;
+}
+function ready(why) { show("signed in", why); $("call").textContent = "Call"; $("call").className = ""; $("call").hidden = false; }
+
+// ---- Sign in: the settings app's ceremony (settings app/webxdc.js:98-125), with the enrol code
+$("signin").onclick = function () {
+  if (!offer) return;
+  if (offer.mode === "enrol" && !enrolOk) {        // pre-check: a wrong code never makes a passkey
+    var code = $("code").value.trim();
+    if (!code) { show("locked", "type the enrol code first"); return; }
+    send({ type: "enrol-check", code: code }); return;
+  }
+  var o = offer; offer = null;                     // a challenge is used once
+  var p = o.mode === "enrol"
+    ? navigator.credentials.create({ publicKey: {
+        challenge: unb64u(o.challenge), rp: { id: o.rpId, name: "sessionphone" },
+        user: { id: unb64u(o.user.id), name: o.user.name, displayName: o.user.displayName },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { userVerification: "required", residentKey: "preferred" },
+        excludeCredentials: o.allow.map(function (id) { return { type: "public-key", id: unb64u(id) }; }),
+        attestation: "none", timeout: 60000 } }).then(function (c) {
+        return { type: "auth-finish", mode: "enrol", code: $("code").value.trim(), id: c.id,
+          clientDataJSON: b64u(c.response.clientDataJSON), authenticatorData: b64u(c.response.getAuthenticatorData()),
+          publicKey: b64u(c.response.getPublicKey()), alg: c.response.getPublicKeyAlgorithm(),
+          name: navigator.userAgent.indexOf("iPhone") >= 0 ? "iPhone" : "Mac" };
+      })
+    : navigator.credentials.get({ publicKey: {
+        challenge: unb64u(o.challenge), rpId: o.rpId, userVerification: "required", timeout: 60000,
+        allowCredentials: o.allow.map(function (id) { return { type: "public-key", id: unb64u(id) }; }) } }).then(function (a) {
+        return { type: "auth-finish", mode: "login", id: a.id, clientDataJSON: b64u(a.response.clientDataJSON),
+          authenticatorData: b64u(a.response.authenticatorData), signature: b64u(a.response.signature) };
+      });
+  p.then(send, function (e) { show("locked", "passkey: " + e.name); offer = o; });
+};
+
+// ---- Call / Hang up
+$("call").onclick = function () {
+  if (inCall) { send({ type: "hangup" }); return; }
+  inCall = true; $("call").hidden = true; show("ringing");
+  var remote = new MediaStream(), audio = $("remote");
+  audio.srcObject = remote;
+  audio.play().catch(function () {});             // inside the tap: Safari lets it play
+  navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+    .then(function (s) {
+      if (!inCall) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
+      mic = s; pc = new RTCPeerConnection({ iceServers: [] });
+      s.getAudioTracks().forEach(function (t) { pc.addTrack(t, s); });
+      pc.ontrack = function (e) { remote.addTrack(e.track); };
+      pc.onicecandidate = function (e) {
+        var m = { type: "ice", candidate: e.candidate ? { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid,
+          sdpMLineIndex: e.candidate.sdpMLineIndex } : null };
+        if (called) send(m); else held.push(m);      // before "answer" there may be no call (busy) to add it to
+      };
+      return pc.createOffer().then(function (d) { return pc.setLocalDescription(d); }).then(function () {
+        send({ type: "call", sdp: pc.localDescription.sdp });
+      });
+    })
+    .catch(function (e) { endCall(); ready("microphone: " + e.name); });
+};
+
+function endCall() {
+  inCall = called = false; held = [];
+  if (pc) { pc.close(); pc = null; }
+  if (mic) { mic.getTracks().forEach(function (t) { t.stop(); }); mic = null; }
+  $("remote").srcObject = null;
+  $("call").hidden = true;
+}
+
+connect();
+</script>
+</body>
+</html>

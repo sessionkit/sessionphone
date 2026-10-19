@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""dc-log [-f] [-n N] [--raw] - the Delta call as a conversation, both ways.
+
+One view of a call, to tail or to run once: what was said each way.
+
+Reads the bot's existing log. Nothing to restart, nothing to install.
+The log is DC_LOG, else <root>/bot.log; the root is DC_ROOT, else
+SESSIONPHONE_ROOT, else ~/.sessionphone (dc-env's contract). If only the old
+default <root>/bot/bot.log exists, it reads that and says so on stderr.
+  -f      follow
+  -n N    how many raw lines to consider (default 400)
+  -w N    elide text past N columns (default 110; 0 = never elide)
+  --raw   pass the log through untouched
+
+The log stores the FULL text; eliding is a view concern: one stream, filter
+at read time.
+"""
+import os, re, subprocess, sys, time
+import signal
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # `dc-log | head` ends quietly, not with a traceback
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent / "src"   # the package beside this tool
+
+
+_warned = set()   # names already warned about in this run
+
+
+def _env(name):
+    """DC_<name>, else the deprecated PIP_CHAT_<name>, warned once (as dc_env.env
+    does). Empty counts as unset."""
+    if os.environ.get(f"DC_{name}"):
+        return os.environ[f"DC_{name}"]
+    v = os.environ.get(f"PIP_CHAT_{name}")
+    if v and name not in _warned:
+        _warned.add(name)
+        print(f"sessionphone: PIP_CHAT_{name} is deprecated; rename it DC_{name} "
+              "(the old name is read until a later release)", file=sys.stderr)
+    return v or None
+
+
+def root():
+    """The bot's root: DC_ROOT, else sessionphone.paths.root() (SESSIONPHONE_ROOT,
+    else ~/.sessionphone). The same answer as dc_env.ROOT and bin/dc-env.
+    No agent name in it: a stranger's dc-log reads the stranger's own bot."""
+    v = _env("ROOT")
+    if v:
+        return Path(v).expanduser()
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    from sessionphone import paths     # the one root resolver: stdlib only, no DNS lookup
+    return paths.root()
+
+
+def log_path():
+    """The bot's log: DC_LOG, else <root>/bot.log. dc_env.path("LOG", "bot.log")."""
+    v = _env("LOG")
+    return Path(v).expanduser() if v else root() / "bot.log"
+
+
+def resolve_log():
+    """The log to read, and a note for stderr (or None).
+
+    dc-log used to default to <root>/bot/bot.log. If DC_LOG is unset, that old
+    file exists and <root>/bot.log does not, read the old one and say so: an
+    upgrade must never turn a user's dc-log silently empty."""
+    log = log_path()
+    if _env("LOG") or log.exists():
+        return log, None
+    old = log.parent / "bot" / "bot.log"
+    if not old.exists():
+        return log, None
+    return old, (f"dc-log: no log at {log}; reading the old default {old}. "
+                 f"Set DC_LOG to keep reading it, or point the bot at {log}.")
+
+
+LOG = None           # resolved in main(), so --help never reaches for the package
+TTY = sys.stdout.isatty()
+WIDTH = 110          # display only; -w 0 turns it off
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+def el(s):
+    """Elide for the screen. The log keeps the whole thing."""
+    if not WIDTH or len(s) <= WIDTH:
+        return s
+    return s[:WIDTH - 1] + "\u2026"
+
+
+PATS = [
+    ("heard", re.compile(r"^\S+ (\S+) CALL HEARD \S+ in ([\d.]+)s: (.*)$")),
+    # the ears path (DC_EARS=1) logs
+    # "HEARD seg N [a-b] lag Ns:" and "TURN (ears silence, wait N, by stt):".
+    # Without these two, dc-log showed only the bridge's side of a call, never
+    # the caller's words.
+    ("heard2", re.compile(r"^\S+ (\S+) CALL HEARD seg \d+ \[[^\]]*\] lag ([\d.]+)s: (.*)$")),
+    ("turn",  re.compile(r"^\S+ (\S+) CALL TURN \((\d+ chunks)\): (.*)$")),
+    ("turn",  re.compile(r"^\S+ (\S+) CALL TURN \((ears [^)]*)\): (.*)$")),
+    ("spoke", re.compile(r"^\S+ (\S+) CALL SPOKE ([\d.]+)s \(tts ([\d.]+)s, ([^)]+)\): (.*)$")),
+    ("back",  re.compile(r"^\S+ (\S+) CALL BACKLOG ([\d.]+)s of audio.*?late: (.*)$")),
+    ("sent",  re.compile(r"^\S+ (\S+) SENT to chat (\d+): (.*)$")),
+    ("mark",  re.compile(r"^\S+ (\S+) (CALL (?:CONNECTED|ENDED)|CALL answered|CALL hung up)(.*)$")),
+]
+
+
+def render(line):
+    line = line.rstrip("\n")
+    line = re.sub(r"\s*\[call \d+\]$", "", line)   # the join key, not prose
+    for name, pat in PATS:
+        m = pat.match(line)
+        if not m:
+            continue
+        t = m.group(1)
+        if name == "heard":
+            return f'{t}  {c("36","HIM  >")} {el(m.group(3))}  {c("90", "(stt %ss)" % m.group(2))}'
+        if name == "heard2":
+            return f'{t}  {c("36","HIM  >")} {el(m.group(3))}  {c("90", "(lag %ss)" % m.group(2))}'
+        if name == "turn":
+            return f'{t}  {c("1;36","TURN >")} {el(m.group(3))}  {c("90","(%s)" % m.group(2))}'
+        if name == "spoke":
+            tail = "(spoke %ss, tts %ss, %s)" % (m.group(2), m.group(3), m.group(4))
+            return f'{t}  {c("32","< ME  ")} {el(m.group(5))}  {c("90", tail)}'
+        if name == "back":
+            return f'{t}  {c("31","! LATE")} {m.group(3)[:80]}  {c("31","lands %ss late" % m.group(2))}'
+        if name == "sent":
+            return f'{t}  {c("90","  text")} {el(m.group(3))}'
+        if name == "mark":
+            return f'{t}  {c("1;33","== " + m.group(2))}{m.group(3)[:70]}'
+    return None
+
+
+def main():
+    args, follow, n, raw = sys.argv[1:], False, 400, False
+    while args:
+        a = args.pop(0)
+        if a == "-f": follow = True
+        elif a == "-n": n = int(args.pop(0))
+        elif a == "-w":
+            global WIDTH
+            WIDTH = int(args.pop(0))
+        elif a == "--raw": raw = True
+        elif a in ("-h", "--help"): print(__doc__); return 0
+        else: print(f"dc-log: unknown arg {a}", file=sys.stderr); return 1
+    global LOG
+    LOG, note = resolve_log()
+    if note:
+        print(note, file=sys.stderr, flush=True)
+    if not LOG.exists():
+        print(f"dc-log: no log at {LOG} (set DC_LOG, or DC_ROOT to the bot's root)",
+              file=sys.stderr); return 1
+
+    # SAY WHICH TREE. A log that stopped an hour ago, or another agent's log
+    # chosen by a default, shows no error and plausible output. An instrument
+    # that cannot show its scope misleads; this line is four seconds of screen
+    # for it.
+    if not raw:
+        age = time.time() - LOG.stat().st_mtime
+        when = f"{age:.0f}s ago" if age < 90 else f"{age/60:.0f} min ago"
+        stale = "  STALE" if age > 300 else ""
+        hdr = f"- {LOG}  (last write {when}){stale}"
+        print(f"\033[2m{hdr}\033[0m" if TTY else hdr, flush=True)
+
+    cmd = ["tail", "-n", str(n)] + (["-f"] if follow else []) + [str(LOG)]
+    if raw:
+        return subprocess.call(cmd)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, errors="replace")
+    try:
+        for line in p.stdout:
+            out = render(line)
+            if out:
+                print(out, flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        p.terminate()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

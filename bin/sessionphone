@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# bin/sessionphone - the plugin's own copy of the verb, on the Bash tool's
+# PATH while the plugin is enabled (Claude Code plugins reference:
+# "Executables | bin/ | added to the Bash tool's PATH"). It finds the plugin
+# root from its own location, so a bare install needs no `make install` and
+# no manual `uv sync`: uv builds the venv on first use and reuses it after.
+# Ported from mbailey/deltachat's bin/deltachat.
+#
+# The first run is small. Every `uv run` here passes --no-dev, so a
+# user never gets the dev tools, and only the media verbs add `--extra media`:
+# setup, qr and link need the four light deps alone (about 10 MB). The media
+# pack (about 31 MB) is fetched once, at the first media verb, after one line
+# that says what it is and why. If that fetch fails, the launcher says so and
+# exits 2; nothing else changes.
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+
+# The media verbs: exactly the CLI commands that call media.require() first
+# (cli.py). tests/test_bin_media.py holds this list equal to those call sites,
+# so a verb the CLI guards is never one the launcher forgets to fetch for.
+media_verbs=("bot install" "bot run" "web" "web enrol")
+# The pack's modules, as media.MODULES names them (the same test checks).
+media_modules=(aiortc aioice av numpy websockets cryptography)
+
+# -h/--help, anywhere before a `--`, writes nothing and needs no network.
+# `uv run` would first sync the venv (for a media verb, fetch the
+# pack) and fill uv's cache under HOME, so help goes to the venv's own entry
+# point when there is one, else to a usage line here.
+for a in "$@"; do
+  case "$a" in
+    --) break;;
+    -h|--help)
+      [ -x "$root/.venv/bin/sessionphone" ] && exec "$root/.venv/bin/sessionphone" "$@"
+      echo "usage: sessionphone [-h] COMMAND [ARGS]..."
+      echo "  The command list prints here once the venv is built: run sessionphone once (uv builds it)."
+      exit 0;;
+  esac
+done
+
+command -v uv >/dev/null 2>&1 || {
+  echo "sessionphone: uv is not on the PATH - install it (https://docs.astral.sh/uv/) or run \`make install\` in $root" >&2
+  exit 2
+}
+
+# A media verb is one whose first word, or first two words, is in the table.
+# `web` takes options before `enrol` (web --port N enrol), and is a media verb
+# either way; the bot group takes none.
+is_media=0
+for v in "${media_verbs[@]}"; do
+  if [ "$v" = "${1:-}" ] || [ "$v" = "${1:-} ${2:-}" ]; then is_media=1; break; fi
+done
+
+if [ "$is_media" = 0 ]; then
+  exec uv run --quiet --no-dev --project "$root" sessionphone "$@"
+fi
+
+# The pack is present when the venv's own interpreter can find all six. A
+# missing venv counts as missing. find_spec looks and imports nothing; a None
+# or a raised ImportError is missing (as media.missing() counts them).
+have_pack() {
+  local py="$root/.venv/bin/python"
+  [ -x "$py" ] || return 1
+  "$py" -I -c '
+import importlib.util, sys
+def found(n):
+    try:
+        return importlib.util.find_spec(n) is not None
+    except ImportError:
+        return False
+sys.exit(0 if all(found(n) for n in sys.argv[1:]) else 1)
+' "${media_modules[@]}" >/dev/null 2>&1
+}
+
+if ! have_pack; then
+  echo "sessionphone: the bot, calls and the web page need the media pack (aiortc, av, numpy and their kin, about 31 MB); setup, qr and link do not. Fetching it once, now." >&2
+  if ! uv sync --inexact --no-dev --extra media --project "$root"; then
+    echo "sessionphone: the media pack did not download (uv's reason is above). Nothing else changed: setup, qr and link still work. Run the same command again on a better link." >&2
+    exit 2
+  fi
+fi
+exec uv run --quiet --no-dev --extra media --project "$root" sessionphone "$@"

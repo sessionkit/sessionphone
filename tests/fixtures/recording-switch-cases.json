@@ -1,0 +1,2031 @@
+{
+ "contract": "EARS-387 recording switch contract, rules 1-11",
+ "notes": [
+  "file: 'absent' = no file at the path; 'unreadable' = exists, mode 000; 'invalid-json' = the bytes '{not json'; {raw} = the exact file text",
+  "env_*: null = unset; a string = the exact value, whitespace included",
+  "cli: null = no flag; true = --record; false = --no-record",
+  "record_days.invalid is not asserted: an invalid days layer is skipped (rule 5), so the winning layer is valid by construction; report a warning",
+  "record.invalid=true means a layer held an invalid value and won with OFF (rule 4)",
+  "record_notice (rule 10): an invalid value FAILS TO ON, so on=true, invalid=true, and the invalid layer wins",
+  "record_spoken_notice (rule 11): resolves exactly like record_notice, independently of it; an invalid value fails to ON"
+ ],
+ "cases": [
+  {
+   "name": "all unset -> default off",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "empty env is unset",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env 1",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "1",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "true",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env ON mixed case + spaces",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "  On ",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env 0",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "0",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env off",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "off",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env FALSE",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "FALSE",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env yes is invalid -> fails closed",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "yes",
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "env",
+     "invalid": true
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env garbage fails closed over file true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "enabled",
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "env",
+     "invalid": true
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "file",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file false",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": false}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "file",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file key missing -> default",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"listen\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file string on is invalid -> closed",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": \"on\"}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "file",
+     "invalid": true
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file 1 is invalid -> closed",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": 1}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "file",
+     "invalid": true
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file null is invalid -> closed",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": null}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "file",
+     "invalid": true
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file invalid json -> not set",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": "invalid-json",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file top-level array -> not set",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "[true]"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "file unreadable -> not set",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": "unreadable",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env beats file (env off, file on)",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "0",
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "env beats file (env on, file off)",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": "1",
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": false}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "env",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "cli --record beats env 0",
+   "input": {
+    "cli": true,
+    "env_EARS_RECORD": "0",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "cli",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "cli --no-record beats env 1",
+   "input": {
+    "cli": false,
+    "env_EARS_RECORD": "1",
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "cli",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "cli --record beats invalid env",
+   "input": {
+    "cli": true,
+    "env_EARS_RECORD": "yes",
+    "env_EARS_RECORD_DAYS": null,
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "cli",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "cli beats file",
+   "input": {
+    "cli": true,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record\": false}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": true,
+     "source": "cli",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days env 30",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": "30",
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 30,
+     "source": "env",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days env 0 = never prune",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": "0",
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 0,
+     "source": "env",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days file 14",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record_days\": 14}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 14,
+     "source": "file",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days env beats file",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": "3",
+    "file": {
+     "raw": "{\"record_days\": 14}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 3,
+     "source": "env",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days env invalid skips to file",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": "-1",
+    "file": {
+     "raw": "{\"record_days\": 14}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 14,
+     "source": "file",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days env non-number skips to default",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": "week",
+    "file": "absent",
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days file bool invalid -> default",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record_days\": true}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days file negative invalid -> default",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record_days\": -2}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days file float invalid -> default",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "file": {
+     "raw": "{\"record_days\": 1.5}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "days empty env is unset",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": "",
+    "file": {
+     "raw": "{\"record_days\": 14}"
+    },
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 14,
+     "source": "file",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: default on",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "file": "absent",
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: empty env is unset",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": "",
+    "file": "absent",
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: env off",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": "off",
+    "file": "absent",
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: env 0 beats file true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": "0",
+    "file": {
+     "raw": "{\"record_notice\": true}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: env ON beats file false",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": " ON ",
+    "file": {
+     "raw": "{\"record_notice\": false}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "env",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: file off",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "file": {
+     "raw": "{\"record_notice\": false}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": false,
+     "source": "file",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: file true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "file": {
+     "raw": "{\"record_notice\": true}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "file",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: invalid env fails to ON over file false",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": "nope",
+    "file": {
+     "raw": "{\"record_notice\": false}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "env",
+     "invalid": true
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: invalid file fails to ON",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "file": {
+     "raw": "{\"record_notice\": \"off\"}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "file",
+     "invalid": true
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: invalid env and invalid file -> ON, env wins",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": "maybe",
+    "file": {
+     "raw": "{\"record_notice\": 0}"
+    },
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "env",
+     "invalid": true
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "notice: invalid json file -> default on",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "file": "invalid-json",
+    "env_EARS_RECORD_SPOKEN_NOTICE": null
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: default on",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null,
+    "file": "absent"
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: empty env is unset",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": "",
+    "file": "absent"
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: env off",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": "off",
+    "file": "absent"
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: env 0 beats file true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": "0",
+    "file": {
+     "raw": "{\"record_spoken_notice\": true}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: env ON beats file false",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": " ON ",
+    "file": {
+     "raw": "{\"record_spoken_notice\": false}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "env",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: file off",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null,
+    "file": {
+     "raw": "{\"record_spoken_notice\": false}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": false,
+     "source": "file",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: file true",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null,
+    "file": {
+     "raw": "{\"record_spoken_notice\": true}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "file",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: invalid env fails to ON over file false",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": "nope",
+    "file": {
+     "raw": "{\"record_spoken_notice\": false}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "env",
+     "invalid": true
+    }
+   }
+  },
+  {
+   "name": "spoken: invalid file fails to ON",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null,
+    "file": {
+     "raw": "{\"record_spoken_notice\": \"off\"}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "file",
+     "invalid": true
+    }
+   }
+  },
+  {
+   "name": "spoken: invalid env and invalid file -> ON, env wins",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": "maybe",
+    "file": {
+     "raw": "{\"record_spoken_notice\": 0}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "env",
+     "invalid": true
+    }
+   }
+  },
+  {
+   "name": "spoken: independent of notice (notice off, spoken on)",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null,
+    "file": {
+     "raw": "{\"record_notice\": false}"
+    }
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": false,
+     "source": "file",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: independent of notice (spoken off, notice on)",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": "0",
+    "file": "absent"
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": false,
+     "source": "env",
+     "invalid": false
+    }
+   }
+  },
+  {
+   "name": "spoken: invalid json file -> default on",
+   "input": {
+    "cli": null,
+    "env_EARS_RECORD": null,
+    "env_EARS_RECORD_DAYS": null,
+    "env_EARS_RECORD_NOTICE": null,
+    "env_EARS_RECORD_SPOKEN_NOTICE": null,
+    "file": "invalid-json"
+   },
+   "expect": {
+    "record": {
+     "on": false,
+     "source": "default",
+     "invalid": false
+    },
+    "record_days": {
+     "value": 7,
+     "source": "default",
+     "invalid": false
+    },
+    "record_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    },
+    "record_spoken_notice": {
+     "on": true,
+     "source": "default",
+     "invalid": false
+    }
+   }
+  }
+ ]
+}

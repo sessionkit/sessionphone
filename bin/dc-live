@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# dc-live [--id]  - am I on a call, and which one?
+#
+# Without it an agent cannot tell whether the call has finished, and a line
+# can go into the chat seconds after the call closed.
+#
+#   dc-live        the live call in English, exit 0; "no call is live", exit 1
+#   dc-live --id   just the call id, for `dc-say --call "$(dc-live --id)"`
+#
+# The id is the invite message's id. Chat 12 is the ROOM - long-lived and
+# reusable. msg 5531 is the CALL - minted per call. Same idea as SIP's
+# Call-ID (RFC 3261); Delta models a call as a message, so we get one free.
+#
+# It reads a file the bot writes on connect and removes on close, so it never
+# touches the account lock and is safe to run mid-call, in a loop, anywhere.
+#
+# Undelivered agent mail: when the bot holds mail it could not send
+# (DC_UNDELIVERED, <DC_ROOT>/undelivered), dc-live says how many are waiting
+# for a retry and how many are dead, on stderr, live call or not. --id never.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+IDONLY=""; [ "${1:-}" = "--id" ] && IDONLY=1
+# >>> undelivered
+if [ -z "$IDONLY" ]; then
+  # `|| true`: no spool yet (the usual case) or no dead/ makes find exit 1, and
+  # under set -e + pipefail that killed dc-live silently with 1 ("no call is live")
+  waiting=$({ find "$DC_UNDELIVERED" -maxdepth 1 -type f -name '*.json' 2>/dev/null || true; } | wc -l | tr -d ' ')
+  dead=$({ find "$DC_UNDELIVERED/dead" -maxdepth 1 -type f -name '*.json' 2>/dev/null || true; } | wc -l | tr -d ' ')
+  if [ "$waiting" != 0 ] || [ "$dead" != 0 ]; then
+    echo "dc-live: undelivered mail to the agent: $waiting waiting, $dead dead ($DC_UNDELIVERED)" >&2
+  fi
+fi
+# <<< undelivered
+# A live file with no bot behind it is a lie, not a call. Say which.
+if ! pgrep -f "$DC_BOT" >/dev/null 2>&1; then
+  [ -n "$IDONLY" ] || echo "dc-live: the bot is NOT RUNNING for $DC_ROOT - there is no call, and nothing can start one." >&2
+  exit 2
+fi
+if [ ! -f "$DC_LIVE" ]; then
+  [ -n "$IDONLY" ] || echo "no call is live"
+  exit 1
+fi
+python3 - "$DC_LIVE" "${IDONLY:-}" "$DC_CALLS_DIR" <<'PY'
+import json, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"dc-live: live file unreadable: {e}", file=sys.stderr); sys.exit(2)
+if sys.argv[2]:
+    print(d.get("call_id", "")); sys.exit(0)
+mins = (time.time() - d.get("since", time.time())) / 60
+print(f"call msg {d.get('call_id')} - chat {d.get('chat_id')} with {d.get('caller', '?')}, up {mins:.0f} min")
+print(f"  tape: {d.get('dir')}  (under {sys.argv[3]})")
+print(f"  say:  dc-say --call {d.get('call_id')} {d.get('chat_id')} 'your line'")
+PY

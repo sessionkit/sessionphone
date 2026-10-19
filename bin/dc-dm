@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# dc-dm [--profile public] NAME TEXT... - a direct message to a contact the bot
+# already knows (met in a group), by display name or address; the bot opens
+# the 1:1.
+# NAME may also be a channel NAME from the allow-list (channels.txt), and that
+# comes first. A channel that is chat:N for a GROUP posts INTO THE GROUP: it
+# is not a private message then. Whatever the chat, it must be listed: else
+# REFUSED, exit 3, nothing sent, even with DC_TAKEN_WAIT=0.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+[ $# -ge 2 ] || { echo "usage: dc-dm [--profile public] NAME TEXT...  (NAME: a contact, or a channel name - a group channel posts into the group)" >&2; exit 1; }
+WHO="$1"; shift
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck contact "$WHO" "" "$PROFILE" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,sys;print(json.dumps({"dm":sys.argv[1],"text":" ".join(sys.argv[2:])}))' "$WHO" "$@")"
+echo "dc-dm: $DC_DONE${PROFILE:+ on profile $PROFILE}"

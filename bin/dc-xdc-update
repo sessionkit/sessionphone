@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# dc-xdc-update [--profile public] MSG_ID PAYLOAD_JSON [INFO...] - push a status
+# update into a webxdc mini-app the bot sent earlier (MSG_ID is in the bot
+# log: "SENT FILE ... msg N"). Everyone with it open sees it live; it replays
+# on reopen. INFO shows as an info line in the chat: leave it off for bulk.
+# DC_XDC_SUMMARY: short text shown beside the app icon in the chat (the
+# webxdc spec's "summary"), so the app's state shows without opening it.
+# Unset or empty: the job carries no summary, as before.
+# Gated on the chat the message is in: with no usable allow-list
+# (channels.txt) it is REFUSED here, exit 3; else the bot decides, and the tool
+# waits for its answer even with DC_TAKEN_WAIT=0, so a refusal exits 3.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+[ $# -ge 2 ] || { echo "usage: dc-xdc-update [--profile public] MSG_ID PAYLOAD_JSON [INFO...]" >&2; exit 1; }
+MSG="$1"; PAYLOAD="$2"; shift 2
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck msg "$MSG" "" "$PROFILE" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,os,sys;j={"webxdc_update":int(sys.argv[1]),"payload":json.loads(sys.argv[2])};i=" ".join(sys.argv[3:]);j.update({"info":i} if i else {});sm=os.environ.get("DC_XDC_SUMMARY","");j.update({"summary":sm} if sm else {});print(json.dumps(j))' "$MSG" "$PAYLOAD" "$@")"
+echo "dc-xdc-update: $DC_DONE${PROFILE:+ on profile $PROFILE}"

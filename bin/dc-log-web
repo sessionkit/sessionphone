@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""dc-log-web - render the Delta call log to a phone-readable page, on a loop.
+
+To watch a call in real time on a laptop, run `dc-log -f`. This is the phone
+answer: the same view, written to a page a phone can load, newest at the TOP so
+the reader never scrolls.
+
+  dc-log-web            loop forever, 2s
+  dc-log-web --once     write once, print the page's path and exit
+  dc-log-web -h         this help; writes nothing
+
+The page is DC_WEB_OUT, else <root>/calllog.html, beside the bot's log; the
+root is DC_ROOT, else SESSIONPHONE_ROOT, else ~/.sessionphone (dc-env's
+contract). Serve that file, or point DC_WEB_OUT into what you serve.
+DC_WEB_LINES: how many log lines to render (default 120).
+"""
+import argparse, html, importlib.util, os, subprocess, sys, time
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+DCLOG = Path(__file__).resolve().with_name("dc-log")   # the one beside this tool
+
+
+def out_path():
+    """DC_WEB_OUT (empty counts as unset), else <root>/calllog.html, with the
+    root resolved by dc-log's own root(): one resolver for both tools."""
+    v = os.environ.get("DC_WEB_OUT")
+    if v:
+        return Path(v).expanduser()
+    loader = SourceFileLoader("dc_log", str(DCLOG))   # no .py suffix, so name the loader
+    dclog = importlib.util.module_from_spec(importlib.util.spec_from_loader("dc_log", loader))
+    sys.dont_write_bytecode = True      # never leave a bin/__pycache__ behind
+    loader.exec_module(dclog)
+    return dclog.root() / "calllog.html"
+
+
+N = int(os.environ.get("DC_WEB_LINES", "120"))
+
+CSS = """
+:root{color-scheme:dark}
+body{background:#11131a;color:#d8dee9;font:14px/1.5 ui-monospace,Menlo,monospace;
+     margin:0;padding:12px 10px 40px}
+h1{font:600 15px/1.3 ui-sans-serif,system-ui;margin:0 0 2px;color:#eceff4}
+.sub{color:#7b8496;font:12px/1.4 ui-sans-serif,system-ui;margin:0 0 12px}
+.row{padding:5px 8px;border-radius:6px;margin:3px 0;white-space:pre-wrap;
+     word-break:break-word;overflow-wrap:anywhere}
+.him{background:#16202b;border-left:3px solid #5aa9d6}
+.turn{background:#16202b;border-left:3px solid #5aa9d6;font-weight:600}
+.me{background:#17231a;border-left:3px solid #6fbf73}
+.late{background:#2a1618;border-left:3px solid #d66a6a;color:#f0b0b0}
+.mark{background:#241f14;border-left:3px solid #d6b45a;color:#e8d5a8}
+.text{color:#7b8496;border-left:3px solid #2c313c}
+.t{color:#5c6472}
+"""
+
+
+def classify(line):
+    if "! LATE" in line: return "late"
+    if "TURN >" in line: return "turn"
+    if "HIM  >" in line: return "him"
+    if "< ME" in line:   return "me"
+    if "== " in line:    return "mark"
+    return "text"
+
+
+def build():
+    try:
+        raw = subprocess.run([str(DCLOG), "-n", str(N)], capture_output=True,
+                             text=True, timeout=20).stdout.splitlines()
+    except Exception as e:
+        raw = [f"dc-log-web: could not read the log: {e}"]
+    rows = []
+    for line in reversed(raw):          # newest first: a phone should not scroll
+        if not line.strip():
+            continue
+        cls = classify(line)
+        ts, rest = (line[:8], line[8:]) if line[:2].isdigit() else ("", line)
+        rows.append(f'<div class="row {cls}"><span class="t">{html.escape(ts)}</span>'
+                    f'{html.escape(rest)}</div>')
+    now = time.strftime("%H:%M:%S")
+    return (f'<!doctype html><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta http-equiv="refresh" content="3">'
+            f'<title>call log</title><style>{CSS}</style>'
+            f'<h1>Delta call, both ways</h1>'
+            f'<p class="sub">newest first &middot; refreshed {now} &middot; '
+            f'blue is him, green is me, red arrived late</p>'
+            + "\n".join(rows))
+
+
+def main(argv=None):
+    # parse BEFORE anything touches the disk: --help, or a typo, writes nothing
+    ap = argparse.ArgumentParser(prog="dc-log-web", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--once", action="store_true", help="write the page once and exit")
+    args = ap.parse_args(argv)
+    out = out_path()
+    if os.environ.get("DC_WEB_OUT"):
+        out.parent.mkdir(parents=True, exist_ok=True)
+    else:   # the default dir IS the bot's root: it holds the keys, so 0700 (paths.ensure_private)
+        out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    while True:
+        tmp = out.with_suffix(".tmp")
+        tmp.write_text(build(), encoding="utf-8")
+        tmp.replace(out)                # atomic: the phone never sees half a page
+        if args.once:
+            print(out)
+            return 0
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

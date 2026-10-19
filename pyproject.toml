@@ -1,0 +1,86 @@
+[project]
+name = "sessionphone"
+version = "0.2.0"
+description = "Ring your Claude Code session from your phone over Delta Chat"
+readme = "README.md"
+authors = [
+    { name = "Mike Bailey", email = "mike@sessionkit.ai" }
+]
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.15"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "click>=8.1",
+    # the agent's Delta Chat account; the server binary ships in the wheel
+    "deltachat-rpc-client>=2.61.0",
+    "deltachat-rpc-server>=2.61.0",
+    "segno>=1.6.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/sessionkit/sessionphone"
+Repository = "https://github.com/sessionkit/sessionphone"
+
+[project.optional-dependencies]
+# The media pack: the bot, calls and `sessionphone web` need it;
+# setup, qr and link do not, so their first run can leave it out (52.5 MB of
+# wheels becomes 10.0 MB on an arm64 Mac). Install with `sessionphone[media]`.
+media = [
+    # the WebRTC stack calls run on
+    "aiortc==1.15.0",
+    "aioice==0.10.2",
+    "av==17.1.0",
+    "numpy>=2",
+    # `sessionphone web`: one asyncio server for the page and its
+    # WebSocket; the passkey checks verify with cryptography directly (no CBOR)
+    "websockets>=16,<17",
+    "cryptography>=42",
+]
+
+# NO `ears` extra (not decided yet). Ears is ours on PyPI as `sessionvoice`
+# (first published 2030-06-09). Never declare the PyPI `ears`: it is someone else's
+# package (0.2.10: flask, google-cloud-pubsub). The bot hears a call through the
+# STT at DC_STT_URL, not through ears.
+
+[project.scripts]
+sessionphone = "sessionphone.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.9,<0.12.0"]
+build-backend = "uv_build"
+
+# The dc-* tools a wheel install needs on its PATH. They are bash
+# and source their sibling dc-env, so they cannot be [project.scripts] (those
+# name a Python callable). They ship as wheel scripts instead: the installer
+# copies them, as they are, into the env's bin/ (and `uv tool install` links
+# them into ~/.local/bin), side by side with dc-env. wheel-bin/ is the
+# ALLOW-LIST: one relative symlink into bin/ per tool, so a wheel ships bin/'s
+# own bytes and a new bin/ tool joins it only by a link someone adds.
+# tests/test_wheel_dc_tools.py holds the shipped set exact.
+[tool.uv.build-backend]
+data = { scripts = "wheel-bin" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    # developers keep the whole stack: `uv sync`, `make test` and
+    # bin/bridge-check get the media pack too
+    "sessionphone[media]",
+]
+
+[tool.ruff]
+# The bridge and its script-tests were written under no linter
+# (158 findings when first measured). bin/bridge-check gates them instead:
+# compile, import, and every bridge test.
+extend-exclude = ["src/sessionphone/bridge", "tests/bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# tests/bridge/ are mostly script-style (asserts at module level); bin/bridge-check
+# runs them, and runs the pytest-style ones (test_callers.py) under pytest
+addopts = "--ignore=tests/bridge"

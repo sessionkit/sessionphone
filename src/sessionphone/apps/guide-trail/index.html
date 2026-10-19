@@ -1,0 +1,95 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Guide Trail</title>
+<!-- webxdc.js is provided by the messenger at run time; it is not shipped in the .xdc -->
+<script src="webxdc.js"></script>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden}
+#t{position:absolute;left:6vw;top:4vh;font:700 22px "Helvetica Neue",Arial,sans-serif;color:#2F6BFF;letter-spacing:.08em;text-shadow:0 0 8px #2F6BFF}
+#log{position:absolute;left:6vw;right:6vw;bottom:6vh;top:14vh;display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden;
+ font:600 clamp(16px,3.2vw,30px)/1.45 "Helvetica Neue",Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase}
+.user{color:#2F6BFF;text-shadow:0 0 6px rgba(47,107,255,.7)}
+.agent{color:#F2D40F;text-shadow:0 0 6px rgba(242,212,15,.7)}
+.who{opacity:.5;margin-right:.6em}
+.cur{color:#fff;text-shadow:0 0 8px #fff;animation:b 1s steps(1) infinite}@keyframes b{50%{opacity:0}}
+#st{position:absolute;right:3vw;top:4vh;font:12px Arial;color:#446}
+</style></head><body>
+<div id="t">GUIDE TRAIL</div><div id="st">starting</div><div id="log"></div>
+<script>
+// Guide Trail: the words of a conversation, as they are spoken.
+//
+// Payloads (realtime data, or a status update's payload):
+//   {"partial": TEXT}                 a chunk of what the user is saying now
+//   {"final": TEXT}                   the user's finished turn: replaces the live line
+//   {"lines": [{"who": ROLE, "name": LABEL, "text": TEXT}, ...]}
+// ROLE is "user" or "agent". LABEL is shown beside the line; without one the
+// role is shown in upper case. Any other "who" (an older sender's name) is
+// drawn as a user line and labelled with what it says.
+//
+// Every string from a payload reaches the page through textContent only.
+// Nothing here parses a string as markup, and no payload is placed in markup.
+const MAX_LINES = 40;
+const log = document.getElementById('log'), st = document.getElementById('st');
+const q = []; let busy = false;
+let live = null;     // the live row: partials append to it, a final closes it
+
+function str(v) { return v === undefined || v === null ? '' : String(v); }
+function role(who) { return who === 'agent' ? 'agent' : 'user'; }
+function label(who, name) {
+  const n = str(name).trim();
+  if (n) return n.toUpperCase();
+  const w = str(who).trim();
+  return (w || 'user').toUpperCase();
+}
+function row(who, name) {
+  const d = document.createElement('div'); d.className = role(who);
+  const w = document.createElement('span'); w.className = 'who'; w.textContent = label(who, name);
+  const s = document.createElement('span');
+  const c = document.createElement('span'); c.className = 'cur'; c.textContent = '█';
+  d.append(w, s, c); log.append(d);
+  while (log.children.length > MAX_LINES) { if (live && live.d === log.firstChild) live = null; log.firstChild.remove(); }
+  return {d, s, c};
+}
+function show(who, name, text) { q.push([who, name, text]); if (!busy) next(); }
+function next() {
+  const it = q.shift(); if (!it) { busy = false; return; } busy = true;
+  const [who, name, text] = it;
+  const L = row(who, name);
+  let i = 0; const step = Math.max(10, Math.min(35, 1500 / text.length));
+  (function tick() {
+    L.s.textContent = text.slice(0, ++i);
+    if (i < text.length) setTimeout(tick, q.length > 2 ? 3 : step); else { L.c.remove(); next(); }
+  })();
+}
+function liveLine(name) {
+  if (!live) live = row('user', name);
+  return live;
+}
+function take(p) {
+  if (!p || typeof p !== 'object') return;
+  if (p.partial !== undefined) {
+    const t = str(p.partial).trim(); if (!t) return;
+    const L = liveLine(p.name); L.s.textContent = (L.s.textContent + ' ' + t).trim(); return;
+  }
+  if (p.final !== undefined) {
+    const t = str(p.final).trim(); if (!t) return;
+    const L = liveLine(p.name); L.s.textContent = t; L.c.remove(); live = null; return;
+  }
+  const lines = Array.isArray(p.lines) ? p.lines : [p];
+  lines.forEach(l => {
+    if (!l || typeof l !== 'object') return;
+    const t = str(l.text).trim(); if (!t) return;
+    show(str(l.who), l.name, t);
+  });
+}
+
+let n = 0;
+window.webxdc.setUpdateListener(u => { take(u.payload); }, 0);
+try {
+  const rt = window.webxdc.joinRealtimeChannel();
+  rt.setListener(b => {
+    try { take(JSON.parse(new TextDecoder().decode(b))); st.textContent = 'realtime ' + (++n); } catch (e) {}
+  });
+  st.textContent = 'realtime joined';
+} catch (e) { st.textContent = 'no realtime: ' + e; }
+</script></body></html>

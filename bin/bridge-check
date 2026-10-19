@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# bridge-check [-h] - the gate before any commit to the bridge: nothing lands that
+# does not compile, import under a bare install's environment, and pass the
+# bridge tests. Exit non-zero = do not commit.
+# `make check` is ruff + pytest on the package; this is the bridge, whose
+# script-style tests pytest does not collect.
+# It also reports the bot's undelivered agent mail: how many wait
+# for a retry and how many are dead, in DC_UNDELIVERED as dc-env names it. That
+# line is information about the running bot, not the code: it never fails the gate.
+# Its scratch root is short, under /tmp, whatever TMPDIR says, and
+# is removed on exit, pass or fail.
+
+case "${1:-}" in -h|--help) sed -n "2,/^$/p" "$0" | sed "s/^# \{0,1\}//"; exit 0;; esac
+set -uo pipefail
+cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." || exit 2
+PY=.venv/bin/python; rc=0
+[ -x "$PY" ] || { echo "bridge-check: no $PY - run \`uv sync\` first"; exit 2; }
+# A SHORT scratch root under /tmp, whatever TMPDIR says. The call legs'
+# tests bind unix sockets under tempfile.mkdtemp(), that is under TMPDIR, and macOS
+# caps a socket path (sun_path) at 104 bytes: a long TMPDIR (a Claude Code
+# scratchpad) failed 23 tests as if the code had regressed. The tests get
+# TMPDIR=$S/tmp, so whatever they leave there goes with $S, pass or fail.
+S=$(mktemp -d /tmp/dcc.XXXXXX) || { echo "bridge-check: cannot make a scratch dir under /tmp"; exit 2; }
+trap 'rm -rf "$S"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM HUP
+mkdir "$S/tmp" && export TMPDIR="$S/tmp" || exit 2
+long=0                                   # a test hit the socket-path limit
+step(){ printf '  %-46s' "$1"; }
+step "compile src/sessionphone/bridge"
+if $PY -m py_compile src/sessionphone/bridge/*.py; then echo ok; else echo FAIL; rc=1; fi
+# No pipeline here: under pipefail `python | tail | grep` is non-zero whenever
+# python fails, so `|| echo ok` fired on failure too. Capture, then judge rc.
+# A bare install: no DC_AGENT, no CLAUDE_CODE_AGENT, a fresh root.
+step "import, bare environment"
+if out=$(env -u DC_AGENT -u CLAUDE_CODE_AGENT -u DC_EARS_SRC DC_ROOT="$S/bare" DC_CALLS=off \
+         $PY -c "import sessionphone.bridge.bot, sessionphone.bridge.calls, sessionphone.bridge.dc_env" 2>&1)
+then echo ok; else echo "FAIL: $(printf '%s\n' "$out" | tail -1)"; rc=1; fi
+step "undelivered mail (the bot's spool)"
+und=$(. bin/dc-env && printf %s "$DC_UNDELIVERED")     # a subshell: no DC_* leaks into the tests
+waiting=$(find "$und" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+dead=$(find "$und/dead" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+echo "$waiting waiting, $dead dead ($und)"
+for t in tests/bridge/test_*.py; do [ -e "$t" ] || continue; step "$t"
+  # pytest-style files (fixtures, no module-level asserts) run under pytest;
+  # run as a script they would define their tests and pass without running one
+  if grep -q '^import pytest' "$t"; then run=("$PY" -m pytest -q -p no:cacheprovider "$t"); else run=("$PY" "$t"); fi
+  if DC_ROOT=$S/t "${run[@]}" >"$S/$(basename "$t").log" 2>&1; then echo ok
+  elif grep -q 'AF_UNIX path too long' "$S/$(basename "$t").log"; then long=1; rc=1
+    echo "FAIL: a unix socket path is over the 104-byte limit"
+  else echo "FAIL (see $S/$(basename "$t").log)"; tail -3 "$S/$(basename "$t").log"; rc=1; fi; done
+# Said in words: an over-long socket path is the scratch path's fault, not the code's.
+[ $long -eq 1 ] && echo "bridge-check: a test bound a unix socket on a path over macOS's 104-byte
+  limit (sun_path). That is a path too long for this machine, not a code regression:
+  its scratch root was $S. Find the test's socket path and shorten it."
+[ $rc -eq 0 ] && echo "bridge-check: ALL GREEN" || echo "bridge-check: RED - do not commit"; exit $rc

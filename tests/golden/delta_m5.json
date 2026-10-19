@@ -1,0 +1,34 @@
+{
+ "root": {
+  "argv": [
+   "-f",
+   "ada-chat@example.net",
+   "-t"
+  ],
+  "raw": "From: Ada's Delta Chat bridge <ada-chat@example.net>\nTo: ada@example.net\nSubject: [Team 12] RINGING Bob\nX-Delta-Chat-Bridge: 1\nX-Delta-Chat-Id: 12\nX-Delta-Chat-Kind: call\nReply-To: ada-chat@example.net\nMessage-ID: <call-12-1918203190@example.net>\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\nRINGING\n\n---\nchat: Team (id 12)\nfrom: call\n\nTo answer on the call:\n  Answer with: mouth say --device call:4242 \"text\"\n  If the mouth fails: dc-say --call 4242 12 'text'\n"
+ },
+ "turn": {
+  "argv": [
+   "-f",
+   "ada-chat@example.net",
+   "-t"
+  ],
+  "raw": "From: Ada's Delta Chat bridge <ada-chat@example.net>\nTo: ada@example.net\nSubject: [Team 12] Bob: push the branch now, then ring me\nX-Delta-Chat-Bridge: 1\nX-Delta-Chat-Id: 12\nX-Delta-Chat-Kind: call\nReply-To: ada-chat@example.net\nCc: guest@relay.example, bob@relay.example\nMessage-ID: <call-turn-12-1918203200000@example.net>\nIn-Reply-To: <call-12-1918203190@example.net>\nReferences: <call-12-1918203190@example.net>\nSupersedes: <prev-12-1@example.net>\nMedium: voice\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\n(on the call) push the branch now, then ring me\n\n---\nchat: Team (id 12)\nfrom: Bob\n\nTo answer on the call:\n  Answer with: mouth say --device call:4242 \"text\"\n  If the mouth fails: dc-say --call 4242 12 'text'\n"
+ },
+ "turn-long": {
+  "argv": [
+   "-f",
+   "ada-chat@example.net",
+   "-t"
+  ],
+  "raw": "From: Ada's Delta Chat bridge <ada-chat@example.net>\nTo: ada@example.net\nSubject: [Team 12] Bob: ?a va? run 'make test' and $ (echo hi) then\nX-Delta-Chat-Bridge: 1\nX-Delta-Chat-Id: 12\nX-Delta-Chat-Kind: call\nReply-To: ada-chat@example.net\nMessage-ID: <call-turn-12-1918203200002@example.net>\nIn-Reply-To: <call-12-1918203190@example.net>\nReferences: <call-12-1918203190@example.net>\nMedium: voice\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\n(on the call) Ça va? run `make test` and $(echo hi)\nthen xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n---\nchat: Team (id 12)\nfrom: Bob\n\nTo answer on the call:\n  Answer with: mouth say --device call:4242 \"text\"\n  If the mouth fails: dc-say --call 4242 12 'text'\n"
+ },
+ "turn-profile": {
+  "argv": [
+   "-f",
+   "ada-chat@example.net",
+   "-t"
+  ],
+  "raw": "From: Ada's Delta Chat bridge <ada-chat@example.net>\nTo: ada@example.net\nSubject: [public Family group c 43] Bob: yes\nX-Delta-Chat-Bridge: 1\nX-Delta-Chat-Id: 43\nX-Delta-Chat-Profile: public\nX-Delta-Chat-Kind: call\nReply-To: ada-chat@example.net\nMessage-ID: <call-turn-p-43-1918203200001@example.net>\nIn-Reply-To: <call-p-43-1918203190@example.net>\nReferences: <call-p-43-1918203190@example.net>\nMedium: voice\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\n(on the call) yes\n\n---\nchat: Family group chat (id 43)\nfrom: Bob\n\nTo answer on the call:\n  Answer with: mouth say --device call:77 \"text\"\n  If the mouth fails: DC_OUTBOX=/srv/sp/public/outbox dc-say --call 77 43 'text'\n"
+ }
+}

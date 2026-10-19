@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# dc-hangup [--profile public] CHAT - end this agent's live call in a chat.
+# CHAT is a chat number or a channel NAME (channels.txt). Ending a call sends
+# no words, so a number needs no list; a NAME must be on it, or exit 3.
+# Exit: 0 ended; by chat NUMBER also 0 when the bot took it and wrote no ack
+# (NOT CONFIRMED, a warning on stderr) or, under DC_TAKEN_WAIT=0, when it was
+# not waited for. 3 refused or no bot took it. 4 by NAME only: NOT CONFIRMED,
+# the bot took it and wrote no ack. 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+[ $# -eq 1 ] || { echo "usage: dc-hangup [--profile public] CHAT  (CHAT: a chat number or a channel name)" >&2; exit 1; }
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+# never $1 pasted into JSON: dc_precheck builds the field, JSON-quoted
+dc_precheck end "$1" hangup "$PROFILE" || exit $?
+dc_job "$OUT" "$DC_DEST"
+echo "dc-hangup: $DC_DONE${PROFILE:+ on profile $PROFILE}"

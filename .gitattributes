@@ -1,0 +1,14 @@
+# Release archives (`git archive`, the GitHub tarball) leave these out. They stay
+# in the tree and in history; only the shipped archive drops them.
+# CLAUDE.md is agent context for this checkout, not for a plugin user.
+# .claude-plugin/ sits at the repo root, so this is also the plugin root, and
+# `claude plugin validate --strict` fails on a CLAUDE.md there.
+/CLAUDE.md export-ignore
+# design/ holds the maintainers' internal notes: rulings, crew process, task
+# IDs, and a quote from a private chat. It stays in the tree and in history
+# for whoever works on sessionphone; shipped docs state their rules inline
+# instead of pointing into it. Both lines are needed: `/design/` drops the
+# directory (without it the archive keeps an empty `design/` entry), and
+# `/design/**` marks each file, which `git check-attr` reports per path.
+/design/ export-ignore
+/design/** export-ignore

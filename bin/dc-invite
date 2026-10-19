@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# dc-invite CHAT ADDRESS - add a guest to the LIVE call in that chat.
+# The guest is mailed the call root and hears every turn from then on; they
+# talk by mailing the bridge threaded to that root. Standing guests (every call,
+# no invite needed) live in $DC_ROOT/call-guests.txt.
+# A guest is opt-in: invited here, or listed as a standing guest.
+# CHAT is a chat number or a channel NAME from the owner's allow-list
+# (channels.txt). A chat that is not listed is REFUSED: exit 3, the list's
+# path on stderr, nothing sent, even with DC_TAKEN_WAIT=0.
+# The guest's ADDRESS gets mail, which the list does not govern.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+[ $# -eq 2 ] || { echo "usage: dc-invite CHAT ADDRESS  (CHAT: a chat number or a channel name)" >&2; exit 1; }
+OUT="$(dc_outbox "")"
+dc_precheck chat "$1" chat_id "" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,sys;j={"invite":sys.argv[2]};j.update(json.loads(sys.argv[1]));print(json.dumps(j))' "$DC_DEST" "$2")"
+echo "dc-invite: $DC_DONE"

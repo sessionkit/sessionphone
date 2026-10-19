@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# dc-delete [--profile public] MSG_ID [MSG_ID...] - delete for everyone a
+# message this bot sent: deleted here, and every member of its chat is asked
+# to delete it. MSG_ID is the `msg M` its send printed (dc-say,
+# dc-dm, dc-send-file; an older send's id is in its ack under DC_ACKS).
+# Several ids must all be in one chat. Every id is checked before anything is
+# sent, and one bad id refuses the whole call: never a partial delete. The bot
+# refuses, exit 3, nothing sent: an id with no message, a message this account
+# did not send, an info message, ids in more than one chat, a chat the
+# allow-list (channels.txt) does not permit. Core's own refusal is exit 3 too,
+# its text verbatim: what core did before it refused is core's to say, and it
+# is not measured.
+# "Asked": a member's app may already have shown it; this cannot unsend what
+# was read.
+# Exit: 0 the bot's ack says it went; 3 the bot refused or no bot took it,
+# nothing sent, or core refused (only its words say what it did); 4 NOT
+# CONFIRMED - the bot took it and wrote no ack, so it may not have gone (its
+# log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+usage() { echo "usage: dc-delete [--profile public] MSG_ID [MSG_ID...]" >&2; exit 1; }
+[ $# -ge 1 ] || usage
+for m in "$@"; do
+  case "$m" in
+    ''|*[!0-9]*) echo "dc-delete: '$m' is not a message id (a positive integer)" >&2; usage ;;
+  esac
+  # core's ids are uint32; ten digits at most, so bash's arithmetic never wraps
+  { [ "${#m}" -le 10 ] && [ "$((10#$m))" -gt 0 ] && [ "$((10#$m))" -le 4294967295 ]; } ||
+    { echo "dc-delete: '$m' is not a message id (a positive integer)" >&2; usage; }
+done
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck msg "$1" "" "$PROFILE" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,sys;print(json.dumps({"delete":[int(a) for a in sys.argv[1:]]}))' "$@")"
+echo "dc-delete: $DC_DONE${PROFILE:+ on profile $PROFILE}"

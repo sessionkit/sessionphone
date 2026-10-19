@@ -1,0 +1,4 @@
+{
+  "MD024": { "siblings_only": true },
+  "_MD024": "CHANGELOG.md is Keep a Changelog: every version carries its own Added/Fixed headings. siblings_only flags a repeat only under the same parent heading. Merged over the global ~/.config/markdownlint/config by markdownlint-cli."
+}

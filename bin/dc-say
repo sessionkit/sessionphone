@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# dc-say [--profile public] [--html FILE] [--voice NAME] [--who NAME] [--call ID] CHAT "text"
+#   - say something in a Delta Chat chat; a live call in that chat hears it.
+# CHAT is a chat number or a channel NAME from the owner's allow-list
+#   (channels.txt: `owner`, `family`). A chat that is not listed is REFUSED,
+#   exit 3, the list's path on stderr, and nothing is sent - even with
+#   DC_TAKEN_WAIT=0, which a send never honours.
+# --profile public: the chat is on this agent's PUBLIC chatmail profile.
+# --html FILE: the formatted version, shown by the app's "Show Full Message";
+#   the text is the preview.
+# --voice NAME: kokoro id (af_sky) or a clone dir under ~/.voicemode/voices.
+# --who NAME: a proxied speaker - the chat text carries the name, the call
+#   the voice.
+# --call ID: I mean THIS CALL. The id is the invite message's id - chat 12 is
+#   the room, msg 5531 is the call (`dc-live`, or "closing msg N" in dc-log).
+#   If that call is not live, dc-say REFUSES and exits 3: the text is not sent
+#   either, so a line never lands in the chat after the hang-up.
+#   Without --call the old behaviour stands: a chat message, spoken if a call
+#   happens to be live. Use --call for anything you are SAYING to someone.
+# Drops a job for the running bot, which holds the account lock. One tool for
+# every agent.
+# Exit: 0 sent, the bot's ack says so (--call: 4 also when the bot gives no
+# yes or no in 8 s); 3 refused or no bot took it, nothing sent; 4 NOT
+# CONFIRMED - the bot took it and wrote no ack, so it may not have gone (its
+# log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+HTML=""; VOICE=""; WHO=""; CALL=""; PROFILE=""
+while true; do
+  case "${1:-}" in
+    --profile) [ $# -ge 2 ] || { echo "dc-say: --profile needs a NAME" >&2; exit 1; }; PROFILE="$2"; shift 2 ;;
+    --html)
+      [ $# -ge 2 ] || { echo "dc-say: --html needs a FILE" >&2; exit 1; }
+      HTML="$2"; shift 2
+      [ -s "$HTML" ] || { echo "dc-say: html file missing or empty: $HTML" >&2; exit 1; } ;;
+    --voice) [ $# -ge 2 ] || { echo "dc-say: --voice needs a NAME" >&2; exit 1; }; VOICE="$2"; shift 2 ;;
+    --who)   [ $# -ge 2 ] || { echo "dc-say: --who needs a NAME" >&2; exit 1; }; WHO="$2"; shift 2 ;;
+    --call)
+      [ $# -ge 2 ] || { echo "dc-say: --call needs a CALL ID (see dc-live)" >&2; exit 1; }
+      CALL="$2"; shift 2
+      case "$CALL" in ''|*[!0-9]*) echo "dc-say: --call takes a number, got '$CALL'" >&2; exit 1 ;; esac ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || { echo "usage: dc-say [--profile public] [--html FILE] [--voice N] [--who N] [--call ID] CHAT TEXT...  (CHAT: a chat number or a channel name)" >&2; exit 1; }
+CHAT="$1"; shift
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+# refuse-only, before anything is queued; sets DC_DEST
+dc_precheck chat "$CHAT" chat_id "$PROFILE" || exit $?
+mkdir -p "$OUT"
+
+# Every line gets an ack: the bot's ok-or-not, in its own dir, never the
+# outbox (the bot globs *.json there), and NEVER deleted - a free audit trail.
+mkdir -p "$DC_ACKS"
+ACK="$DC_ACKS/$(date +%Y%m%d-%H%M%S)-say-$$.json"
+if [ -n "$CALL" ]; then
+  # The cheap check first: the bot writes the live call to disk, so we can
+  # refuse here without the account lock and without queueing a word.
+  if [ ! -f "$DC_LIVE" ]; then
+    echo "dc-say: REFUSED - no call is live. Nothing was sent." >&2
+    exit 3
+  fi
+  HAVE=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("call_id",""))
+except Exception: print("")' "$DC_LIVE")
+  if [ "$HAVE" != "$CALL" ]; then
+    echo "dc-say: REFUSED - call $CALL is over; the live call is msg ${HAVE:-none}. Nothing was sent." >&2
+    exit 3
+  fi
+  ACK="$DC_ACKS/$(date +%Y%m%d-%H%M%S)-call$CALL-$$.json"
+fi
+
+# Build the job, check it against the keys the running bot reads (dc_shape:
+# a bot from before the allow-list crashed on `dc-say NAME`), and only then
+# write it. A refusal exits 3, "restart the bot", and nothing is queued.
+JSON=$(python3 -c 'import json,sys
+dest,h,voice,who,call,ack = sys.argv[1:7]
+job=json.loads(dest); job["text"]=" ".join(sys.argv[7:])
+if h: job["html"]=open(h,encoding="utf-8").read()
+if voice: job["voice"]=voice
+if who: job["who"]=who
+if call: job["call_id"]=int(call)
+if ack: job["ack"]=ack
+print(json.dumps(job))' "$DC_DEST" "$HTML" "$VOICE" "$WHO" "$CALL" "$ACK" "$@")
+dc_shape "$OUT" "$JSON" || exit $?
+JOB=$(python3 -c 'import os,sys,time
+d,job = sys.argv[1:3]
+p=os.path.join(d,"%.6f.json"%time.time())
+open(p+".part","w").write(job)
+os.replace(p+".part",p)
+print(p)' "$OUT" "$JSON")
+
+if [ -z "$CALL" ]; then
+  dc_taken "$JOB" || exit 3
+  dc_ack "$ACK" || exit $?      # 3 refused, 4 NOT CONFIRMED (gated, no ack)
+  echo "dc-say: $DC_DONE${HTML:+ +html}${VOICE:+ as $VOICE}${WHO:+ who=$WHO}${PROFILE:+ on profile $PROFILE}"
+  exit 0
+fi
+# --call means we wait for the bot's yes or no. The outbox loop sleeps 1 s
+# between passes, so 8 s is generous; a timeout is reported as a timeout and
+# never as success.
+for _ in $(seq 1 80); do
+  if [ -f "$ACK" ]; then
+    OK=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("1" if d.get("ok") else "0"); print(d.get("detail",""))' "$ACK")
+    DETAIL=$(printf '%s\n' "$OK" | tail -1)
+    if [ "$(printf '%s\n' "$OK" | head -1)" = "1" ]; then
+      echo "dc-say: call $CALL, $DETAIL${VOICE:+ as $VOICE}${WHO:+ who=$WHO}"
+      exit 0
+    fi
+    echo "dc-say: NOT SENT - $DETAIL" >&2
+    exit 3
+  fi
+  sleep 0.1
+done
+echo "dc-say: NO ANSWER from the bot in 8 s - is it running? Job left at $JOB" >&2
+exit 4

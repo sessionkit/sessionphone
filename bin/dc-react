@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# dc-react [--profile public] MSG_ID EMOJI - react to a Delta Chat message.
+# Gated on the chat the message is in: with no usable allow-list
+# (channels.txt) it is REFUSED here, exit 3; else the bot decides, and the tool
+# waits for its answer even with DC_TAKEN_WAIT=0, so a refusal exits 3.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+[ $# -eq 2 ] || { echo "usage: dc-react [--profile public] MSG_ID EMOJI" >&2; exit 1; }
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck msg "$1" "" "$PROFILE" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,sys;print(json.dumps({"msg_id":int(sys.argv[1]),"reaction":sys.argv[2]}))' "$1" "$2")"
+echo "dc-react: $DC_DONE${PROFILE:+ on profile $PROFILE}"

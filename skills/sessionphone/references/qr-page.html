@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect to {{AGENT_NAME}} on Delta Chat</title>
+<style>
+  body { font: 18px/1.5 -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1.5rem; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  .qr { display: block; width: min(80vw, 22rem); height: auto; margin: 1.5rem auto; }
+  .qr svg { width: 100%; height: auto; }
+  ol { padding-left: 1.4rem; }
+  li { margin: .5rem 0; }
+  code { font-size: .9em; background: #f3f3f3; padding: .1em .35em; border-radius: 4px; }
+  .link { word-break: break-all; font-size: .8rem; color: #555; margin-top: 2rem; }
+  @media (prefers-color-scheme: dark) { body { color: #eee; background: #111; } code { background: #222; } .link { color: #999; } }
+</style>
+</head>
+<body>
+<h1>Connect to {{AGENT_NAME}}</h1>
+<p>Scan this with Delta Chat on your phone. It opens a private, end-to-end encrypted chat with your assistant.</p>
+<div class="qr">{{QR_SVG}}</div>
+<ol>
+  <li>Install <strong>Delta Chat</strong> from the App Store (free).</li>
+  <li>Open it and tap <strong>Create new profile</strong> - a name is enough; it makes an account for you.</li>
+  <li>Tap the <strong>QR icon</strong> (top right) and point it at this page.</li>
+  <li>Wait a moment: {{AGENT_NAME}} says when you are linked, then it can ring you.</li>
+</ol>
+<p class="link">Or open this link on the phone: <a href="{{INVITE}}">{{INVITE}}</a></p>
+</body>
+</html>

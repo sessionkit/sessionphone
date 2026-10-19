@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# dc-send-file [--profile public] [--html FILE] [--voice-message] CHAT PATH [TEXT...]
+# - send a file into a Delta chat. A webxdc app is just a .xdc file, so this is
+# how an app reaches a chat. --html FILE: the formatted version, shown by the
+# app's "Show Full Message"; TEXT stays the preview under the attachment.
+# --voice-message (no argument): send an audio file as a Delta VOICE
+# message, not as an attachment with its name. PATH must be one of .aac .flac
+# .m4a .mp3 .oga .ogg .wav and its first bytes must match, else exit 1, naming
+# the file, and nothing is queued. Without the flag a file stays a file.
+# Drops a job for the running bot, which holds the account lock; the core
+# copies the file into its blob dir, so the path only has to exist then.
+# CHAT is a chat number or a channel NAME from the owner's allow-list
+# (channels.txt). A chat that is not listed is REFUSED: exit 3, the list's
+# path on stderr, nothing sent, even with DC_TAKEN_WAIT=0.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; HTML=""; VOICE=""
+while true; do
+  case "${1:-}" in
+    --voice-message) VOICE=1; shift ;;
+    --profile) PROFILE="${2:?--profile needs a NAME}"; shift 2 ;;
+    --html) HTML="${2:?--html needs a FILE}"; shift 2; [ -s "$HTML" ] || { echo "dc-send-file: html file missing or empty: $HTML" >&2; exit 1; } ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || { echo "usage: dc-send-file [--profile public] [--html FILE] [--voice-message] CHAT PATH [TEXT...]  (CHAT: a chat number or a channel name)" >&2; exit 1; }
+CHAT="$1"; GIVEN="$2"; shift 2
+# The bot reads the job later, from its own cwd, so PATH goes in absolute. The
+# cd is tested on its own: inside `"$(cd ...)/$(basename ...)"` the assignment
+# took basename's status, set -e never fired, and a missing directory became
+# /<basename>. If the cd fails, FILE stays the path AS GIVEN, and
+# the checks below refuse it by that name. CDPATH is cleared so a relative dir
+# is never found somewhere else.
+if DIR="$(CDPATH='' cd -- "$(dirname -- "$GIVEN")" 2>/dev/null && pwd)"; then
+  FILE="$DIR/$(basename -- "$GIVEN")"
+else
+  FILE="$GIVEN"
+fi
+# >>> voice-message: the same checker the bot runs, before any job
+# is written, and before the plain no-such-file line, so a missing file also
+# names the accepted suffixes. 1 = missing or not audio (stderr names the file
+# and the suffixes).
+if [ -n "$VOICE" ]; then
+  if "$_DC_PY" -c 'import sys
+sys.path[0] = sys.argv.pop(1)
+from sessionphone.voicemsg import main
+sys.exit(main(sys.argv[1:]))' "$_DC_HOME/src" check --tool dc-send-file -- "$FILE"; then :; else
+    rc=$?
+    [ "$rc" = 1 ] && exit 1
+    echo "dc-send-file: the voice-message check could not run (exit $rc), so nothing was queued" >&2
+    exit 2
+  fi
+fi
+# <<< voice-message
+[ -f "$FILE" ] || { echo "dc-send-file: no such file: $FILE" >&2; exit 1; }
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck chat "$CHAT" chat_id "$PROFILE" || exit $?
+dc_job "$OUT" "$(DC_VOICE_MESSAGE="$VOICE" python3 -c 'import json,os,sys;h=sys.argv[3];job=json.loads(sys.argv[1]);job.update({"file":sys.argv[2],"text":" ".join(sys.argv[4:])})
+if h: job["html"]=open(h,encoding="utf-8").read()
+if os.environ.get("DC_VOICE_MESSAGE"): job["voice_message"]=True
+print(json.dumps(job))' "$DC_DEST" "$FILE" "$HTML" "$@")"
+# >>> voice-message: a bot from before --voice-message ignores the key and sends a
+# plain file. Its ack then lacks the new ack's exact opening, "sent voice
+# message NAME to chat " (exact, so a file NAMED "voice message..." sent by
+# an old bot still warns). Warn, but exit 0: the file went, and a resend would
+# send it twice.
+if [ -n "$VOICE" ] && ! python3 -c 'import os,sys
+want = "sent voice message " + " ".join(os.path.basename(sys.argv[1]).split()) + " to chat "
+sys.exit(0 if sys.argv[2].startswith(want) else 1)' "$FILE" "$DC_DONE"; then
+  echo "dc-send-file: the bot sent $(basename "$FILE") as a plain FILE, not a voice message: it predates voice messages. Restart it after an update (sessionphone bot install runs it again). Do not resend: the file went." >&2
+fi
+# <<< voice-message
+echo "dc-send-file: $DC_DONE${HTML:+ +html}${PROFILE:+ on profile $PROFILE}"

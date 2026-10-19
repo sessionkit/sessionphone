@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# dc-xdc-realtime [--profile public] MSG_ID PAYLOAD_JSON
+# dc-xdc-realtime [--profile public] --advertise MSG_ID
+# dc-xdc-realtime [--profile public] --feed MSG_ID [--stop]
+# Send realtime data into a webxdc app the bot sent earlier (MSG_ID is in the
+# bot log: "SENT FILE ... msg N"). Only peers that have the app open right now
+# get it: realtime data is ephemeral, never stored, never replayed, and nothing
+# confirms it arrived. For state that must survive a reopen, use dc-xdc-update.
+# PAYLOAD_JSON is any JSON; the app reads JSON.parse(new TextDecoder().decode(data)).
+# Encoded, it may be at most 128000 bytes: bigger is refused, never truncated.
+# The first data the bot sends to a msg advertises first. --advertise
+# advertises now (an app reopened that hears nothing).
+# --feed binds MSG_ID to the heard log: the owner's mic partials and turns, and
+# this agent's sayings, streamed live by the bot until --stop, a restart
+# included (the Guide Trail). Only a chat listed in the bot's
+# DC_XDC_FEED_CHATS may be fed: unset, no feed binds. List only your own 1:1 chat.
+# Gated on the chat the message is in, like dc-xdc-update. The bot
+# hands the job to its realtime sender thread, which answers when the send
+# returns, so this tool waits up to 30 s for that answer.
+# Exit: 0 sent, the bot's ack says so; 3 refused or no bot took it, nothing
+# sent; 4 NOT CONFIRMED - the bot took it and wrote no ack, so it may not have
+# gone (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+usage() {
+  echo "usage: dc-xdc-realtime [--profile public] MSG_ID PAYLOAD_JSON" >&2
+  echo "       dc-xdc-realtime [--profile public] --advertise MSG_ID" >&2
+  echo "       dc-xdc-realtime [--profile public] --feed MSG_ID [--stop]" >&2
+  exit 1
+}
+PROFILE=""; ADVERTISE=""; FEED=""; STOP=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) [ $# -ge 2 ] || usage; PROFILE="$2"; shift 2 ;;
+    --advertise) ADVERTISE=1; shift ;;
+    --feed) FEED=1; shift ;;
+    --stop) STOP=1; shift ;;
+    -*) usage ;;
+    *) break ;;
+  esac
+done
+# --stop may follow MSG_ID too, as the SKILL recipe writes it: --feed N --stop
+if [ -n "$FEED" ] && [ $# -eq 2 ] && [ "$2" = "--stop" ]; then STOP=1; set -- "$1"; fi
+[ -n "$ADVERTISE" ] && [ -n "$FEED" ] && usage
+[ -n "$STOP" ] && [ -z "$FEED" ] && usage
+if [ -n "$ADVERTISE$FEED" ]; then [ $# -eq 1 ] || usage; else [ $# -eq 2 ] || usage; fi
+MSG="$1"
+case "$MSG" in ''|*[!0-9]*) echo "dc-xdc-realtime: MSG_ID must be a message number, not '$MSG'" >&2; exit 1 ;; esac
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+if [ -n "$FEED" ]; then
+  if [ -n "$STOP" ]; then
+    JOB="$(python3 -c 'import json,sys;print(json.dumps({"webxdc_realtime_feed":int(sys.argv[1]),"stop":True}))' "$MSG")"
+  else
+    JOB="$(python3 -c 'import json,sys;print(json.dumps({"webxdc_realtime_feed":int(sys.argv[1]),"feed":"heard"}))' "$MSG")"
+  fi
+elif [ -n "$ADVERTISE" ]; then
+  JOB="$(python3 -c 'import json,sys;print(json.dumps({"webxdc_realtime_advertise":int(sys.argv[1])}))' "$MSG")"
+else
+  if ! JOB="$(python3 -c 'import json,sys
+try:
+    p = json.loads(sys.argv[2])
+except ValueError as e:
+    sys.exit(f"dc-xdc-realtime: PAYLOAD_JSON is not JSON ({e}); nothing was queued")
+print(json.dumps({"webxdc_realtime": int(sys.argv[1]), "payload": p}))' "$MSG" "$2")"; then
+    exit 1
+  fi
+fi
+dc_precheck msg "$MSG" "" "$PROFILE" || exit $?
+_DC_ACK_TENTHS=300
+dc_job "$OUT" "$JOB"
+echo "dc-xdc-realtime: $DC_DONE${PROFILE:+ on profile $PROFILE}"
