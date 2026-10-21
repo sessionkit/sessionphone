@@ -9,6 +9,220 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-21
+
+### Signing follows the mail carrier, and the mail drop needs no key (PHONE-203)
+
+**One rule decides whether the bot signs.**
+
+- Whether the bot signs its mail to the agent is one rule, judged at install
+  and at every start from the carrier the bot's own `message send` will use,
+  as sessionmail's own resolver answers it for the job's environment (its
+  `SESSIONMAIL_SENDMAIL`, else the `sendmail` key in sessionmail's
+  `mail.json`, else sessionmail's default, the mail drop). There is no flag.
+- An MTA carrier: signed, as before. Must-sign is on, and a send with no
+  usable key is refused.
+- The mail drop with no signer set or saved: unsigned. The bot writes each
+  mail into the box itself, as its owner, so no key, no registry and no seat
+  step are needed: `bot install` skips the seat's agent, and the start check
+  skips the signer.
+- A signer set or saved is used on any carrier, the drop included.
+- A carrier sessionmail refuses, a `mail.json` it cannot read, or a
+  sessionmail that cannot be asked: the bot refuses to start and `bot
+  install` refuses (exit 2, writing nothing). It never falls back to
+  unsigned, nor to a guessed MTA.
+- The `seat:` line and the bot's start line name the mode and why, for
+  example `signed (carrier /usr/sbin/sendmail is an MTA, from SESSIONMAIL_SENDMAIL)`
+  or `unsigned (carrier drop: this bot writes into the box itself, from
+  sessionmail's default)`. With no `sendmail` answer from `mail.json`, the
+  start line's carrier is now sessionmail's resolver's, not an assumed
+  `/usr/sbin/sendmail`.
+
+**`bot install --registry DIR` gives the bot a key.**
+
+- With no signer set or saved, `bot install --registry DIR` runs the seat's
+  key agent (`message seat agent --install <agent>-chat`). Only when
+  sessionmail says the seat has no key yet does it first mint it into the
+  seat registry DIR (`message seat init --registry DIR <agent>-chat`), then
+  run the agent. A key already there is never minted again, so a re-run is
+  safe. It works on any carrier, the drop included.
+- The signer it gets is saved, so later installs (without `--registry`)
+  and starts sign. The `settings:` block says so; the `seat:` line names
+  the registry when this run minted the seat.
+- A refused mint is exit 2 and a failed one exit 1, quoting sessionmail's
+  line; nothing of the bot is written. `--registry` is the only way install
+  mints: with no registry, a seat not minted is refused, naming
+  `--registry DIR`.
+
+**On the mail drop: the box first, no Cc that sinks a mail, warnings once.**
+
+- The bot makes the agent's box at every start, before its first send: it
+  asks `message path NAME`, and only when sessionmail says there is no box
+  does it run `message setup --box NAME`. The drop never makes a box, and a
+  send to one that is not there is refused, so a box that cannot be made now
+  refuses the start (exit 2), naming the step, instead of losing every mail.
+- A Cc goes only to a box sessionmail says is there (for a plus address,
+  `base+tag`, the box `base` counts, as the drop delivers it there), and on
+  the mail drop only on this host. Under the drop one recipient it cannot
+  deliver to refuses the whole mail, so a call guest with no box no longer
+  costs the agent its own copy. A Cc left off is logged once per run, with
+  why.
+- sessionmail's warnings on a send (the UNSIGNED and MagicDNS notices) reach
+  the bot's log once per run, never once per mail. Before, they were not
+  logged at all.
+- The hear line, and a new `agent box:` line at every bot start, say that
+  `session start NAME` runs `claude --agent NAME`, and that only a session
+  started as that agent hears the box: a plain `claude` gets no copy of its
+  mail, and nothing says so.
+- Where the job carries `SESSIONMAIL_ROOT`, sessionmail's box tools
+  (`message path`, `message setup`) also get `SESSION_MAIL_ROOT` with the
+  same value: today they read only that older spelling, while `message
+  send` reads `SESSIONMAIL_ROOT` first. A workaround, until sessionmail
+  reads both.
+- `sessionphone web --legs` makes the seat's box at start too, before the
+  first turn, the way the bot does: under the drop a turn to a box that is
+  not there was refused, so every turn of the call was lost, and said only
+  per turn. A box it cannot make refuses the start (exit 2), naming the box
+  and the step. A plus address (`base+tag`) whose base box is there needs
+  no box of its own, at the bot's start or the web's.
+- The web's start line names whether its turns are signed and why, as
+  `seatmail.signing()` rules (for example `unsigned (carrier drop: ...)`).
+  Before, it said `signed` on every carrier. A new `turns box:` line names
+  the seat's box.
+- With no signer on an MTA, the start refusal names `sessionphone bot
+  install --registry DIR` as the way to give the bot a key, before the
+  steps by hand.
+
+**Docs.**
+
+- New `docs/bot-mail-signing.md`: on the mail drop the bot's mail is not
+  signed, and why; on an MTA or for a fleet, `bot install --registry DIR`;
+  and the two conditions for a mail to reach the agent at all (the box
+  exists, and the agent runs as `claude --agent NAME`). The README's "The
+  bot's seat" links to it and now gives the key by `--registry DIR`.
+- The README, `docs/configuration.md`, the skill and `bot install --help` no
+  longer say to export `SESSIONMAIL_SENDMAIL=drop` before `bot install`: the
+  drop is sessionmail's default. They name the `mail.json` key `sendmail`.
+
+### `bot install` runs the bot's seat agent itself
+
+- With no `DC_SIGNER_SOCK` and `DC_SIGNER_PUB` set or saved, and a
+  sessionmail whose `message seat agent --help` has a line that is exactly
+  `Capability: install`, `bot install` runs `message seat agent --install
+  <agent>-chat` (sessionmail's default socket). It reads the `SEAT_*` lines
+  that prints, split as the shell would and never evaluated, and the job's
+  `DC_SIGNER_SOCK` and `DC_SIGNER_PUB` are its `SEAT_SOCKET` and `SEAT_PUB`.
+  They are not saved: each install asks again, and a re-run finds the agent
+  already there. The README's seat section is now: mint the seat, then
+  `sessionphone bot install`.
+- The seat must be minted first (`message seat init --registry DIR
+  <agent>-chat`). When it is not, install refuses (exit 2, writing nothing),
+  quoting sessionmail's refusal and naming that step. Any other refusal is
+  quoted as sessionmail wrote it, exit 2, writing nothing.
+- When `message seat agent --install` fails (exit 1), install exits 1,
+  writing nothing of the bot, shows sessionmail's `FAILED` line and the log
+  lines it quotes, and names the recovery: `message seat agent --uninstall
+  <agent>-chat`, then `--install` again, or `bot install` again.
+- A sessionmail without that capability line (or with no `seat` noun) keeps
+  the steps by hand: with no signer set, install refuses as before, naming
+  them, and says this sessionmail lacks `Capability: install`.
+- The `seat:` line names the agent's launchd label when install ran it, and
+  the `settings:` block says the signer came from `message seat agent
+  --install`. (Whether the bot signs at all now follows the mail carrier:
+  see "Signing follows the mail carrier" above.)
+
+### `bot install` remembers its settings between runs
+
+- `bot install` saves each `DC_*` and `SESSIONPHONE_ROOT` it was given in
+  the phone tool's host settings file, `~/.sessionkit/phone/settings/phone.json`
+  (0600, one map per bot), once the job is loaded. A later install from a
+  shell that sets none of them installs the same job. The order is the
+  shell, then the file (and `phone.d/*.json` after it, with `_locked`
+  honoured), then the default.
+- Which bot: `DC_AGENT`, else `CLAUDE_CODE_AGENT`, else the one bot the file
+  records, else `claude`. With two or more recorded and no name, install
+  refuses (exit 2) and names them.
+- A `settings:` block names each value the job carries and where it came
+  from: this shell (saved, or replacing a saved value), the file, the
+  default, or derived on this run (a pinned `DC_MESSAGE`, a found
+  `DC_EARS_SRC`), which is never saved.
+- `bot install --forget KEY` (repeatable) drops a saved value.
+- Refused (exit 2, writing nothing): a settings file that cannot be read or
+  is not that shape, a locked key the shell changes, and a saved
+  `DC_SIGNER_SOCK` or `DC_SIGNER_PUB` whose path is gone.
+- sessionmail's mail-route settings are still carried for the run, and are
+  not saved: they are sessionmail's, in its own `mail.json`. Install asks the
+  installed sessionmail whether it reads that file, and says for each one the
+  shell set whether it is kept and the step that keeps it. When it does, a
+  job that carries no `SESSIONMAIL_SENDMAIL` names on its `mail:` line the
+  carrier sessionmail reads there, or says that sessionmail cannot read the
+  file or that its `sendmail` is not a carrier, so the bot's mail goes nowhere.
+
+### Every reader honours what `bot install` keeps
+
+- `bot status` and `bot uninstall` act on the bot install would pick: a name
+  in the shell, else the one bot `phone.json` records, else `claude`. With
+  no name in the shell, a `bot:` line says which they picked. Two bots recorded and no name, or a settings
+  file that cannot be read, refuses (exit 2) and names the way past it; a
+  name in the shell is taken before any file is read.
+- The root every verb uses is the shell's `SESSIONPHONE_ROOT`, else the root
+  `phone.json` keeps for that bot, else `~/.sessionphone`. An empty
+  `SESSIONPHONE_ROOT` counts as unset. `dc-env` and `dc-log` read the same
+  root, and fall back to `~/.sessionphone` when it cannot be read.
+- The mail host the bot builds its addresses and Message-IDs on is
+  `SESSIONMAIL_HOST`, else the `host` in sessionmail's `mail.json`, else this
+  machine's short name. A host kept only in `mail.json` was overridden by
+  the machine's name on every send. The bot asks its sessionmail once at
+  start, and its start line says where the host came from.
+- The carrier the bot names is the shell's `SESSIONMAIL_SENDMAIL`, else what
+  sessionmail reads (its `mail.json`, else its own default), and the start
+  line says which. `bot install`'s `mail:` line uses the same words: an MTA
+  named in `mail.json` now reads `MTA <path> (...)`.
+- A failed save of `phone.json` after the job is loaded prints every line of
+  the install, with `(NOT saved)` in the `settings:` header, then the reason,
+  and exits 1.
+- A lock on a key no file gives a value now says so ("which gives it no
+  value (the bot takes its default)"), and no longer says "at None".
+- A saved `DC_SIGNER_SOCK` or `DC_SIGNER_PUB` whose path is gone still
+  refuses (exit 2), saying to give it again or `--forget` it. When the
+  installed sessionmail has `Capability: install` and the shell sets no
+  `DC_SIGNER_*`, it also names `bot install --forget DC_SIGNER_SOCK --forget
+  DC_SIGNER_PUB`, which lets install run `message seat agent --install`
+  itself. Without that capability its words are unchanged.
+
+### `bot install` checks the bot would start before it loads anything
+
+- `bot install` refuses (exit 2, writing nothing) when `DC_SIGNER_SOCK` or
+  `DC_SIGNER_PUB` is unset, with the bot's own start-up refusal: it names
+  the steps that make the seat. (Since then, install runs the seat's agent
+  itself when sessionmail can: see above.)
+- `bot install` pins `DC_MESSAGE` to the installing shell's `message`, as an
+  absolute path, unless the shell sets it.
+- `bot install` runs the bot's own start check (the `message` binary, the
+  signer, the key's seat, the `--message-id` probe) on the job's environment
+  before it loads anything. A job that would refuse to start is no longer
+  installed to loop under launchd. A `seat:` line names the seat it signs as.
+- `bot install` and `sessionphone setup` make the agent's box (`message setup
+  --box <agent>`), check it with `message path`, and print a `hear:` line:
+  `To hear Delta messages, start Claude with: session start <agent>`.
+- `bot status` prints the last line of the bot's log, and falls back to
+  `bot.launchd.log` when the bot has written none.
+- The default mail host is sessionmail's own (`SESSIONMAIL_HOST`, else the
+  first part of this machine's name), not a DNS lookup. A Mac whose DNS name
+  is a reverse-DNS name now installs, and mails a box sessionmail delivers.
+- `SESSIONMAIL_ORIGIN` is no longer carried into the job: the reader verifies
+  against its own origin, so a value only the job held made every mail
+  verify bad. Set it in sessionmail's settings key `postfix.origin`. The
+  `mail:` line says when the shell sets it. A legacy job that carried it is
+  refused, naming where it belongs.
+- README: the seat section gives the steps that work with today's
+  sessionmail (a seeded seat registry, `seat init --registry`, `seat
+  agent`), names the default agent (`claude`, so the seat is `claude-chat`),
+  says which of `DC_ADDR` (the bot's own From seat) and `DC_MAILTO` (where
+  Delta text goes) is which, and how a Claude session hears the box.
+
+## [0.2.0] - 2026-10-21
+
 ### The bot's launchd job is `dev.sessionkit.phone.bot.<agent>` (PHONE-193)
 
 Upgrade note: run `sessionphone bot install` again after upgrading. It

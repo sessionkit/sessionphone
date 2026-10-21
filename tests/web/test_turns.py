@@ -691,10 +691,10 @@ def test_t8_the_from_follows_the_seat_not_the_shell():
 
 @pytest.mark.parametrize("fqdn", ["1.0.0.0.ip6.arpa", "localhost", "macbook", ""])
 def test_t8_a_junk_host_is_refused_even_with_mail_to_and_dc_addr(fqdn):
-    """§11 A4: host_problem() as it is passes a junk host when DC_ADDR and DC_MAILTO
-    are both named; the web turn still builds its Reply-To and Message-ID on it."""
+    """§11 A4: host_problem() passes any host when DC_ADDR and DC_MAILTO are both
+    named; the web turn still builds its Reply-To and Message-ID on its DNS name."""
     full = {"DC_ADDR": "alice-chat@example.net", "DC_MAILTO": "alice@example.net"}
-    assert dc_env.host_problem(full, fqdn=fqdn) is None                    # the bot's rule would pass it
+    assert dc_env.host_problem(full, host=fqdn) is None                    # the bot's rule would pass it
     for flag, environ in (("alice@example.net", {}), (None, full)):
         seat, why = turns.named_seat(flag, environ=environ, fqdn=fqdn)
         assert seat is None and "DC_HOST" in why and repr(fqdn) in why
@@ -709,10 +709,24 @@ def test_t8_a_named_dc_host_is_trusted_and_used():
 
 def test_t8_the_start_lines_name_the_to_the_from_and_the_reply_to(tmp_path):
     seat, _ = turns.named_seat("alice@example.net", environ={}, fqdn=HOST)
-    a, b = turns.start_lines(seat, tmp_path)
+    a, b = turns.start_lines(seat, tmp_path, environ={})       # the suite's carrier: an MTA
     assert a == ("turns: each finished turn of a web call mailed to alice@example.net (From seat alice-chat), "
-                 f"Reply-To calls+web-<N>@{HOST} (M5, signed)")
+                 f"Reply-To calls+web-<N>@{HOST} (M5, signed (carrier /usr/sbin/sendmail is an MTA, "
+                 "from sessionmail's default))")
     assert b == f"heard log: {tmp_path}"                                   # there: no mark
+
+
+def test_t8_the_start_lines_name_the_mode_signing_rules_never_a_fixed_signed(tmp_path):
+    """The web's turns are signed as seatmail.signing() rules, as the bot's mail
+    is: on the drop with no signer they go unsigned, and the start says so and why."""
+    seat, _ = turns.named_seat("alice@example.net", environ={}, fqdn=HOST)
+    a, _ = turns.start_lines(seat, tmp_path, environ={"SESSIONMAIL_SENDMAIL": "drop"})
+    assert a.endswith(", unsigned (carrier drop: this bot writes into the box itself, "
+                      "from SESSIONMAIL_SENDMAIL))")
+    keyed = {"SESSIONMAIL_SENDMAIL": "drop", "DC_SIGNER_SOCK": "/s", "DC_SIGNER_PUB": "/p"}
+    a, _ = turns.start_lines(seat, tmp_path, environ=keyed)
+    assert a.endswith(", signed (a signer is given in DC_SIGNER_SOCK and DC_SIGNER_PUB, on carrier drop))")
+    assert not a.endswith(", signed)")                          # never the old fixed word
 
 
 def test_t8_a_missing_heard_dir_is_marked_at_start_never_silent(tmp_path):

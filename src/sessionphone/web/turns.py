@@ -121,8 +121,8 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
     The host is DC_HOST, else this machine's name (fqdn stands in for
     socket.getfqdn() in tests), as dc_env.HOST. A junk one is refused even
     with --mail-to: the Reply-To and the Message-IDs are built from it.
-    dc_env.host_problem() is asked about DC_HOST alone, because as it is it
-    passes a junk host whenever DC_ADDR and DC_MAILTO are both named."""
+    dc_env.fqdn_problem() judges that DNS name, asked about DC_HOST alone:
+    the bot's own default host is sessionmail's (dc_env.mail_host), not this."""
     e = os.environ if environ is None else environ
     if fqdn is None:                     # only when needed: a reverse lookup can be slow
         fqdn = "" if dc_env._get(e, "HOST") else socket.getfqdn()
@@ -139,22 +139,26 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
         return None, (f"--legs mails each finished turn of a web call to the seat, and {to!r} is not a mail "
                       "address: name the seat's box as BOX@HOST (--mail-to, or DC_MAILTO)")
     only_host = {k: v for k, v in e.items() if k in ("DC_HOST", f"{dc_env.ALIAS}HOST")}
-    if dc_env.host_problem(only_host, fqdn=fqdn):
+    if dc_env.fqdn_problem(only_host, fqdn):
         return None, (f"--legs: no DC_HOST is set and this machine's name, {fqdn.strip()!r}, is not a mail "
                       f"domain, so each turn's Reply-To and Message-ID would be built on it. Set DC_HOST "
                       f"to this machine's mail domain (DC_HOST=mac.example.net)")
     return seat_for(to, host, e), ""
 
 
-def start_lines(seat: Seat, directory: Path) -> list[str]:
-    """What `sessionphone web --legs` says at start about the turns.
+def start_lines(seat: Seat, directory: Path, environ: Mapping[str, str] | None = None) -> list[str]:
+    """What `sessionphone web --legs` says at start about the turns: where they
+    go, and whether they are signed and why, as seatmail.signing() rules for
+    ENVIRON (the server's own, the one each turn's `message send` gets).
     A heard dir that is not there is marked (missing), never left silent: the
     follower reads nothing from it, and that is the DEMO's failure shape, turns
     that reach no one. It is still followed, so a dir the ears make later is read."""
+    mode, reason = seatmail.signing(environ)
     missing = "" if Path(directory).is_dir() else (
         "  (missing: no turn reaches the seat until the ears write here; check --heard-dir)")
     return [(f"turns: each finished turn of a web call mailed to {seat.to} (From seat "
-             f"{seatmail.local_part(seat.addr)}), Reply-To calls+web-<N>@{seat.host} (M5, signed)"),
+             f"{seatmail.local_part(seat.addr)}), Reply-To calls+web-<N>@{seat.host} "
+             f"(M5, {mode} ({reason}))"),
             f"heard log: {directory}{missing}"]
 
 

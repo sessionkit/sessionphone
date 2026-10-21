@@ -27,6 +27,24 @@ if _early:   # the isolation below would be too late to matter: say so, loudly
 for _k in [k for k in os.environ if k in _SEAT_ENV_NAMES or k.startswith(_SEAT_ENV_PREFIXES)]:
     del os.environ[_k]
 
+# ...and the phone.json `bot install` keeps never reaches it either. paths.root()
+# reads the root that file keeps, and dc_env.ROOT is bound from it AT IMPORT,
+# before phone_settings_in_tmp (below) moves settings.FILE for each test. On a
+# machine where `bot install` has run, the suite would then freeze that live
+# root into dc_env.ROOT. So dc_env is imported here with settings.FILE pointing
+# into an empty directory, then FILE is put back for the tests that read it.
+import tempfile
+
+from sessionphone import settings as _settings
+
+_kept_file = _settings.FILE
+_no_file_dir = tempfile.mkdtemp(prefix="no-phone-json-")
+_settings.FILE = os.path.join(_no_file_dir, "phone.json")
+from sessionphone.bridge import dc_env as _dc_env  # noqa: F401 - binds dc_env.ROOT now
+
+_settings.FILE = _kept_file
+os.rmdir(_no_file_dir)
+
 from sessionphone import hearing, service
 
 
@@ -231,10 +249,12 @@ def _message_tripwire_script(tmp_path_factory):
     """A stand-in `message` that records its argv to $MESSAGE_TRIP_LOG and refuses
     as `message send --json` does when the MTA will not take it (exit 3).
 
-    The ONE exception is the start probe (seatmail.PROBE_ARGS, PHONE-72 part
-    2b): it sends nothing by construction, so it is answered as a sessionmail
-    with SM-716 answers it (exit 2, kind message-id) and NOT recorded. A test
-    of the probe itself uses fake_message, which can answer it otherwise."""
+    The exceptions send nothing by construction, and are NOT recorded: the
+    start probe (seatmail.PROBE_ARGS, PHONE-72 part 2b), answered as a
+    sessionmail with SM-716 answers it (exit 2, kind message-id); and install's
+    box step, `setup --box NAME` (done) and `path NAME` (a path under
+    /nonexistent). A test of either uses fake_message, which can answer it
+    otherwise."""
     from sessionphone.bridge import seatmail
     probe = " ".join(seatmail.PROBE_ARGS)
     script = tmp_path_factory.mktemp("message") / "message"
@@ -242,6 +262,9 @@ def _message_tripwire_script(tmp_path_factory):
                       f'if [ "$*" = "{probe}" ]; then\n'
                       '  echo \'{"sent": "no", "kind": "message-id", "message": "probe", "notices": []}\'\n'
                       "  exit 2\nfi\n"
+                      # install's box step (seat.ensure_box) delivers nothing: a box is made and named
+                      'if [ "$1" = setup ] && [ "$2" = --box ]; then echo "box: $3 DONE"; exit 0; fi\n'
+                      'if [ "$1" = path ]; then echo "/nonexistent/tripwire-boxes/$2"; exit 0; fi\n'
                       'printf \'%s | %s\\n\' "$PYTEST_CURRENT_TEST" "$*" >> "$MESSAGE_TRIP_LOG"\n'
                       "cat > /dev/null\n"
                       'echo \'{"sent": "no", "kind": "mta", "message": "message tripwire", "notices": []}\'\n'
@@ -327,6 +350,23 @@ def message_tripwire(_message_tripwire_script, tmp_path_factory, monkeypatch):
 
 VALUE_FLAGS = ("-s", "-f", "-c", "--header", "--message-id", "-r", "--supersedes")   # message send's, as seatmail.args uses them
 DEFAULT_SEAT = "claude-chat"     # dc_env.ADDR's local part with no DC_* set: the tripwire key's seat
+
+
+@pytest.fixture
+def given_seat(tmp_path, monkeypatch, _message_tripwire_script):
+    """given_seat(seat) -> a signer GIVEN to install for SEAT: DC_MESSAGE is the
+    tripwire `message` again and DC_SIGNER_SOCK / DC_SIGNER_PUB name a fake key
+    whose comment is `<seat> seat`. For a rig that clears every DC_* and then
+    installs: with no DC_SIGNER_* install would make a seat (seat.py)."""
+    def make(seat: str = DEFAULT_SEAT):
+        keys = tmp_path / "given-seat"
+        keys.mkdir(exist_ok=True)
+        (keys / "seat.pub").write_text(f"ssh-ed25519 AAAAgiven {seat} seat\n")
+        monkeypatch.setenv("DC_MESSAGE", str(_message_tripwire_script))
+        monkeypatch.setenv("DC_SIGNER_SOCK", str(keys / "agent.sock"))
+        monkeypatch.setenv("DC_SIGNER_PUB", str(keys / "seat.pub"))
+        return keys / "seat.pub"
+    return make
 
 
 @pytest.fixture
@@ -605,3 +645,55 @@ import _scanlist
 
 def pytest_terminal_summary(terminalreporter):
     _scanlist.summary(terminalreporter)
+
+
+@pytest.fixture(autouse=True)
+def no_session_cli(monkeypatch):
+    """No test runs the real `session start --list-agents` (seat.hear_line asks
+    it which agent files exist). Here none is known, as on a fresh HOME; a test
+    of the hear line sets its own answer."""
+    from sessionphone import seat
+    monkeypatch.setattr(seat, "_list_agents", lambda shell: None)
+
+
+@pytest.fixture(autouse=True)
+def phone_settings_in_tmp(tmp_path_factory, monkeypatch):
+    """No test reads or writes the real ~/.sessionkit/phone/settings/phone.json
+    (`bot install` remembers its settings there): settings.FILE is a fresh tmp
+    path per test. And no test asks the real sessionmail whether it reads its
+    mail.json, or its carrier: settings.mail_file and settings.mail_carrier
+    answer None (it cannot tell). A test of either sets its own."""
+    from sessionphone import settings
+    d = tmp_path_factory.mktemp("phone-settings")
+    monkeypatch.setattr(settings, "FILE", str(d / "phone.json"))
+    settings.forget_mail_file()     # its answers are kept per process: none outlives a test
+    monkeypatch.setattr(settings, "mail_file", lambda exe: None)
+    monkeypatch.setattr(settings, "mail_carrier", suite_carrier)
+
+
+def suite_carrier(exe, sendmail=None):
+    """The carrier the suite's sessionmail resolves, in place of asking a real
+    one (settings.mail_carrier). As sessionmail's own resolver orders it: the
+    job's SESSIONMAIL_SENDMAIL (stripped) when set, else the `sendmail` key
+    settings.mail_file answers (a test sets its own), else the suite's
+    default. That default is an MTA, NOT sessionmail's (the drop): the suite
+    was written on a host that sends by an MTA, so its world is must-sign. A
+    test of the drop default, or of a sessionmail that cannot be asked, says
+    so itself."""
+    from sessionphone import settings
+    v = (sendmail or "").strip()
+    value, source = v, "variable"
+    if not v:
+        filed = (settings.mail_file(exe) or {}).get("sendmail")
+        if filed is None:
+            return {"kind": "mta", "path": "/usr/sbin/sendmail", "source": "default", "why": ""}
+        value, source = filed
+    if source == "unreadable":
+        return {"kind": "refused", "path": None, "source": source,
+                "why": "~/.sessionkit/mail/settings/mail.json could not be read"}
+    if value == "drop":
+        return {"kind": "drop", "path": None, "source": source, "why": ""}
+    if isinstance(value, str) and value.startswith("/"):
+        return {"kind": "mta", "path": value, "source": source, "why": ""}
+    return {"kind": "refused", "path": None, "source": source,
+            "why": f"{value!r} is not a carrier"}

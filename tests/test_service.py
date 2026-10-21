@@ -48,11 +48,11 @@ def test_a_clean_exit_is_restarted_and_a_refusal_only_slowly(tmp_path, monkeypat
     assert back["KeepAlive"] is True and back["ThrottleInterval"] == j["ThrottleInterval"]
 
 
-def test_install_runs_the_bot_by_its_project_name(monkeypatch, tmp_path, launchd):
+def test_install_runs_the_bot_by_its_project_name(monkeypatch, tmp_path, launchd, given_seat):
     """`bot install` writes the libexec link into the plist, so a reinstall
     never puts bin/python (shown as "Python") back (PHONE-80)."""
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(service.dc_env.socket, "getfqdn", lambda: "mac.example.net")  # not this machine's
@@ -63,6 +63,7 @@ def test_install_runs_the_bot_by_its_project_name(monkeypatch, tmp_path, launchd
     chans.write_text("owner  owner@phone.example.org\n")
     chans.chmod(0o600)
     monkeypatch.setenv("DC_CHANNELS_FILE", str(chans))
+    given_seat("alice-chat")
     service.install("alice")
     j = plistlib.loads((tmp_path / "job.plist").read_bytes())
     assert j["ProgramArguments"][0] == "/venv/libexec/session-phone"

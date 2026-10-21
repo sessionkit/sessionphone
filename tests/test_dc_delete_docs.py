@@ -111,10 +111,11 @@ def test_skill_and_changelog_name_the_verb():
     skill = (ROOT / "skills/sessionphone/SKILL.md").read_text()
     where = skill.split("## Where the bot may send", 1)[1].split("\n## ", 1)[0]
     assert "`dc-delete MSG_ID...`" in where and "ASKS" in where
-    unreleased = (ROOT / "CHANGELOG.md").read_text().split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    # dc-delete shipped in 0.2.0: its section, not [Unreleased] (only what came after)
+    unreleased = (ROOT / "CHANGELOG.md").read_text().split("## [0.2.0]", 1)[1].split("\n## [", 1)[0]
     added = unreleased.split("### Added", 1)[1].split("\n### ", 1)[0]
     lines = [line for line in added.splitlines() if "dc-delete" in line]
     assert len(lines) == 1 and "(PHONE-122)" in lines[0]
-    # one of the [Unreleased] ### Added bullets; not the last since PHONE-126: the next feature appends after it
+    # one of the [0.2.0] ### Added bullets; not the last since PHONE-126: the next feature appends after it
     bullets = [line for line in added.splitlines() if line.startswith("- ")]
     assert lines[0] in bullets

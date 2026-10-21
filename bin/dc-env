@@ -2,7 +2,10 @@
 # dc-env - sourced by every dc-* tool: who the bridge is, and where its state lives.
 #
 # The agent comes from DC_AGENT, then CLAUDE_CODE_AGENT, then "claude". The
-# root comes from DC_ROOT, then SESSIONPHONE_ROOT, then ~/.sessionphone.
+# root comes from DC_ROOT, then SESSIONPHONE_ROOT, then the root `sessionphone
+# bot install` keeps in ~/.sessionkit/phone/settings/phone.json (asked of the
+# package's own Python, so the tools and the bot read one root), then
+# ~/.sessionphone. If that question cannot be answered, it is ~/.sessionphone.
 # Every path a tool touches derives from the root unless its own DC_X is set.
 # Mirrors src/sessionphone/bridge/dc_env.py exactly - change both or neither.
 # Run on its own (it is on the PATH with the tools), it answers -h/--help with
@@ -19,8 +22,25 @@ if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
     *) echo "dc-env: sourced by the dc-* tools, not run (dc-env -h)" >&2; exit 2 ;;
   esac
 fi
+# the package beside these tools, and its Python (the root, the pre-checks below)
+_DC_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_DC_PY="$_DC_HOME/.venv/bin/python"
+# a wheel install: dc-env sits in the env's own bin/, beside its python
+[ -x "$_DC_PY" ] || _DC_PY="$(dirname "${BASH_SOURCE[0]}")/python"
+[ -x "$_DC_PY" ] || _DC_PY=python3
+# dc_kept_root: the root sessionphone.paths.root() names with no root in this
+# shell (the one phone.json keeps, else the default); nothing when it cannot say.
+dc_kept_root() {
+  "$_DC_PY" -c 'import sys
+sys.path[0] = sys.argv.pop(1)
+from sessionphone import paths
+print(paths.root())' "$_DC_HOME/src" 2>/dev/null
+}
 # shellcheck disable=SC2018,SC2019  # lowers A-Z only, unchanged here (dc_env.py lowers any letter)
 DC_AGENT="$(printf %s "${DC_AGENT:-${CLAUDE_CODE_AGENT:-claude}}" | tr 'A-Z' 'a-z')"
+if [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-}" ]; then
+  DC_ROOT="$(dc_kept_root)" || DC_ROOT=""
+fi
 DC_ROOT="${DC_ROOT:-${SESSIONPHONE_ROOT:-$HOME/.sessionphone}}"
 DC_LIVE="${DC_LIVE:-$DC_ROOT/call-live.json}"
 DC_ACKS="${DC_ACKS:-$DC_ROOT/acks}"
@@ -56,11 +76,6 @@ dc_outbox() {
 # authority: it reads the list from its OWN environment, so a send
 # the pre-check lets through WAITS for the bot's answer even under
 # DC_TAKEN_WAIT=0, and a refusal there exits 3 too.
-_DC_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-_DC_PY="$_DC_HOME/.venv/bin/python"
-# a wheel install: dc-env sits in the env's own bin/, beside its python
-[ -x "$_DC_PY" ] || _DC_PY="$(dirname "${BASH_SOURCE[0]}")/python"
-[ -x "$_DC_PY" ] || _DC_PY=python3
 _DC_SEND=""     # set by dc_precheck: the bot gates this job, so a wait of 0 never applies
 # dc_wait: the seconds to wait for a take. 0 = don't, except for a gated job.
 dc_wait() {
@@ -91,7 +106,7 @@ dc_channels() {
 # list also says whether the bot has mailed the owner's agent. Else 0, sets DC_DEST
 # to the job's destination fields as JSON (a number keeps FIELD, a NAME goes in
 # "chat", JSON-quoted) and marks a gated job so it is always waited for.
-# DC_HOST: dc_env's fallback is a DNS lookup (getfqdn); the pre-check needs none.
+# DC_HOST: dc_env's fallback is sessionmail's own host (dc_env.mail_host); the pre-check needs none.
 dc_precheck() {
   local list box out rc
   list="$(dc_channels "${4:-}")" || return 2

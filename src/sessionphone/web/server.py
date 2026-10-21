@@ -349,7 +349,7 @@ def run(webdir: Path, *, port: int, host: str, tls: tuple[Path, Path] | None,
         legs_refusal,
     )
 
-    seat, heard = None, None
+    seat, heard, box = None, None, None
     if not legs and (mail_to is not None or heard_dir is not None):
         given = [f for f, v in (("--mail-to", mail_to), ("--heard-dir", heard_dir)) if v is not None]
         echo(f"sessionphone web: {' and '.join(given)} without --legs: echo mode mails no one "
@@ -366,6 +366,18 @@ def run(webdir: Path, *, port: int, host: str, tls: tuple[Path, Path] | None,
             from sessionphone.bridge import seatmail
             why = seatmail.check(seat=seatmail.local_part(seat.addr),
                                  door="the web seat: DC_ADDR, else <DC_AGENT or the To's box>-chat") or ""
+        if not why:
+            # the seat's box BEFORE the first turn, as the bot's start makes its
+            # agent's: the mail drop never makes a box, and a turn to a box that
+            # is not there is refused (rc=3), so every turn of the call is lost
+            import os
+
+            from sessionphone import seat as seats
+            try:
+                box = seats.have_box(os.environ, os.environ, seat.to, what="the web call's turns",
+                                     again="`sessionphone web --legs` again")
+            except seats.NoBox as exc:
+                why = str(exc)
         if why:
             echo(f"sessionphone web: {why}")
             return 2
@@ -401,6 +413,8 @@ def run(webdir: Path, *, port: int, host: str, tls: tuple[Path, Path] | None,
         if seat is not None:
             for line in turns.start_lines(seat, heard):
                 echo(f"  {line}")
+            echo(f"  turns box: {box.path}" if box is not None and box.path is not None else
+                 f"  turns box: {seat.to} is not a box on this host: its reader makes the box")
         if srv.needs_enrol():
             code = srv.keyring.new_enrol_code()
             echo(f"  enrol code: {code}  (one passkey, {passkeys.ENROL_TTL // 60} minutes; "

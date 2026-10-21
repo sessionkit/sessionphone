@@ -784,7 +784,9 @@ def test_t8_run_with_legs_prints_the_to_and_the_reply_to_at_start(short_root, tm
                     until=lambda: asyncio.sleep(0))
     assert rc == 0, out
     assert (f"  turns: each finished turn of a web call mailed to alice@{TURN_HOST} (From seat alice-chat), "
-            f"Reply-To calls+web-<N>@{TURN_HOST} (M5, signed)") in out
+            f"Reply-To calls+web-<N>@{TURN_HOST} (M5, signed (carrier /usr/sbin/sendmail is an MTA, "
+            "from sessionmail's default))") in out                  # the suite's carrier: an MTA
+    assert (f"  turns box: alice@{TURN_HOST} is not a box on this host: its reader makes the box") in out
     (line,) = [m for m in out if m.startswith("  heard log: ")]   # never made here: marked, not silent (N1)
     assert line.startswith(f"  heard log: {heard_dir}  (missing") and "--heard-dir" in line
     assert not list(short_root.rglob("*.sock"))                  # stop() took the legs down

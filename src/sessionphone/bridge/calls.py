@@ -1180,7 +1180,7 @@ def own_mail(addr: str) -> bool:
     """Is ADDR the bridge's own (its seat, `<agent>-chat`)? By the LOCAL PART, the
     host discarded: the seat's From is qualified by the MTA, so
     `<agent>-chat@host`, `@host.example.net` or bare can each arrive while
-    dc_env.ADDR is spelt with getfqdn()'s host. sessionmail groups a seat's
+    dc_env.ADDR is spelt with DC_HOST's or sessionmail's host. sessionmail groups a seat's
     addresses the same way. No local part is never own."""
     mine = local_part(addr)
     return bool(mine) and mine == local_part(dc_env.ADDR)

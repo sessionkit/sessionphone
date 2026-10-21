@@ -268,16 +268,17 @@ def test_an_alias_only_in_the_shell_is_named():
 # ---- bot install: the lines, the job's env, and before the first call -------
 
 @pytest.fixture
-def rig(monkeypatch, tmp_path, launchd):
+def rig(monkeypatch, tmp_path, launchd, given_seat):
     """test_callers_on_install's rig: FakeLaunchd, a scratch HOME and root, an owner."""
     for k in [k for k in os.environ if k.startswith(("DC_", "PIP_CHAT_"))]:
         monkeypatch.delenv(k)
+    given_seat("claude-chat")     # install's signer, given: no seat is made
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(root))
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(service, "ears_src", lambda: None)

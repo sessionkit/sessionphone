@@ -34,9 +34,10 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 
 
 @pytest.fixture
-def rig(monkeypatch, tmp_path, launchd):
+def rig(monkeypatch, tmp_path, launchd, given_seat):
     for k in [k for k in os.environ if k.startswith("DC_")]:
         monkeypatch.delenv(k)
+    given_seat("ada-chat")     # install's signer, given: no seat is made
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -44,7 +45,7 @@ def rig(monkeypatch, tmp_path, launchd):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("DC_AGENT", "ada")
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "mac.example.net")
     callers = tmp_path / "callers.txt"
@@ -339,11 +340,12 @@ def test_a_changed_root_refuses(rig, monkeypatch, tmp_path):
     assert j["EnvironmentVariables"]["SESSIONPHONE_ROOT"] == was
 
 
-def test_a_changed_agent_gets_its_own_line_not_the_env_rerun(rig, monkeypatch):
+def test_a_changed_agent_gets_its_own_line_not_the_env_rerun(rig, monkeypatch, given_seat):
     """job() always sets DC_AGENT to the install name (service.job), so "re-run with
     DC_AGENT=<old>" would only refuse again: a hand-edited legacy DC_AGENT gets its
     own line, and both ways it names work. The install name is service.agent():
     DC_AGENT, else CLAUDE_CODE_AGENT, else claude; `bot install` has no name option."""
+    given_seat("bob-chat")     # this test installs as bob
     old = write_legacy(rig, DC_AGENT="Bob")
     before = old.read_bytes()
     with pytest.raises(service.LegacyCarryOver) as e:
@@ -368,10 +370,11 @@ def test_a_changed_agent_gets_its_own_line_not_the_env_rerun(rig, monkeypatch):
     assert not old.exists()
 
 
-def test_a_changed_agent_and_a_carried_key_keep_both_lines(rig, monkeypatch):
+def test_a_changed_agent_and_a_carried_key_keep_both_lines(rig, monkeypatch, given_seat):
     """Both ways go through `bot uninstall`, which removes the plist this guard
     compares, so the install the line names must carry the other moved key itself:
     following it must not silently move the bot's calls dir."""
+    given_seat("bob-chat")     # this test installs as bob
     write_legacy(rig, DC_AGENT="bob", DC_CALLS_DIR="/srv/calls-kept")
     with pytest.raises(service.LegacyCarryOver) as e:
         service.install("ada")

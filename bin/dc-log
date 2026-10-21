@@ -5,7 +5,8 @@ One view of a call, to tail or to run once: what was said each way.
 
 Reads the bot's existing log. Nothing to restart, nothing to install.
 The log is DC_LOG, else <root>/bot.log; the root is DC_ROOT, else
-SESSIONPHONE_ROOT, else ~/.sessionphone (dc-env's contract). If only the old
+SESSIONPHONE_ROOT, else the root `sessionphone bot install` keeps in its
+phone.json, else ~/.sessionphone (dc-env's contract). If only the old
 default <root>/bot/bot.log exists, it reads that and says so on stderr.
   -f      follow
   -n N    how many raw lines to consider (default 400)
@@ -41,15 +42,20 @@ def _env(name):
 
 def root():
     """The bot's root: DC_ROOT, else sessionphone.paths.root() (SESSIONPHONE_ROOT,
-    else ~/.sessionphone). The same answer as dc_env.ROOT and bin/dc-env.
-    No agent name in it: a stranger's dc-log reads the stranger's own bot."""
+    else the root phone.json keeps, else ~/.sessionphone). The same answer as
+    dc_env.ROOT and bin/dc-env, and as there, a settings file that cannot be
+    read gives ~/.sessionphone. No agent name in it: a stranger's dc-log reads
+    the stranger's own bot."""
     v = _env("ROOT")
     if v:
         return Path(v).expanduser()
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
-    from sessionphone import paths     # the one root resolver: stdlib only, no DNS lookup
-    return paths.root()
+    from sessionphone import paths, settings     # the one root resolver: stdlib only, no DNS lookup
+    try:
+        return paths.root()
+    except settings.Bad:
+        return Path(paths.DEFAULT_ROOT).expanduser()
 
 
 def log_path():

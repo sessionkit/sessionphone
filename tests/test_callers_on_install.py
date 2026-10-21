@@ -31,15 +31,16 @@ OWNER = "bea@phone.example.org"
 
 
 @pytest.fixture
-def rig(monkeypatch, tmp_path, launchd):
+def rig(monkeypatch, tmp_path, launchd, given_seat):
     for k in [k for k in os.environ if k.startswith(("DC_", "PIP_CHAT_"))]:
         monkeypatch.delenv(k)
+    given_seat("claude-chat")     # install's signer, given: no seat is made
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))     # a scratch HOME, never the real one
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(root))
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "mac.example.net")
@@ -147,7 +148,8 @@ def test_install_owner_creates_the_callers_file_with_the_owner(rig, tmp_path):
     assert "bootstrap" in rig.verbs()
 
 
-def test_install_owner_writes_into_dc_callers_file(rig, monkeypatch, tmp_path):
+def test_install_owner_writes_into_dc_callers_file(rig, monkeypatch, tmp_path, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     elsewhere = tmp_path / "elsewhere" / "who.txt"
     monkeypatch.setenv("DC_CALLERS_FILE", str(elsewhere))
     service.install("ada", owner=OWNER)
@@ -155,7 +157,8 @@ def test_install_owner_writes_into_dc_callers_file(rig, monkeypatch, tmp_path):
     assert not (tmp_path / "root" / "callers.txt").exists()
 
 
-def test_install_owner_is_idempotent(rig, tmp_path):
+def test_install_owner_is_idempotent(rig, tmp_path, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     service.install("ada", owner=OWNER)
     service.install("ada", owner=OWNER)
     assert account.read_callers(tmp_path / "root" / "callers.txt") == [OWNER]
@@ -170,7 +173,8 @@ def test_install_refuses_an_owner_that_is_not_an_address(rig, tmp_path):
 
 
 def test_a_junk_host_is_refused_before_the_owner_is_written(rig, monkeypatch, tmp_path):
-    monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "1.0.ip6.arpa")
+    # the default host is sessionmail's (dc_env.mail_host): one naming no machine is junk
+    monkeypatch.setenv("SESSIONMAIL_HOST", "localhost")
     r = CliRunner().invoke(cli, ["bot", "install", "--owner", OWNER])
     assert r.exit_code == 2 and "DC_HOST" in r.output
     assert not (tmp_path / "root" / "callers.txt").exists()
@@ -178,7 +182,8 @@ def test_a_junk_host_is_refused_before_the_owner_is_written(rig, monkeypatch, tm
 
 # --- what counts as someone who may ring ------------------------------------
 
-def test_an_existing_owner_installs_without_owner(rig, tmp_path):
+def test_an_existing_owner_installs_without_owner(rig, tmp_path, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     (tmp_path / "root" / "callers.txt").write_text(f"{OWNER}  # owner, Bea, joined 2030-06-09\n")
     service.install("ada")
     assert "bootstrap" in rig.verbs()
@@ -202,7 +207,8 @@ def test_dc_callers_grants_nothing_and_install_refuses_while_it_is_set(rig, monk
     assert rig.calls == [] and not (tmp_path / "job.plist").exists()
 
 
-def test_a_blank_dc_callers_is_unset(rig, monkeypatch, tmp_path):
+def test_a_blank_dc_callers_is_unset(rig, monkeypatch, tmp_path, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     (tmp_path / "root" / "callers.txt").write_text(f"{OWNER}  # owner, Bea, joined 2030-06-09\n")
     monkeypatch.setenv("DC_CALLERS", " , ")
     service.install("ada")
@@ -223,8 +229,9 @@ def test_dc_callers_alone_leaves_nobody_to_ring(tmp_path):
     assert "NOBODY may ring" in dc_env.callers_problem(env)
 
 
-def test_calls_off_needs_no_callers(rig, monkeypatch, tmp_path):
+def test_calls_off_needs_no_callers(rig, monkeypatch, tmp_path, given_seat):
     """A profile with DC_CALLS=off is never rung, by design: nothing to refuse."""
+    given_seat("ada-chat")     # this test installs as ada
     monkeypatch.setenv("DC_CALLS", "off")
     _listed(monkeypatch, tmp_path)      # no owner line to seed channels.txt from (PHONE-102)
     service.install("ada")
@@ -253,6 +260,8 @@ def bot(monkeypatch, tmp_path):
     # every DC_* is stripped above, the tripwire's fake seat too (PHONE-106)
     monkeypatch.setattr(b.seatmail, "check", lambda environ=None: None)
     monkeypatch.setattr(b.seatmail, "setup", lambda environ=None: None)
+    # the start's box check runs `message path`: the box is there (seat.have_box)
+    monkeypatch.setattr(b.seat, "have_box", lambda env, shell: b.seat.Box("ada", "ada@h", "/box"))
     monkeypatch.setattr(b, "relink", lambda: None)
     monkeypatch.setattr(b, "server_choice", lambda: ("/x", "venv", "0"))
     monkeypatch.setattr(dc_env, "HOST_PROBLEM", None)

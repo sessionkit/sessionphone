@@ -21,11 +21,12 @@ from sessionphone.cli import main as cli
 
 
 @pytest.fixture
-def rig(monkeypatch, tmp_path, launchd):
+def rig(monkeypatch, tmp_path, launchd, given_seat):
     for k in [k for k in os.environ if k.startswith("DC_")]:
         monkeypatch.delenv(k)
+    given_seat("ada-chat")     # install's signer, given: no seat is made
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "mac.example.net")
@@ -89,7 +90,8 @@ def test_a_fresh_install_with_no_old_job_does_not_wait(rig, clock):
     assert sum(clock.slept) == 0
 
 
-def test_bot_install_says_not_loaded_and_exits_non_zero(rig):
+def test_bot_install_says_not_loaded_and_exits_non_zero(rig, given_seat):
+    given_seat("claude-chat")     # this test installs as claude
     rig.never_loads = True
     r = CliRunner().invoke(cli, ["bot", "install"])
     assert r.exit_code != 0
@@ -97,7 +99,8 @@ def test_bot_install_says_not_loaded_and_exits_non_zero(rig):
     assert "installed:" not in r.output             # never "installed" with an unloaded job
 
 
-def test_bot_install_reports_installed_only_when_loaded(rig):
+def test_bot_install_reports_installed_only_when_loaded(rig, given_seat):
+    given_seat("claude-chat")     # this test installs as claude
     r = CliRunner().invoke(cli, ["bot", "install"])
     assert r.exit_code == 0, r.output
     assert "installed:" in r.output and "pid 4242" in r.output

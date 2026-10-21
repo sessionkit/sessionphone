@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from sessionphone import channels, paths
+from sessionphone import channels, paths, seat, settings
 from sessionphone.bridge import dc_env, seatmail, stt
 from sessionphone.procname import named_python
 
@@ -60,13 +60,21 @@ _sleep = time.sleep
 # SESSIONMAIL_* are the installing SEAT's (FROM_NAME, SUBSCRIBE, PAGE_RULES,
 # PAGER_REQUIRED ...) and must not reach the bot.
 # Each was read in sessionmail 148dd21: SESSIONMAIL_SENDMAIL picks the carrier
-# (_drop.selected, _sender); ORIGIN is the domain postfix appends (_sig, _drop);
-# RELAY_DOMAIN is general delivery's relay (_sender.preflight); HOME is the
-# host's seat-files root (_seat.home); ROOT is the maildir root the drop writes
-# to (_drop.mail_root); HOST is the sender's host (_drop, _sender, and our own
-# seatmail.id_host). None is seat-scoped, so none was dropped.
-MAIL_KEYS = ("SESSIONMAIL_SENDMAIL", "SESSIONMAIL_ORIGIN", "SESSIONMAIL_RELAY_DOMAIN",
+# (_drop.selected, _sender); RELAY_DOMAIN is general delivery's relay
+# (_sender.preflight); HOME is the host's seat-files root (_seat.home); ROOT is
+# the maildir root the drop writes to (_drop.mail_root); HOST is the sender's
+# host (_drop, _sender, and our own seatmail.id_host). None is seat-scoped.
+# NOT carried: SESSIONMAIL_ORIGIN (ORIGIN_VAR). It is the domain a signature is
+# made on, and the reader verifies with its own: a value only the bot's job
+# holds makes every mail verify bad. Signer and reader on one host read the
+# same settings, so it needs no pin; a wanted one goes in sessionmail's
+# settings key postfix.origin, which both sides read.
+MAIL_KEYS = ("SESSIONMAIL_SENDMAIL", "SESSIONMAIL_RELAY_DOMAIN",
              "SESSIONMAIL_HOME", "SESSIONMAIL_ROOT", "SESSIONMAIL_HOST")
+ORIGIN_VAR = "SESSIONMAIL_ORIGIN"
+ORIGIN_NOT_CARRIED = (f"{ORIGIN_VAR} is set in this shell and NOT carried: a value the reader "
+                      "lacks makes every mail verify bad; set it in sessionmail's settings key "
+                      "postfix.origin, which both sides read")
 
 
 def agent() -> str:
@@ -144,38 +152,66 @@ def carried_mail(environ=None) -> dict[str, str]:
     return {k: e[k] for k in MAIL_KEYS if e.get(k)}
 
 
-def mail_line(env) -> str:
+def mail_line(env, shell=None, probe=None) -> str:
     """What `bot install` says of the job's mail, judged on ENV, the job's own
     environment read back from its plist: which SESSIONMAIL_* it carried (by
     name; SESSIONMAIL_SENDMAIL with its value), and the carrier the bot's
     `message send` will use. With SESSIONMAIL_SENDMAIL unset it says how to get
     the mail drop, since a Mac's default MTA (seatmail.DEFAULT_MTA) is always
-    there but sends nowhere without a configured postfix."""
+    there but sends nowhere without a configured postfix. When SHELL (the
+    installing shell) sets SESSIONMAIL_ORIGIN, it says that was not carried,
+    and where it belongs: a statement, never a refusal.
+    PROBE is settings.mail_file's answer: when the installed sessionmail reads
+    its own mail.json, a job that carries no SESSIONMAIL_SENDMAIL sends by the
+    carrier sessionmail reads there (or its default), and the line says so.
+    The carrier's words are seatmail.carrier_said's, the bot's own start line's."""
     carried = carried_mail(env)
     names = [f"{k}={v}" if k == seatmail.CARRIER_VAR else k for k, v in sorted(carried.items())]
     said = f"carried {', '.join(names)}" if names else "carried no SESSIONMAIL_* setting"
-    line = f"{said}; the bot's mail goes by {seatmail.carrier(env)}"
-    if seatmail.CARRIER_VAR not in carried:
-        line += (f". With no MTA configured (no postfix) that mail reaches no one: export "
-                 f"{seatmail.CARRIER_VAR}={seatmail.DROP}, then run `{INSTALL}` again")
+    mail_file = settings.shown(settings.MAIL_FILE)
+    # the one speaker for the carrier; the advice around it is install's own
+    kind, words = seatmail.carrier_said(env, probe)
+    if kind == seatmail.NOT_KNOWN:
+        line = f"{said}; the bot's mail carrier is {words}. Fix that file, then run `{INSTALL}` again"
+    elif kind == seatmail.NOWHERE:
+        line = f"{said}; the bot's mail goes {words}. Fix it, then run `{INSTALL}` again"
+    else:
+        line = f"{said}; the bot's mail goes by {words}"
+        filed = (probe or {}).get(seatmail.CARRIER_KEY)
+        if seatmail.CARRIER_VAR in carried:
+            pass                        # the variable wins: sessionmail never reads the file
+        elif filed is None:
+            line += (f". With no MTA configured (no postfix) that mail reaches no one: export "
+                     f"{seatmail.CARRIER_VAR}={seatmail.DROP}, then run `{INSTALL}` again")
+        elif filed[0] != seatmail.DROP:
+            line += (f". With no MTA configured (no postfix) that mail reaches no one: write "
+                     f'"sendmail": "{seatmail.DROP}" in {mail_file}')
+    if shell is not None and shell.get(ORIGIN_VAR):
+        line += f". {ORIGIN_NOT_CARRIED}"
     return line
 
 
-def job(name: str | None = None, python: str | None = None) -> dict:
-    """The launchd job, as a dict. DC_* set in this shell are carried into it,
-    so `DC_MESSAGE=... sessionphone bot install` configures the bot, and so are
+def job(name: str | None = None, python: str | None = None, given=None) -> dict:
+    """The launchd job, as a dict. DC_* set in GIVEN are carried into it, so
+    `DC_MESSAGE=... sessionphone bot install` configures the bot, and so are
     the mail-route SESSIONMAIL_* (MAIL_KEYS, carried_mail), so
     `SESSIONMAIL_SENDMAIL=drop sessionphone bot install` makes the bot's
     `message send` use the mail drop on a Mac with no MTA. Carried, never
     chosen here: the carrier is sessionmail's to pick.
+    GIVEN is what install resolved (settings.resolve: this shell's values
+    over the settings file's), else this shell; its SESSIONPHONE_ROOT is the
+    root.
     An ears installed as a uv tool is carried as DC_EARS_SRC (ears_src), unless
-    this shell sets DC_EARS_SRC itself."""
+    GIVEN sets DC_EARS_SRC itself."""
     name = name or agent()
-    root = paths.root()
+    if given is None:
+        given, root = os.environ, paths.root()
+    else:
+        root = pathlib.Path(given.get("SESSIONPHONE_ROOT") or paths.DEFAULT_ROOT).expanduser()
     env = {"PATH": BASE_PATH, "SESSIONPHONE_ROOT": str(root), "DC_AGENT": name,
            "PYTHONUNBUFFERED": "1"}
-    env.update(carried_mail())
-    env.update({k: v for k, v in os.environ.items() if k.startswith("DC_") and v})
+    env.update(carried_mail(given))
+    env.update({k: v for k, v in given.items() if k.startswith("DC_") and v})
     env["DC_AGENT"] = name
     if "DC_EARS_SRC" not in env:
         src = ears_src()
@@ -209,6 +245,12 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess:
 
 def domain() -> str:
     return f"gui/{os.getuid()}"
+
+
+# the seat step's refusals (seat.py), here beside install's others
+NoSigner = seat.NoSigner         # no usable key: exit 2, naming the steps
+SeatFailed = seat.SeatFailed     # `message seat agent --install` failed: exit 1, naming the recovery
+NoBox = seat.NoBox               # the agent's box is not on this host: exit 2
 
 
 class NoMailHost(Exception):
@@ -345,6 +387,9 @@ def check_carry_over(name: str, new_env: dict) -> None:
         how = "dropped" if now is None else repr(now)
         fix = ("the install name: see the last line" if k == "DC_AGENT"
                else f"re-run with {k}={shlex.quote(was)} in the env" if _carried(k)
+               else ("install no longer carries it: a value the reader lacks makes every mail "
+                     "verify bad; set it in sessionmail's settings key postfix.origin")
+               if k == ORIGIN_VAR
                else f"install never carries {k}")
         lines.append(f"  {k}: {was!r} -> {how} ({fix})")
     agent_was = next((was for k, was, _ in moved if k == "DC_AGENT"), None)
@@ -424,7 +469,8 @@ def _retire_legacy(name: str, say) -> list[str]:
 
 
 def install(name: str | None = None, owner: str | None = None,
-            seeded=None, say=None) -> pathlib.Path:
+            seeded=None, say=None, seated=None, shell=None, forget=(),
+            settled=None, registry: str | None = None) -> pathlib.Path:
     """Write the plist (0600) and (re)load it, and check that launchd has it
     loaded. Refuses an unconfigured or unsafe root, a junk mail host, an STT
     URL with no model, and a bot nobody may ring, before it touches the old
@@ -449,10 +495,56 @@ def install(name: str | None = None, owner: str | None = None,
     (LegacyCarryOver, writing nothing) if its plist carries a setting the new
     job would drop or change (check_carry_over), or if it is loaded with its
     plist gone (check_legacy_orphan). Raises LegacyStillLoaded, the new job
-    neither written nor started, if launchd still lists it after its bootout."""
-    paths.ensure_private()
-    name = name or agent()
-    j = job(name, python=named_python())
+    neither written nor started, if launchd still lists it after its bootout.
+
+    The bot's seat (seat.py), after every refusal above and before install's
+    first write of its own: DC_MESSAGE is pinned to the installing shell's
+    `message`. Whether a signer is wanted is seatmail.signing()'s ruling on
+    the job's environment (the carrier this bot's own `message send` will
+    use), never install's. On the mail drop with no signer given or saved the
+    seat step is skipped, and so is the signer half of the start check: no
+    key, no registry, no agent. A carrier sessionmail refuses, or one that
+    cannot be known, refuses (seat.NoCarrier, a NoSigner), writing nothing.
+    DC_SIGNER_* given (this shell's, or saved) are used as they are, on any
+    carrier. REGISTRY (`--registry DIR`) asks for a key on any carrier, the
+    drop included: with no DC_SIGNER_* given, install runs the seat's agent
+    and, only if sessionmail says the seat has no key yet, first mints it
+    into REGISTRY (seat.key: `message seat init --registry DIR <seat>`); a
+    key already there is never minted again. The signer it prints is then
+    SAVED (settings.Resolved.keyed), so later installs and starts sign
+    without --registry. Else, with neither, and a sessionmail whose `message seat agent --help`
+    says `Capability: install`, install runs `message seat agent --install
+    <seat>` and the job carries the socket and .pub it prints (derived on
+    each run, so never saved); a seat not yet minted, or any other refusal,
+    is NoSigner and a failure SeatFailed, with nothing of the bot written.
+    With only one set, or a sessionmail without that line, install refuses
+    (NoSigner) with the bot's own start-up refusal, naming the steps, and
+    writes nothing. Then the bot's own start check (seatmail.check) runs on
+    the job's environment, and the box Delta text goes to is made and proved
+    there (`message setup --box`, `message path`), so a job that would refuse
+    to start, or mail no box, is never loaded. SEATED, if given, is
+    called with (seat.Seat, seat.Box) once the job is loaded. SHELL is the
+    installing shell's environment (os.environ).
+
+    What the job carries is resolved FIRST (settings.resolve), the bot's name
+    and root before anything else: this shell's values, then the settings
+    file's (settings.FILE), then the default. A file that cannot be used, two
+    bots recorded and no name, a locked key this shell changes, or a saved
+    signer path that is gone refuses (settings.Bad, exit 2), writing nothing;
+    when this sessionmail can run the seat's agent (seat.runs_agent), that
+    refusal also names the --forget that lets install run it.
+    FORGET names keys to drop from the file. The file is written only once
+    the job is loaded (settings.save), so a refused or failed install leaves
+    the last settings that worked; SETTLED, if given, is then called with the
+    settings.Resolved, its env the job's. A save that fails still calls
+    SEATED and SETTLED (the job is loaded), then raises settings.NotSaved,
+    its `plist` the job's plist."""
+    shell = os.environ if shell is None else shell
+    res = settings.resolve(shell, name=name, forget=forget,
+                           runs_agent=lambda given: seat.runs_agent(given, shell))
+    name = res.name
+    paths.ensure_private(at=res.root)
+    j = job(name, python=named_python(), given=res.given)
     env = j["EnvironmentVariables"]
     # judged on the environment the job will carry, so the bot it starts would not refuse
     why = dc_env.host_problem(env)
@@ -468,19 +560,35 @@ def install(name: str | None = None, owner: str | None = None,
                         "then run it again.")
     # before anything is written: a rename must not move a carried setting
     check_carry_over(name, env)
-    plan = None
     if owner:
         # a refused install writes NOTHING: judge the
         # list before add_owner touches the callers file
         plan = plan_channels(env, owner)
-        check_legacy_orphan(name)      # the last refusal before the first write
-        add_owner(owner, dc_env.callers_file(env))
-    why = dc_env.callers_problem(env)
+    else:
+        why = dc_env.callers_problem(env)
+        if why:
+            raise NoCallers(why)
+        plan = plan_channels(env)     # nothing written yet: the callers refusal comes first
+    me = seat.seat_name(env, name)
+    # writes nothing: no signer it can get refuses here. --registry asks for a key on any carrier
+    given = seat.plan(env, me, shell, keyed=registry is not None)
+    check_legacy_orphan(name)          # the last refusal before the first write
+    if given:
+        made = given
+    elif registry is not None:         # sessionmail's writes: the seat's key if absent, its agent
+        made = seat.key(env, me, shell, registry)
+        res.keyed = {k: env[k] for k in seat.SIGNER_VARS}   # saved: later installs and starts sign
+    else:
+        made = seat.run_agent(env, me, shell)   # sessionmail's write: the seat's agent
+    why = seatmail.check(env, seat=me)           # the bot's own start check, on the job's env
     if why:
-        raise NoCallers(why)
-    if not owner:     # nothing written yet: the callers refusal above comes first
-        plan = plan_channels(env)
-        check_legacy_orphan(name)      # the last refusal before the first write
+        raise NoSigner(why)
+    box = seat.ensure_box(env, shell)
+    if owner:
+        add_owner(owner, dc_env.callers_file(env))
+        why = dc_env.callers_problem(env)
+        if why:
+            raise NoCallers(why)
     entry = write_channels(plan)
     if entry is not None and seeded is not None:
         seeded(entry)
@@ -502,6 +610,19 @@ def install(name: str | None = None, owner: str | None = None,
         plistlib.dump(j, fh)
     tmp.replace(p)
     _bootstrap(p, target)
+    res.env = dict(env)
+    unsaved = None
+    try:
+        settings.save(res)             # only once the job is loaded
+    except settings.NotSaved as exc:   # the job runs: say all of it, then this
+        unsaved = exc
+    if seated is not None:
+        seated(made, box)
+    if settled is not None:
+        settled(res)
+    if unsaved is not None:
+        unsaved.plist = p
+        raise unsaved
     return p
 
 
@@ -603,6 +724,59 @@ def uninstall(name: str | None = None) -> list[str]:
         if acts:
             said.append(f"{what} {lab} ({', '.join(acts)})")
     return said
+
+
+def _plist(p: pathlib.Path) -> dict:
+    """The plist at P as a dict; {} when it is missing or unreadable."""
+    try:
+        with open(p, "rb") as fh:
+            j = plistlib.load(fh)
+        return j if isinstance(j, dict) else {}
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return {}
+
+
+def log_paths(name: str | None = None) -> tuple[pathlib.Path, pathlib.Path]:
+    """(the bot's own log, launchd's log for its job), as the installed plist
+    names them: DC_LOG, else <DC_ROOT, else SESSIONPHONE_ROOT, else the root>/bot.log;
+    and the job's StandardErrorPath, else <root>/bot.launchd.log."""
+    j = _plist(plist_path(name))
+    env = j.get("EnvironmentVariables") or {}
+    env = env if isinstance(env, dict) else {}
+    r = dc_env._get(env, "ROOT") or env.get("SESSIONPHONE_ROOT")
+    root = pathlib.Path(r).expanduser() if r else paths.root()
+    log = dc_env._get(env, "LOG")
+    bot_log = pathlib.Path(log).expanduser() if log else root / "bot.log"
+    err = j.get("StandardErrorPath")
+    launchd_log = pathlib.Path(err) if isinstance(err, str) and err else paths.root() / "bot.launchd.log"
+    return bot_log, launchd_log
+
+
+def last_line(p: pathlib.Path, tail: int = 65536) -> str | None:
+    """The last non-empty line of the file at P (its last TAIL bytes), or None."""
+    try:
+        with open(p, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - tail))
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else None
+
+
+def last_log(name: str | None = None) -> tuple[pathlib.Path, str | None, bool]:
+    """-> (the log, its last line or None, whether it is launchd's log). The bot's
+    own log first; when it has no line yet (a bot that refused at start writes
+    only to stderr), launchd's log for the job, which holds that refusal."""
+    bot_log, launchd_log = log_paths(name)
+    line = last_line(bot_log)
+    if line is not None:
+        return bot_log, line, False
+    line = last_line(launchd_log)
+    if line is not None:
+        return launchd_log, line, True
+    return bot_log, None, False
 
 
 def legacy_status(name: str | None = None) -> dict:

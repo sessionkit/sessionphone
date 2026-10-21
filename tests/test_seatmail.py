@@ -294,13 +294,13 @@ def test_every_message_send_in_src_is_seatmails():
     ({}, "box"),
 ])
 def test_id_host_is_sessionmails_own_host(monkeypatch, environ, want):
-    monkeypatch.setattr(seatmail.socket, "gethostname", lambda: "box.tail1234.ts.net")
+    monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "box.tail1234.ts.net")
     assert seatmail.id_host(environ) == want
 
 
 def test_id_host_is_not_dc_host(monkeypatch):
     """DC_HOST still builds the addresses and the web Reply-To; the ids never take it."""
-    monkeypatch.setattr(seatmail.socket, "gethostname", lambda: "box.local")
+    monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "box.local")
     assert seatmail.id_host({"DC_HOST": "mac.example.net"}) == "box"
 
 
@@ -468,6 +468,9 @@ def test_main_refuses_with_no_signer(start, monkeypatch, capsys, unset, why):
     err = capsys.readouterr().err
     assert err.startswith(f"sessionphone bot: {why}") and "never sends its agent unsigned" in err
     assert f"message seat init --registry DIR {SEAT}" in err and "message seat agent" in err
+    assert "Give the bot a key with `sessionphone bot install --registry DIR`" in err   # the one command
+    assert err.index("bot install --registry DIR") < err.index("Or by hand")           # it comes first
+    assert "the README's \"The bot's seat\" says how to make one" in err     # how to pick DIR
     assert not (bot.OUTBOX).exists()                         # refused before anything was made
 
 
@@ -510,14 +513,15 @@ def test_main_starts_and_resolves_message_to_an_absolute_path(start, fake_messag
     with pytest.raises(start):
         bot.main()
     assert seatmail.MESSAGE == str(fake_message.exe) and os.path.isabs(seatmail.MESSAGE)
-    assert any(m.startswith(f"agent mail: {fake_message.exe} send as seat {SEAT}, signed, call mails too")
+    assert any(m.startswith(f"agent mail: {fake_message.exe} send as seat {SEAT}, signed (carrier "
+                            "/usr/sbin/sendmail is an MTA, from sessionmail's default), call mails too")
                for m in logged)
 
 
 @pytest.mark.parametrize("sendmail, carrier", [
     ("drop", "carrier drop (SESSIONMAIL_SENDMAIL=drop, no MTA)"),
     ("/opt/mta/sendmail", "carrier MTA /opt/mta/sendmail (SESSIONMAIL_SENDMAIL)"),
-    (None, "carrier MTA /usr/sbin/sendmail (SESSIONMAIL_SENDMAIL unset)"),
+    (None, "carrier MTA /usr/sbin/sendmail (sessionmail's default)"),   # conftest.suite_carrier's
 ], ids=["drop", "path", "unset"])
 def test_the_start_line_names_the_mail_carrier(start, fake_message, monkeypatch, sendmail, carrier):
     """PHONE-179: a deployed bot can be checked from its log, without its plist."""
@@ -533,9 +537,29 @@ def test_the_start_line_names_the_mail_carrier(start, fake_message, monkeypatch,
     assert line.endswith(f"), {carrier}")
 
 
+def test_the_start_line_names_unsigned_on_the_drop(start, fake_message, monkeypatch):
+    """No signer, and sessionmail's own resolver says the drop: the bot starts
+    and its start line names the mode and why."""
+    from sessionphone import settings
+    monkeypatch.setattr(settings, "mail_carrier", lambda exe, sendmail_value=None: {
+        "kind": "drop", "path": None, "source": "default", "why": ""})
+    monkeypatch.delenv("DC_SIGNER_SOCK")
+    monkeypatch.delenv("DC_SIGNER_PUB")
+    logged = []
+    monkeypatch.setattr(bot, "log", logged.append)
+    with pytest.raises(start):
+        bot.main()
+    [line] = [m for m in logged if m.startswith("agent mail: ")]
+    assert (f"send as seat {SEAT}, unsigned (carrier drop: this bot writes into the box itself, from "
+            "sessionmail's default), call mails too") in line
+    assert line.endswith("carrier drop (sessionmail's default)")
+
+
 def test_the_default_mta_is_only_named_never_run():
-    """PHONE-179: in code (not prose), DEFAULT_MTA is read by seatmail.carrier()
-    alone, and carrier() only returns words: it calls nothing but env.get."""
+    """In code (not prose), DEFAULT_MTA is read by seatmail.carrier_said()
+    alone, and it only returns words: it calls nothing but env.get, the
+    read-only question to sessionmail (settings.mail_file, of the `message`
+    resolve_message finds) and string work."""
     import ast
     reads = []
     for path in sorted((REPO / "src").rglob("*.py")):
@@ -545,11 +569,13 @@ def test_the_default_mta_is_only_named_never_run():
                 name = n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else None
                 if name == "DEFAULT_MTA":
                     reads.append((path.relative_to(REPO).as_posix(), fn.name))
-    assert reads == [("src/sessionphone/bridge/seatmail.py", "carrier")]
+    assert reads == [("src/sessionphone/bridge/seatmail.py", "carrier_said")]
     fn = next(n for n in ast.walk(ast.parse((REPO / "src/sessionphone/bridge/seatmail.py").read_text()))
-              if isinstance(n, ast.FunctionDef) and n.name == "carrier")
+              if isinstance(n, ast.FunctionDef) and n.name == "carrier_said")
     calls = {ast.unparse(c.func) for c in ast.walk(fn) if isinstance(c, ast.Call)}
-    assert calls <= {"e.get", "v.strip"}, calls
+    assert calls <= {"e.get", "v.strip", "settings.mail_file", "resolve_message", "(probe or {}).get",
+                     "settings.shown", "json.dumps", "isinstance", "value.startswith",
+                     "settings.mail_carrier", "_said_of"}, calls
 
 
 def test_check_passes_with_message_and_a_signer(fake_message):

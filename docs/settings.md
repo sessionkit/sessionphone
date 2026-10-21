@@ -2,14 +2,17 @@
 
 Every key sessionphone reads: its name, type, default and what it does.
 
-- **The `DC_*` settings are environment variables, not the settings
-  cascade.** `sessionphone bot install` copies each `DC_*` set in your shell
-  into the bot's launchd job, and the bot reads them once, when it starts.
-  To change one, set it in your shell and run `sessionphone bot install`
-  again.
-- **sessionphone does not read the kit's settings cascade today.** There is
-  no seat or agent override: one bot has one set of `DC_*`, the set its job
-  was installed with. The kit's guide to the cascade is
+- **The bot reads its `DC_*` settings from its environment.**
+  `sessionphone bot install` copies each `DC_*` set in your shell into the
+  bot's launchd job, and the bot reads them once, when it starts. To change
+  one, set it in your shell and run `sessionphone bot install` again.
+- **`bot install` remembers them in the phone tool's host settings file,
+  `~/.sessionkit/phone/settings/phone.json`.** Once the job is loaded, it
+  saves each `DC_*` and `SESSIONPHONE_ROOT` your shell gave, under
+  `bots.<agent>`, so a later install from an empty shell installs the same
+  job. See [What bot install remembers][what-bot-install-remembers].
+- **There is no seat or agent override.** One bot has one set of `DC_*`, the
+  set its job was installed with. The kit's guide to the cascade is
   [the kit's settings guide][kit-settings], `docs/settings.md` in the
   sessionkit repo.
 - **sessionmail's mail-route settings ride along.** `bot install` also
@@ -39,9 +42,9 @@ The keys, by what they set:
 - [The dc-* tools][the-dc-tools]
 - [Read from the environment only][read-from-the-environment-only]
 
-`<root>` is the bot's root: `DC_ROOT`, else `SESSIONPHONE_ROOT`, else
-`~/.sessionphone`. `<agent>` is `DC_AGENT` as below, and `<Name>` is
-`DC_AGENT_NAME`.
+`<root>` is the bot's root: `DC_ROOT`, else `SESSIONPHONE_ROOT`, else the
+root `bot install` keeps in `phone.json` (below), else `~/.sessionphone`.
+`<agent>` is `DC_AGENT` as below, and `<Name>` is `DC_AGENT_NAME`.
 
 ## Identity and mail
 
@@ -49,14 +52,72 @@ The keys, by what they set:
 | --- | --- | --- | --- |
 | `DC_AGENT` | name | `CLAUDE_CODE_AGENT`, else `claude` | who the bot speaks for, in lower case. It names the launchd job |
 | `DC_AGENT_NAME` | text | `<agent>`, capitalised | the name in greetings and in the mail's From |
-| `DC_HOST` | host | this machine's full name | the domain the default addresses are built on. The bot refuses to start when it is unset and the machine's name is not a mail domain |
-| `DC_ADDR` | address | `<agent>-chat@<host>` | the bot's own address. Its local part is the seat it signs as |
-| `DC_MAILTO` | address | `<agent>@<host>` | the agent's box, where chat and call turns are mailed |
-| `DC_MESSAGE` | path | `message` on `PATH` | sessionmail's `message` binary. Give an absolute path: launchd's `PATH` is short |
-| `DC_SIGNER_SOCK` | path | none: required | the socket of the seat's key agent |
-| `DC_SIGNER_PUB` | path | none: required | a copy of the seat's `.pub`, kept apart from the key |
+| `DC_HOST` | host | sessionmail's host: `SESSIONMAIL_HOST`, else the `host` in sessionmail's `mail.json`, else the first part of this machine's name | the domain the default addresses are built on. The bot refuses to start when it is unset and that host is empty or `localhost` |
+| `DC_ADDR` | address | `<agent>-chat@<host>` | the bot's own From seat. Its local part is the seat the key signs as. Do not set it to the agent's box: the signer and the From would be different seats, and the bot refuses |
+| `DC_MAILTO` | address | `<agent>@<host>` | where Delta text goes: the agent's box, where chat and call turns are mailed |
+| `DC_MESSAGE` | path | `message` on `PATH` | sessionmail's `message` binary. `bot install` pins it to an absolute path: launchd's `PATH` is short |
+| `DC_SIGNER_SOCK` | path | `SEAT_SOCKET` from `message seat agent --install` | the socket of the seat's key agent. Unset on the mail drop, the bot does not sign. When it signs (an MTA, or `--registry`) with neither `DC_SIGNER_*` set, `bot install` runs that command and uses what it prints (saved only with `--registry`); a sessionmail without `Capability: install` refuses instead |
+| `DC_SIGNER_PUB` | path | `SEAT_PUB` from `message seat agent --install` | the seat's `.pub`, or a copy kept apart from the key. Set both `DC_SIGNER_*` to use a seat agent you run yourself |
 | `DC_BOT_BOX` | path | `~/.mail/agents/<agent>-chat` | the bot's own mailbox, which it reads for mail into a call |
 | `DC_SAY` | command | `dc-say` | the reply command a bridged mail suggests |
+
+## What bot install remembers
+
+The file is `~/.sessionkit/phone/settings/phone.json`: the host layer of the
+tool `phone`, in the kit's `phone` package. It is written 0600, in a folder
+made 0700, and only after the job is loaded, so a refused or failed install
+leaves the last settings that worked.
+
+```json
+{"bots": {"ada": {"DC_HOST": "mac.example.net", "DC_VOICE": "af_sky"}}}
+```
+
+- **One map per bot**, keyed by the setting's own variable name.
+- **Each value resolves in the family's order:** your shell, then the file,
+  then the default. An empty value in your shell is no value.
+- **A value your shell gives is saved**, and replaces the saved one. The
+  `settings:` block says `this shell (saved; was ...)`.
+- **What is never saved:** `DC_AGENT` (it is the map's key), `DC_CALLERS`,
+  a `DC_MESSAGE` pinned from your `PATH`, a `DC_EARS_SRC` found from the ears
+  uv tool, and sessionmail's mail-route settings (below).
+- **`bot install --forget KEY`** drops a saved value, for this run and every
+  later one. It is repeatable.
+- **Which bot:** `DC_AGENT`, else `CLAUDE_CODE_AGENT`, else the one bot the
+  file records, else `claude`. With two or more recorded and no name in your
+  shell, install refuses (exit 2) and names them.
+- **Drop-ins:** `phone.d/*.json` beside the file are read after it, in name
+  order, a later file winning. Install never writes them. A value your shell
+  gives for a key a drop-in sets is used for that run and not saved.
+- **`_locked`**, in any of the files, is a list of dotted paths
+  (`bots.<agent>.<KEY>`, or `bots.<agent>`). A locked key is ignored in every
+  file read after it, and install refuses a different value from your shell.
+- **Refused (exit 2, writing nothing):** a file that cannot be read or is not
+  this shape, and a saved `DC_SIGNER_SOCK` or `DC_SIGNER_PUB` whose path is
+  gone. Give it again in your shell, or `--forget` it. When your sessionmail
+  has `Capability: install` and your shell sets no `DC_SIGNER_*`, the refusal
+  also names `--forget DC_SIGNER_SOCK --forget DC_SIGNER_PUB`: with neither
+  saved, install runs `message seat agent --install` itself. A lock on a key no
+  file gives a value still holds: the bot takes its default, and install
+  refuses a value from your shell.
+- **Not saved after all:** if the file cannot be written once the job is
+  loaded, install still prints every line, with `(NOT saved)` in the
+  `settings:` header, then says why and exits 1. The bot is running; the next
+  install will not remember this run's values.
+
+### Who else reads it
+
+Install is not the only reader. Each of these takes the same order (your
+shell, then the file, then the default) and says which it took:
+
+- **`bot status` and `bot uninstall`** act on the bot install would pick.
+  When your shell names none, a `bot:` line says which, and where from. A name in your
+  shell is taken before any file is read, so `DC_AGENT=NAME sessionphone bot
+  uninstall` works past a file that cannot be read. With no name in your
+  shell, a file that cannot be read, or two bots recorded, refuses (exit 2).
+- **The root** (`SESSIONPHONE_ROOT`), for every verb and the `dc-*` tools:
+  your shell's, else the one the file keeps for that bot, else
+  `~/.sessionphone`. A lock is not enforced here: only install, which writes,
+  refuses a value your shell gives.
 
 ## Mail route
 
@@ -66,16 +127,31 @@ bot's `message send` sees them. To change one, set it and run `bot install`
 again. No other `SESSIONMAIL_*` is carried, and neither is the old
 `SESSION_MAIL_*` spelling.
 
+`bot install` does not save them in `phone.json`: sessionmail keeps them in
+its own `~/.sessionkit/mail/settings/mail.json` (`sendmail`, `root`, `host`,
+`postfix.relay_domain`). Install asks the installed sessionmail whether it
+reads that file. For each one your shell set, its `settings:` block names the
+`mail.json` key to write, or says that this sessionmail reads it from the
+environment only. `SESSIONMAIL_HOME` has no key: export it again at each
+install.
+
 | Key | Default | What it does |
 | --- | --- | --- |
-| `SESSIONMAIL_SENDMAIL` | unset: `/usr/sbin/sendmail` | the carrier. `drop` writes straight into this host's mailboxes, with no MTA. A Mac with no postfix needs `drop` |
-| `SESSIONMAIL_ORIGIN` | unset | the domain postfix appends to a bare address |
+| `SESSIONMAIL_SENDMAIL` | unset: the `sendmail` key in sessionmail's `mail.json` (a key named `carrier` is not read), else sessionmail's own default (`drop` today); a sessionmail that reads the environment only uses `/usr/sbin/sendmail` | the carrier, which also decides whether the bot signs ([Bot mail signing][bot-mail-signing]). `drop` writes straight into this host's mailboxes, with no MTA. A Mac with no postfix needs `drop` |
+| `SESSIONMAIL_ORIGIN` | unset | the domain postfix appends to a bare address. NOT carried into the job: the reader verifies against its own, so set it in sessionmail's settings key `postfix.origin` |
 | `SESSIONMAIL_RELAY_DOMAIN` | unset | the relay for general delivery |
 | `SESSIONMAIL_HOME` | unset | this host's seat-files root |
 | `SESSIONMAIL_ROOT` | unset | the maildir root the drop writes to |
-| `SESSIONMAIL_HOST` | this machine's short name | the sender's host, and the host of the bot's Message-IDs. sessionphone reads it too |
+| `SESSIONMAIL_HOST` | the `host` in sessionmail's `mail.json`, else this machine's short name | the sender's host, and the host of the bot's Message-IDs. sessionphone reads it too |
 
 The defaults are sessionmail's; its own docs are the authority on them.
+
+sessionphone never opens `mail.json` itself. When the job carries no
+`SESSIONMAIL_HOST` or `SESSIONMAIL_SENDMAIL`, the bot asks its own `message`
+(the sessionmail it sends with) what it reads, once at start, and names the
+answer on its start line in `bot.log`: `ids at <host>, from <where>` and
+`carrier <carrier> (<where>)`. `bot install`'s `mail:` line names the same
+carrier. A change in `mail.json` reaches the bot at its next start.
 
 ## Paths
 
@@ -83,7 +159,7 @@ Each one is a path, and each defaults to a place under `<root>`.
 
 | Key | Default | What it holds |
 | --- | --- | --- |
-| `SESSIONPHONE_ROOT` | `~/.sessionphone` | the root, for every verb and the bot |
+| `SESSIONPHONE_ROOT` | the root `bot install` keeps, else `~/.sessionphone` | the root, for every verb and the bot |
 | `DC_ROOT` | `SESSIONPHONE_ROOT`'s root | the bot's root, when it differs |
 | `DC_ACCOUNTS` | `<root>/accounts` | the Delta Chat account and its keys |
 | `DC_OUTBOX` | `<root>/outbox` | the jobs the `dc-*` tools leave for the bot |
@@ -198,7 +274,10 @@ also a flag, and the flag wins.
 
 The `dc-*` tools run in your own shell, not the bot's job, and read these
 from it. They also read the paths above (`DC_ROOT`, `DC_OUTBOX`, `DC_LOG`,
-and so on), to find the bot's root.
+and so on), to find the bot's root. With neither `DC_ROOT` nor
+`SESSIONPHONE_ROOT` set, they ask the package for the root `bot install`
+keeps, so they and the bot read one root. If that question fails, they use
+`~/.sessionphone`.
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
@@ -231,5 +310,7 @@ carry them.
 [voice]: #voice
 [the-web-call]: #the-web-call
 [mail-route]: #mail-route
+[what-bot-install-remembers]: #what-bot-install-remembers
 [the-dc-tools]: #the-dc--tools
 [read-from-the-environment-only]: #read-from-the-environment-only
+[bot-mail-signing]: bot-mail-signing.md

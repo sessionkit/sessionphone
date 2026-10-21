@@ -93,6 +93,11 @@ def launchctl(*args):
 
 service._launchctl = launchctl
 service.named_python = lambda *a, **k: sys.executable   # never a hard link in the venv
+# the suite's sessionmail sends by an MTA (conftest.suite_carrier): the tripwire
+# `message` is a shell script, so its own resolver cannot be asked
+from sessionphone import settings
+settings.mail_carrier = lambda exe, sendmail_value=None: {
+    "kind": "mta", "path": "/usr/sbin/sendmail", "source": "default", "why": ""}
 
 try:
     cli.main(sys.argv[1:], prog_name="sessionphone")
@@ -128,6 +133,12 @@ def _run(tmp_path: pathlib.Path, *argv: str, block=HEAVY, root_ready: bool = Tru
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_CODE_AGENT", "SESSIONPHONE_ROOT", "PYTHONPATH")
            and not k.startswith(("DC_", "PIP_CHAT_"))}
+    # the suite's mail tripwire stays: install and setup run sessionmail (the bot's
+    # seat and its box), and this fresh process has no Popen guard of its own
+    probe_pub = tmp_path / "probe-chat.pub"
+    probe_pub.write_text("ssh-ed25519 AAAAtripwire probe-chat seat\n")
+    env.update(DC_MESSAGE=os.environ["DC_MESSAGE"], DC_SIGNER_SOCK=os.environ["DC_SIGNER_SOCK"],
+               DC_SIGNER_PUB=str(probe_pub))
     env.update(HOME=str(home), SESSIONPHONE_ROOT=str(root), DC_HOST="host.example", DC_AGENT="probe",
                PROBE_BLOCK=json.dumps(sorted(block)), PROBE_OUT=str(out), PROBE_LINK=LINK,
                PYTHONDONTWRITEBYTECODE="1",

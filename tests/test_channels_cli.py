@@ -349,12 +349,13 @@ def test_a_second_joiner_is_not_listed(linker):
 # --- bot install seeds the owner, or refuses before launchd -----------------
 
 @pytest.fixture
-def rig(monkeypatch, tmp_path, launchd):
+def rig(monkeypatch, tmp_path, launchd, given_seat):
     _clean_env(monkeypatch)
+    given_seat("claude-chat")     # install's signer, given: no seat is made
     r = tmp_path / "root"
     r.mkdir(mode=0o700)
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(r))
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "mac.example.net")
@@ -394,7 +395,8 @@ def test_install_with_an_empty_list_and_no_owner_is_refused_too(rig, monkeypatch
     assert rig.calls == []
 
 
-def test_install_seeds_from_the_callers_owner_line(rig):
+def test_install_seeds_from_the_callers_owner_line(rig, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     (rig.root / "callers.txt").write_text(f"{OWNER}  # owner, Bea, joined 2030-06-09\n")
     service.install("ada")
     e = channels.load(rig.root / "channels.txt").entries["owner"]
@@ -431,7 +433,8 @@ def test_install_refuses_a_loose_list_and_does_not_tighten_it(rig):
     assert rig.calls == []
 
 
-def test_install_seeds_the_list_the_job_will_read(rig, monkeypatch, tmp_path):
+def test_install_seeds_the_list_the_job_will_read(rig, monkeypatch, tmp_path, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     elsewhere = tmp_path / "elsewhere" / "list.txt"
     monkeypatch.setenv("DC_CHANNELS_FILE", str(elsewhere))
     service.install("ada", owner=OWNER)
@@ -439,7 +442,8 @@ def test_install_seeds_the_list_the_job_will_read(rig, monkeypatch, tmp_path):
     assert not (rig.root / "channels.txt").exists()
 
 
-def test_install_owner_is_idempotent_on_the_list(rig):
+def test_install_owner_is_idempotent_on_the_list(rig, given_seat):
+    given_seat("ada-chat")     # this test installs as ada
     service.install("ada", owner=OWNER)
     service.install("ada", owner=OWNER)
     assert list(channels.load(rig.root / "channels.txt").entries) == ["owner"]
@@ -509,8 +513,9 @@ def test_seed_lists_the_callers_owner_on_an_existing_root_with_no_list(rig):
     assert rig.calls == []                          # no bootout, no bootstrap, no print
 
 
-def test_seed_writes_what_install_writes(rig, monkeypatch, tmp_path):
+def test_seed_writes_what_install_writes(rig, monkeypatch, tmp_path, given_seat):
     """The same path, so the same line: only the timestamp in the note may differ."""
+    given_seat("ada-chat")     # this test installs as ada
     _owner_line(rig)
     monkeypatch.setattr(service.time, "strftime", lambda fmt, *a: "2030-12-08T23:34:56+1100")
     assert CliRunner().invoke(cli, ["channels", "seed"]).exit_code == 0

@@ -8,7 +8,7 @@
     sessionphone avatar [PATH | --clear]  show, set or clear the bot's picture
     sessionphone channels [list|add NAME TARGET|seed]  where the bot may send
     sessionphone channels rejected [--profile public]  who the public bot turned away
-    sessionphone bot install [--owner ADDR]  run the resident bot under launchd (calls, chat)
+    sessionphone bot install [--owner ADDR] [--forget KEY]  run the resident bot under launchd
     sessionphone bot status|uninstall|run
     sessionphone web [--port --root --origin --tls --host --legs --mail-to --heard-dir]
                                      a browser tab as a call, passkey first
@@ -27,7 +27,17 @@ import sys
 
 import click
 
-from sessionphone import account, avatar, channels, hearing, media, paths, service
+from sessionphone import (
+    account,
+    avatar,
+    channels,
+    hearing,
+    media,
+    paths,
+    seat,
+    service,
+    settings,
+)
 from sessionphone.bridge import dc_env
 
 CTX = {"help_option_names": ["-h", "--help"]}
@@ -38,7 +48,19 @@ def _fail(exc: Exception, code: int) -> None:
     sys.exit(code)
 
 
-@click.group(context_settings=CTX, invoke_without_command=True)
+class _Main(click.Group):
+    """The verbs, with one refusal shared by all of them: a phone.json that
+    cannot be used, found where a verb asks for the root (paths.root reads
+    the root it keeps), is exit 2 naming the file, never a traceback."""
+
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except settings.Bad as exc:
+            _fail(exc, 2)
+
+
+@click.group(cls=_Main, context_settings=CTX, invoke_without_command=True)
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """sessionphone - ring your Claude Code session from your phone over Delta Chat."""
@@ -53,8 +75,12 @@ def main(ctx: click.Context) -> None:
 def setup(name: str, status: str, relay: str | None) -> None:
     """Make this agent's account on a public chatmail relay; print the invite link.
 
+    Then it makes the box Delta text goes to (DC_MAILTO, else <agent>@<host>)
+    with sessionmail's `message setup --box <agent>`, proves it with `message
+    path`, and prints the one step that makes a Claude session hear it.
     Idempotent: run it again and it keeps the account, sets the name, and
-    prints the same invite. Exit 0 done, 1 it failed (the reason is printed).
+    prints the same invite. Exit 0 done, 1 it failed (the reason is printed),
+    2 the box could not be made (the step to run is printed).
     """
     try:
         info = account.setup(name, status, relay)
@@ -66,6 +92,16 @@ def setup(name: str, status: str, relay: str | None) -> None:
     click.echo(f"name:    {info['displayname']} ({'created' if info['created'] else 'already existed'})")
     click.echo(f"saved:   {info['invite_file']}")
     click.echo(f"INVITE: {info['invite']}")
+    env = dict(os.environ)
+    try:
+        seat.pin_message(env, os.environ)
+        box = seat.ensure_box(env, os.environ)
+    except (seat.NoSigner, seat.NoBox) as exc:
+        _fail(exc, 2)
+        return
+    click.echo(f"box:     {box.line()}")
+    if box.path is not None:
+        click.echo(f"hear:    {seat.hear_line(box.name, os.environ)}")
 
 
 @main.command(context_settings=CTX)
@@ -470,15 +506,61 @@ def bot(ctx: click.Context) -> None:
               help="approve ADDR as the owner, the first who may ring (written into the callers file), "
                    "and list them as `owner` in channels.txt if it has no channel yet. ADDR is the "
                    "owner's Delta Chat address (the one their app shows), not a mail address")
-def bot_install(owner: str | None) -> None:
+@click.option("--forget", "forget", multiple=True, metavar="KEY",
+              help="drop KEY (a DC_* name, or SESSIONPHONE_ROOT) from the settings this bot "
+                   "keeps, for this run and every later one. Repeatable")
+@click.option("--registry", default=None, metavar="DIR",
+              type=click.Path(file_okay=False, dir_okay=True),
+              help="give the bot a key, on any mail carrier: mint its seat into the seat "
+                   "registry DIR if it has no key yet (`message seat init --registry DIR`), run "
+                   "the seat's key agent, and save the signer, so later installs and starts sign. "
+                   "A key already there is never minted again")
+def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None) -> None:
     """Run the bot as this user's launchd job, now and at every login.
 
     DC_* variables set in this shell are carried into the job, and so are
-    sessionmail's mail-route settings (SESSIONMAIL_SENDMAIL, _ORIGIN,
-    _RELAY_DOMAIN, _HOME, _ROOT and _HOST), never any other SESSIONMAIL_*.
+    sessionmail's mail-route settings (SESSIONMAIL_SENDMAIL, _RELAY_DOMAIN,
+    _HOME, _ROOT and _HOST), never any other SESSIONMAIL_*. SESSIONMAIL_ORIGIN
+    is not carried: the reader verifies with its own, so it belongs in
+    sessionmail's settings key postfix.origin.
+    Install remembers them: each DC_* and SESSIONPHONE_ROOT it was given is
+    saved, once the job is loaded, in ~/.sessionkit/phone/settings/phone.json,
+    one map per bot, and a later install with an empty shell uses them. A value
+    set in this shell wins over the file; --forget KEY removes one. The bot is
+    DC_AGENT, else CLAUDE_CODE_AGENT, else the one bot the file records, else
+    claude; with two or more recorded and no name, install refuses. The
+    mail-route settings are not saved there: sessionmail keeps them in its own
+    mail.json, and the `settings:` block says, for each one this shell set,
+    whether it is kept and how. A saved DC_SIGNER_* path that has gone is
+    refused (exit 2, writing nothing). The `settings:` block names each value
+    the job carries and where it came from.
+    Whether the bot signs follows the carrier its own `message send` will
+    use, as sessionmail resolves it; the `seat:` line names the mode and
+    why. On the mail drop with no signer set or saved, it does not sign: the
+    bot writes into the box itself, so no key or seat step is needed. On an
+    MTA, or with a signer set or saved, its seat, <agent>-chat, signs every
+    mail it sends its agent. A carrier sessionmail refuses, or cannot name,
+    is refused (exit 2, writing nothing). --registry DIR gives the bot a
+    key on any carrier: with no signer set or saved, install mints the seat
+    into the seat registry DIR if it has no key yet (`message seat init
+    --registry DIR <agent>-chat`), runs its key agent, and saves the signer,
+    so later installs and starts sign; a key already there is never minted
+    again. With no DC_SIGNER_SOCK and DC_SIGNER_PUB set or saved, install
+    then runs the seat's key agent under launchd itself (`message
+    seat agent --install <agent>-chat`) and the job carries the socket and
+    .pub it reports. A seat not minted yet, or a refusal, is exit 2 and
+    writes nothing; a failure is exit 1 and names the recovery (--uninstall,
+    then --install). A sessionmail whose `message seat agent --help` lacks
+    `Capability: install` cannot do that: set both DC_SIGNER_* by hand (the
+    README's "The bot's seat"); without both, install refuses (exit 2,
+    writing nothing) and names the steps. DC_MESSAGE is pinned to this shell's
+    `message`. The bot's own start check then runs on the job's environment,
+    and the box Delta text goes to is made (`message setup --box <agent>`):
+    a job that would refuse to start is never loaded.
     Run it again after a plugin update, or to change them. `link` must not be
-    running. On a Mac with no MTA (no postfix), export
-    SESSIONMAIL_SENDMAIL=drop first: its `mail:` line names the carrier.
+    running. The carrier is sessionmail's: SESSIONMAIL_SENDMAIL, else the
+    `sendmail` key in its mail.json, else its default, the mail drop; the
+    `mail:` line names it.
     Refused (exit 2, before the old job is touched) when nobody may ring the
     bot: no --owner and no address in the callers file (link the phone, or
     give --owner the owner's Delta Chat address); while DC_CALLERS is set,
@@ -505,25 +587,47 @@ def bot_install(owner: str | None) -> None:
         _fail(exc, 2)
         return
     seeded: list[channels.Entry] = []
+    seated: list[tuple[seat.Seat, seat.Box]] = []
+    settled: list[settings.Resolved] = []
+    unsaved: settings.NotSaved | None = None
     try:
-        p = service.install(owner=owner, seeded=seeded.append, say=click.echo)
+        p = service.install(owner=owner, seeded=seeded.append, say=click.echo,
+                            seated=lambda made, box: seated.append((made, box)),
+                            forget=forget, settled=settled.append, registry=registry)
+    except settings.NotSaved as exc:   # the job is loaded: say all of it, then why, exit 1
+        p, unsaved = exc.plist, exc
     except (paths.NotConfigured, paths.Unsafe, service.NoMailHost, service.NoSTTModel,
-            service.NoCallers, service.NoChannels, service.LegacyCarryOver) as exc:
+            service.NoCallers, service.NoChannels, service.LegacyCarryOver,
+            service.NoSigner, service.NoBox, settings.Bad) as exc:
         _fail(exc, 2)
         return
-    except Exception as exc:  # noqa: BLE001 - the operator gets launchctl's reason
+    except Exception as exc:  # noqa: BLE001 - the operator gets launchctl's (or sessionmail's) reason
         _fail(exc, 1)
         return
-    st = service.status()
+    res = settled[0] if settled else None
+    name, env = (res.name, res.env) if res else (None, None)
+    st = service.status(name)
     click.echo(f"installed: {p}")
+    for made, _box in seated:
+        click.echo(f"seat:      {made.line()}")
     if owner:
-        click.echo(f"owner:     {owner.strip().lower()}, approved in {dc_env.callers_file()}")
+        click.echo(f"owner:     {owner.strip().lower()}, approved in {dc_env.callers_file(env)}")
     for e in seeded:
-        click.echo(f"channels:  {e.name} {e.target}, listed in {dc_env.channels_file()}")
+        click.echo(f"channels:  {e.name} {e.target}, listed in {dc_env.channels_file(env)}")
     click.echo(f"running:   {'pid ' + str(st['pid']) if st['pid'] else 'not yet - see `sessionphone bot status`'}")
-    click.echo(f"log:       {paths.root() / 'bot.log'}")
-    _mail(p)
+    click.echo(f"log:       {service.log_paths(name)[0]}")
+    probe = settings.mail_file(env.get("DC_MESSAGE")) if res else None
+    if res:
+        for line in settings.block(res, probe):
+            click.echo(line)
+    _mail(p, probe)
+    for _made, box in seated:
+        click.echo(f"box:       {box.line()}")
+        if box.path is not None:
+            click.echo(f"hear:      {seat.hear_line(box.name, os.environ)}")
     _hearing(p)
+    if unsaved is not None:
+        _fail(unsaved, 1)
 
 
 def _job_env(plist: pathlib.Path) -> tuple[dict | None, Exception | None]:
@@ -536,7 +640,7 @@ def _job_env(plist: pathlib.Path) -> tuple[dict | None, Exception | None]:
         return None, exc
 
 
-def _mail(plist: pathlib.Path) -> None:
+def _mail(plist: pathlib.Path, probe=None) -> None:
     """`bot install`'s `mail:` line: the SESSIONMAIL_* the job carried and the
     carrier the bot will send by (service.mail_line), judged on the plist as
     written, not on this shell. Said, never a refusal."""
@@ -545,7 +649,7 @@ def _mail(plist: pathlib.Path) -> None:
         click.echo(f"mail:      not confirmed. The job's environment could not be read back from "
                    f"{plist} ({exc}), so its mail carrier is not known.")
         return
-    click.echo(f"mail:      {service.mail_line(env)}")
+    click.echo(f"mail:      {service.mail_line(env, shell=os.environ, probe=probe)}")
 
 
 def _hearing(plist: pathlib.Path) -> None:
@@ -565,19 +669,55 @@ def _hearing(plist: pathlib.Path) -> None:
         click.echo(line)
 
 
+def _which_bot(verb: str) -> tuple[str, str | None]:
+    """The bot `sessionphone VERB` acts on, as install picks it
+    (settings.bot_name): DC_AGENT, else CLAUDE_CODE_AGENT, else the one bot
+    phone.json records, else claude. -> (name, its `bot:` line), the line
+    None when this shell named it (it is what was asked for). A settings
+    file that cannot be used, or two bots and no name, refuses (exit 2),
+    naming the way past it."""
+    try:
+        name, came = settings.bot_name(os.environ, verb)
+    except settings.Bad as exc:
+        _fail(Exception(f"{exc} Or name the bot in this shell, which reads no file: "
+                        f"`DC_AGENT=NAME sessionphone {verb}`."), 2)
+    named = settings.shell_name(os.environ) is not None
+    return name, None if named else f"bot:     {name} ({came})"
+
+
 @bot.command("uninstall", context_settings=CTX)
 def bot_uninstall() -> None:
     """Stop the bot and remove its launchd job, and any job sessionphone 0.1.0
-    left for it under the old label. The account stays."""
-    for line in service.uninstall() or ["no launchd job was installed"]:
+    left for it under the old label. The account stays.
+
+    The bot is the one install would pick: DC_AGENT, else CLAUDE_CODE_AGENT,
+    else the one bot ~/.sessionkit/phone/settings/phone.json records, else
+    claude; with two or more recorded and no name, it refuses (exit 2). With
+    no name in this shell, its first line, `bot:`, says which it picked."""
+    name, picked = _which_bot("bot uninstall")
+    if picked:
+        click.echo(picked)
+    for line in service.uninstall(name) or ["no launchd job was installed"]:
         click.echo(line)
 
 
 @bot.command("status", context_settings=CTX)
 def bot_status() -> None:
-    """Is the bot installed, loaded and running? Exit 0 running, 1 not."""
-    st = service.status()
+    """Is the bot installed, loaded and running? Exit 0 running, 1 not.
+
+    Its last line is the last line of the bot's log; before the bot has
+    written one (a bot that refused to start), the last line of launchd's log
+    for the job, where that refusal went.
+
+    The bot is the one install would pick (as `bot uninstall` says; with no
+    name in this shell, a `bot:` line says which), and its log is the one its
+    plist names, else the one under the root: this shell's SESSIONPHONE_ROOT,
+    else the one phone.json keeps, else ~/.sessionphone."""
+    name, picked = _which_bot("bot status")
+    st = service.status(name)
     click.echo(f"job:     {st['label']} ({'installed' if st['installed'] else 'not installed'})")
+    if picked:
+        click.echo(picked)
     old = st["legacy"]
     if old:
         held = " and ".join(w for w, on in (("loaded", old["loaded"]), (f"plist {old['plist']}", old["installed"]))
@@ -590,7 +730,14 @@ def bot_status() -> None:
         click.echo(f"running: pid {st['pid']}")
     else:
         click.echo(f"running: no{' (last exit ' + st['last_exit'] + ')' if st['last_exit'] else ''}")
-    click.echo(f"log:     {paths.root() / 'bot.log'}")
+    log, line, launchd = service.last_log(name)
+    click.echo(f"log:     {log}")
+    if line is None:
+        click.echo("last:    no log yet")
+    elif launchd:
+        click.echo(f"last ({log.name}): {line}")
+    else:
+        click.echo(f"last:    {line}")
     sys.exit(0 if st["pid"] else 1)
 
 

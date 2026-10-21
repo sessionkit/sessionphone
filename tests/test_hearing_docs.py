@@ -46,9 +46,14 @@ def _section(text: str, heading: str) -> str:
     return m.group(1)
 
 
+RELEASED_IN = "## [0.2.0]"       # the release these notes shipped in (PyPI 0.2.0)
+
+
 def _unreleased() -> str:
+    """The CHANGELOG part these notes live in: they shipped in 0.2.0, so its
+    section, not [Unreleased] (which now holds only what came after)."""
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    return text.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    return text.split(RELEASED_IN, 1)[1].split("\n## [", 1)[0]
 
 
 def test_changelog_changed_carries_the_one_line_that_restores_2023():

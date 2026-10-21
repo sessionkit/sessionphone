@@ -38,9 +38,11 @@ def _installation() -> str:
 
 
 def _unreleased() -> str:
+    """The CHANGELOG part these notes live in: they shipped in 0.2.0, so its
+    section, not [Unreleased] (which now holds only what came after)."""
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    m = re.search(r"^## \[Unreleased\]\n(.*?)^## \[", text, re.MULTILINE | re.DOTALL)
-    assert m, "CHANGELOG.md has no `## [Unreleased]` part followed by a release"
+    m = re.search(r"^## \[0\.2\.0\][^\n]*\n(.*?)^## \[", text, re.MULTILINE | re.DOTALL)
+    assert m, "CHANGELOG.md has no `## [0.2.0]` part followed by a release"
     return _flat(m.group(1))
 
 

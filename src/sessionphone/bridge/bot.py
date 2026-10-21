@@ -42,6 +42,7 @@ from sessionphone.account import address, read_owner, server_choice   # the venv
 # address: the account's own address, read the way setup reads it
 from sessionphone.procname import named_python   # runs as libexec/session-phone
 from sessionphone import channels       # where the bot may send
+from sessionphone import seat           # the agent's box, made before the first send
 from sessionphone import jobs           # the job keys this bot reads, stamped for the tools
 from sessionphone import voicemsg       # may a file go out as a voice message
 from sessionphone import imgtext        # the text on a posted image, fenced UNTRUSTED
@@ -575,7 +576,9 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
     refused send appends its error there, so a call turn can log the refusal.
 
     ONE TRANSPORT: every mail goes by seatmail, `message send`, as the bot's
-    own seat, signed, never unsigned. A call mail (M5: msgid, in_reply_to or
+    own seat, signed as seatmail.signing() rules (unsigned only on the mail
+    drop with no signer). A Cc the send could not deliver is left off
+    (seatmail.guard_cc), and said once per run. A call mail (M5: msgid, in_reply_to or
     supersedes, ids the bot minted itself) carries them as `--message-id`,
     `-r` and `--supersedes`. The one difference is a failure: M1-M4 are kept
     in the spool and retried, an M5 NEVER is. sessionmail has no duplicate
@@ -609,9 +612,8 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
         f"To answer {'on the call' if call else 'in that chat'}:\n"
         + "".join(f"  {l}\n" for l in hint.splitlines())
     )
-    # >>> seat-mail: every mail, signed by the bot's seat. The launchd job
-    # CARRIES a seat (DC_SIGNER_*), and the exit code is read: a refusal is
-    # logged, never "bridged".
+    # >>> seat-mail: every mail, as the bot's seat, signed as seatmail.signing()
+    # rules, and the exit code is read: a refusal is logged, never "bridged".
     m5 = bool(msgid or in_reply_to or supersedes)       # a call mail, on ids we minted
     hdrs = {"X-Delta-Chat-Bridge": "1", "X-Delta-Chat-Id": str(chat_id)}
     if PROFILE:
@@ -642,10 +644,31 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
             SPOOL.keep(sent, body)          # logs BRIDGE MAIL FAILED ..., kept at PATH
         except OSError as e:
             log(f"BRIDGE MAIL FAILED {sent.error}; NOT KEPT, the mail is lost: {e}")
+    for addr, why in sent.dropped:     # a Cc that could refuse the whole mail is left off
+        say_once(("cc", addr), f"Cc {addr} left off agent mail: {why} (one recipient the mail "
+                               "drop cannot deliver to refuses the whole mail). Said once per run.")
+    for notice in sent.notices:        # sessionmail's own warnings: once per run, never per send
+        if "\u26a0" in notice:
+            say_once(("notice", notice), f"sessionmail says (once per run): {notice}")
     if not sent.ok and refusal is not None:
         refusal.append(sent.error)
     return sent.ok
     # <<< seat-mail
+
+
+# Lines said at most once per run: a warning that is true of every send
+# (sessionmail's UNSIGNED and MagicDNS notices, a Cc left off) would otherwise
+# fill the log one copy per mail.
+_SAID_ONCE: set = set()
+
+
+def say_once(key, line) -> bool:
+    """log(LINE) the first time KEY is seen this run. -> whether it was logged."""
+    if key in _SAID_ONCE:
+        return False
+    _SAID_ONCE.add(key)
+    log(line)
+    return True
 
 
 # >>> contract-headers
@@ -1492,6 +1515,10 @@ def relink():
 
 
 def main():
+    # FIRST: the mail host in sessionmail's full order, its mail.json included
+    # (dc_env's import took the environment only), so every address and id
+    # below is built on the host sessionmail itself will use
+    host_from = dc_env.take_mail_host()
     # no message, no signer, a key of another seat, or a `message` with no
     # --message-id (an older sessionmail): refuse
     why = check_root() or check_stt() or seatmail.check()
@@ -1506,9 +1533,18 @@ def main():
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {why}\n")
         sys.exit(2)
     # <<< junk-host
+    # the box BEFORE the first send: the mail drop never makes one, and a send
+    # to a box that is not there is refused (rc=3), every mail of the run
+    try:
+        box = seat.have_box(os.environ, os.environ)
+    except seat.NoBox as e:
+        print(f"sessionphone bot: {e}", file=sys.stderr)
+        sys.exit(2)
     OUTBOX.mkdir(parents=True, exist_ok=True, mode=0o700)   # any writer here can make the bot send
-    log(f"agent mail: {seatmail.setup()} send as seat {seatmail.seat()}, signed, "
-        f"call mails too (ids at {seatmail.id_host()}), carrier {seatmail.carrier()}")
+    mode, reason = seatmail.signing()       # the one rule: the mode and why, every start
+    log(f"agent mail: {seatmail.setup()} send as seat {seatmail.seat()}, {mode} ({reason}), "
+        f"call mails too (ids at {seatmail.id_host()}, from {host_from}), carrier {seatmail.carrier()}")
+    log(f"agent box: {box.line()}. {seat.hear_words(box.name)}")
     waiting, dead = SPOOL.counts()
     log(f"undelivered mail: {waiting} waiting, {dead} dead in {SPOOL.root}")
     relink()

@@ -84,26 +84,39 @@ a public chatmail relay, and the chat is end-to-end encrypted.
    unasked.
 7. **Start the bot and ring them.** `link` must have exited first: only one
    process can hold the account.
-   - **Its seat first.** The bot mails you as its own sessionmail seat,
-     `<agent>-chat`, signed, never unsigned. Run
-     `message seat init --registry DIR <agent>-chat`, then run
-     `message seat agent <agent>-chat SOCKET` under launchd. Set
-     `DC_SIGNER_SOCK=SOCKET`, `DC_SIGNER_PUB` (a copy of the seat's `.pub`)
-     and `DC_MESSAGE` (the absolute path of `message`) in the shell that runs
-     `bot install`. Without them the bot refuses to start (exit 2) and says
-     which one is missing.
-   - **No postfix on this Mac?** Export `SESSIONMAIL_SENDMAIL=drop` in that
-     same shell BEFORE `bot install`, or the bot's mail goes to
-     `/usr/sbin/sendmail`, which delivers nowhere without postfix: the call
-     speaks and you never hear the caller's turns. `bot install` carries
-     sessionmail's mail-route settings (`SESSIONMAIL_SENDMAIL`, `_ORIGIN`,
-     `_RELAY_DOMAIN`, `_HOME`, `_ROOT`, `_HOST`) into the job, never the
-     seat's own, and its `mail:` line says what it carried
-     and which carrier the bot will use. After changing it, run
-     `bot install` again.
+   - **Its seat, and whether it signs.** The bot mails you as its own
+     sessionmail seat, `<agent>-chat` (`claude-chat` unless `DC_AGENT` is
+     set). Whether it signs follows the carrier its own `message send` will
+     use (`docs/bot-mail-signing.md`). Do not pick the
+     carrier: it is sessionmail's (`SESSIONMAIL_SENDMAIL`, else the
+     `sendmail` key in its `mail.json`, else its default, `drop`).
+     - **On the mail drop (no mail server), it does not sign.** Run
+       `sessionphone bot install`: no key, no registry, no seat step.
+     - **On an MTA it must sign.** Run `sessionphone bot install --registry
+       DIR`, where DIR is a seat registry (the README's "The bot's seat"
+       shows how to make one). It mints the seat there if it has no key,
+       runs its key agent and saves the signer. If install says the seat is
+       not minted, it names this step. If it fails (exit 1), run `message
+       seat agent --uninstall <agent>-chat`, then install again. If it says
+       this sessionmail lacks `Capability: install`, follow the README's
+       steps by hand (`message seat agent <agent>-chat SOCKET` under launchd,
+       then `DC_SIGNER_SOCK` and `DC_SIGNER_PUB`).
+     Install pins `DC_MESSAGE`, makes your box (`message setup --box
+     <agent>`) and checks the bot would start, before it loads anything. Its
+     `seat:` line names the mode and why, and its `mail:` line the carrier.
+     `bot install` carries sessionmail's mail-route settings
+     (`SESSIONMAIL_SENDMAIL`, `_RELAY_DOMAIN`, `_HOME`, `_ROOT`, `_HOST`)
+     into the job, never the seat's own and never `SESSIONMAIL_ORIGIN`.
+     After changing one, run `bot install` again.
+   - **Hearing it.** Delta text goes to `<agent>@<host>`. Only a Claude
+     session started as `session start <agent>` (which runs `claude --agent
+     <agent>`) hears that box; a plain `claude` gets no copy, and nothing
+     tells it so. Install's `hear:` line says so. Tell the user that line;
+     do not claim a plain session hears it.
    - `sessionphone bot install` runs the bot as this user's launchd job,
      now and at every login. `sessionphone bot status` should say
-     `running: pid N`. If it doesn't, read the log it names. It refuses
+     `running: pid N`. If it doesn't, read its `last:` line, the log's last
+     line. It refuses
      (exit 2, naming the file) when nobody may ring the bot: no address
      in `callers.txt`. There are two ways forward. Run `sessionphone link`
      and let the user scan the invite (the first to join becomes the
@@ -282,7 +295,8 @@ it cannot unsend what was read, and any time limit is unmeasured.
 
 ## Where things live
 
-- **State:** `$SESSIONPHONE_ROOT`, default `~/.sessionphone/`: the account
+- **State:** `$SESSIONPHONE_ROOT`, else the root `bot install` keeps, else
+  `~/.sessionphone/`: the account
   (`accounts/`), `invite.txt`, `callers.txt`, `channels.txt` (where the bot
   may send: see below), the bot's `bot.log`, its
   `outbox/` (what the `dc-*` verbs queue), one dir per call under

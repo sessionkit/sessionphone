@@ -67,6 +67,7 @@ def stub_main(monkeypatch, tmp_path, account, log) -> None:
     monkeypatch.setattr(bot.seatmail, "check", lambda *a, **k: None)
     monkeypatch.setattr(bot.seatmail, "setup", lambda *a, **k: "stub")
     monkeypatch.setattr(bot.seatmail, "seat", lambda *a, **k: "stub")
+    monkeypatch.setattr(bot.seat, "have_box", lambda env, shell: bot.seat.Box("stub", "stub@h", "/box"))
     monkeypatch.setattr(bot.dc_env, "HOST_PROBLEM", None)
     monkeypatch.setattr(bot.dc_env, "callers_problem", lambda *a, **k: None)
     monkeypatch.setattr(bot.dc_env, "callers_ignored", lambda *a, **k: None)

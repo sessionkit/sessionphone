@@ -1068,6 +1068,7 @@ def test_the_design_note_keeps_the_decisions():
 
 def test_the_changelog_names_the_feed_under_unreleased_added():
     log = (ROOT / "CHANGELOG.md").read_text()
-    unreleased = log[log.index("## [Unreleased]"):log.index("\n## [", log.index("## [Unreleased]") + 5)]
+    at = log.index("## [0.2.0]")          # the feed shipped in 0.2.0: its section, not [Unreleased]
+    unreleased = log[at:log.index("\n## [", at + 5)]
     added = unreleased[unreleased.index("### Added"):]
     assert "`dc-xdc-realtime --feed MSG_ID`" in added and "DC_XDC_FEED_CHATS" in added

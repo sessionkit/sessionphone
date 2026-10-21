@@ -18,7 +18,7 @@ import plistlib
 import pytest
 from click.testing import CliRunner
 
-from sessionphone import service
+from sessionphone import service, settings
 from sessionphone.bridge import dc_env, seatmail
 from sessionphone.cli import main as cli
 
@@ -57,7 +57,7 @@ def test_empty_sessionmail_sendmail_is_absent(clean):
     assert "SESSIONMAIL_SENDMAIL" not in _env()
 
 
-MAIL_ROUTE = {"SESSIONMAIL_SENDMAIL": "/opt/mta/sendmail", "SESSIONMAIL_ORIGIN": "example.net",
+MAIL_ROUTE = {"SESSIONMAIL_SENDMAIL": "/opt/mta/sendmail",
               "SESSIONMAIL_RELAY_DOMAIN": "relay.example", "SESSIONMAIL_HOME": "/h/.sessionmail",
               "SESSIONMAIL_ROOT": "/h/.mail/agents", "SESSIONMAIL_HOST": "mac"}
 # the installing seat's own settings, read by sessionmail but never the bot's
@@ -67,8 +67,10 @@ SEAT_KEYS = {"SESSIONMAIL_SUBSCRIBE": "proj+task.foreman", "SESSIONMAIL_FROM_NAM
              "SESSIONMAIL_IMAP_PASSWORD_FILE": "/k", "SESSIONMAIL_ANYTHING_NEW": "x"}
 
 
-def test_the_allowlist_is_the_ruled_six():
+def test_the_allowlist_is_the_ruled_five():
+    """SESSIONMAIL_ORIGIN left it: the reader verifies on its own origin."""
     assert service.MAIL_KEYS == tuple(MAIL_ROUTE)
+    assert "SESSIONMAIL_ORIGIN" not in service.MAIL_KEYS
 
 
 def test_every_mail_route_key_is_carried(clean):
@@ -76,6 +78,25 @@ def test_every_mail_route_key_is_carried(clean):
         clean.setenv(k, v)
     env = _env()
     assert {k: env[k] for k in env if k.startswith("SESSIONMAIL_")} == MAIL_ROUTE
+
+
+def test_the_origin_is_never_carried(clean):
+    """A SESSIONMAIL_ORIGIN only the bot's job holds makes the bot sign on a
+    value its reader lacks, so every mail verifies bad: never carried."""
+    clean.setenv("SESSIONMAIL_ORIGIN", "example.net")
+    clean.setenv("SESSIONMAIL_SENDMAIL", "drop")
+    env = _env()
+    assert "SESSIONMAIL_ORIGIN" not in env and env["SESSIONMAIL_SENDMAIL"] == "drop"
+    back = plistlib.loads(plistlib.dumps(service.job("dave", python="/p")))
+    assert "SESSIONMAIL_ORIGIN" not in back["EnvironmentVariables"]
+
+
+def test_mail_line_says_the_origin_was_not_carried():
+    line = service.mail_line({"SESSIONMAIL_SENDMAIL": "drop"}, shell={"SESSIONMAIL_ORIGIN": "example.net"})
+    assert line.endswith("SESSIONMAIL_ORIGIN is set in this shell and NOT carried: a value the reader "
+                         "lacks makes every mail verify bad; set it in sessionmail's settings key "
+                         "postfix.origin, which both sides read")
+    assert "NOT carried" not in service.mail_line({"SESSIONMAIL_SENDMAIL": "drop"}, shell={})
 
 
 def test_no_seat_key_is_carried(clean):
@@ -140,7 +161,10 @@ def test_install_help_names_every_carried_key():
     ({}, "MTA /usr/sbin/sendmail (SESSIONMAIL_SENDMAIL unset)"),
     ({"SESSION_MAIL_SENDMAIL": "drop"}, "MTA /usr/sbin/sendmail (SESSIONMAIL_SENDMAIL unset)"),
 ], ids=["drop", "drop-spaced", "path", "empty", "unset", "other-spelling"])
-def test_carrier_names_what_sessionmail_will_use(env, said):
+def test_carrier_names_what_sessionmail_will_use(env, said, monkeypatch):
+    """A sessionmail that cannot be asked at all: the words fall back to the
+    environment alone. Log words only: seatmail.signing() refuses there."""
+    monkeypatch.setattr(settings, "mail_carrier", lambda exe, sendmail_value=None: None)
     assert seatmail.carrier(env) == said
 
 
@@ -167,14 +191,15 @@ def test_mail_line_says_plainly_when_none_was_carried():
 # ---- `sessionphone bot install`: the mail: line, judged on the plist ---------
 
 @pytest.fixture
-def rig(clean, tmp_path, launchd):
+def rig(clean, tmp_path, launchd, given_seat):
     """test_hearing's rig: FakeLaunchd, a scratch HOME and root, an owner."""
     for k in [k for k in os.environ if k.startswith(("DC_", "PIP_CHAT_"))]:
         clean.delenv(k)
+    given_seat("claude-chat")     # install's signer, given: no seat is made
     (tmp_path / "home").mkdir()
     clean.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "root").mkdir(mode=0o700)
-    clean.setattr(service.paths, "ensure_private", lambda *a: None)
+    clean.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     clean.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     clean.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     clean.setattr(dc_env.socket, "getfqdn", lambda: "mac.example.net")

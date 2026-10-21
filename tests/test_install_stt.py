@@ -24,12 +24,13 @@ OWNER = "owner@phone.example.org"
 
 
 @pytest.fixture
-def rig(monkeypatch, tmp_path, launchd):
+def rig(monkeypatch, tmp_path, launchd, given_seat):
     for k in [k for k in os.environ if k.startswith(("DC_", "PIP_CHAT_"))]:
         monkeypatch.delenv(k)
+    given_seat("ada-chat")     # install's signer, given: no seat is made
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path / "root"))
     monkeypatch.setenv("DC_HOST", "mac.example.net")    # a good host: only STT is judged
-    monkeypatch.setattr(service.paths, "ensure_private", lambda *a: None)
+    monkeypatch.setattr(service.paths, "ensure_private", lambda *a, **k: None)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     # neither file exists: an install with --owner would write both
@@ -77,8 +78,9 @@ def test_the_refusal_is_the_bots_own_start_check(rig, monkeypatch):
     assert seen == [(UNKNOWN, "some-model")]            # the job's env, both settings
 
 
-def test_install_judges_the_stt_url_the_job_will_carry(rig, monkeypatch, tmp_path):
+def test_install_judges_the_stt_url_the_job_will_carry(rig, monkeypatch, tmp_path, given_seat):
     """With DC_STT_MODEL set, the same URL installs: the model is carried."""
+    given_seat("claude-chat")     # this test installs as claude
     monkeypatch.setenv("DC_STT_URL", UNKNOWN)
     monkeypatch.setenv("DC_STT_MODEL", "my-model")
     r = CliRunner().invoke(cli, ["bot", "install", "--owner", OWNER])

@@ -58,3 +58,19 @@ def test_a_hostile_seat_env_does_not_reach_the_suite(tmp_path) -> None:
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-2000:]
     assert "3 passed" in r.stdout, r.stdout[-3000:]
     assert json.loads((root / "voices.json").read_text()) == {"alice": "x"}   # the seat root, untouched
+
+
+def test_a_root_bot_install_kept_does_not_reach_the_suite(tmp_path) -> None:
+    """A child pytest on a machine where `bot install` has run: its phone.json
+    keeps a root, which paths.root() reads. dc_env.ROOT is bound at import,
+    before any per-test stub, so without the conftest isolation the suite
+    freezes that live root into it."""
+    home = tmp_path / "home"
+    kept = home / ".sessionkit" / "phone" / "settings" / "phone.json"
+    kept.parent.mkdir(parents=True)
+    kept.write_text(json.dumps({"bots": {"alice": {"SESSIONPHONE_ROOT": str(tmp_path / "kept-root")}}}))
+    env = dict(os.environ, HOME=str(home))
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *PROBES],
+                       cwd=REPO, env=env, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-2000:]
+    assert "2 passed" in r.stdout, r.stdout[-3000:]

@@ -1,8 +1,9 @@
 """Where sessionphone keeps one agent's Delta Chat life: one root, 0700.
 
 Everything hangs off `SESSIONPHONE_ROOT` (default `~/.sessionphone`), so two
-agents on one Mac are two roots and never one shared account. The bot (the
-resident bridge) and the setup verbs read the same paths from here.
+agents on one Mac are two roots and never one shared account. A root `bot
+install` remembers (in phone.json) is read here too, after this shell's. The
+bot (the resident bridge) and the setup verbs read the same paths from here.
 """
 from __future__ import annotations
 
@@ -70,9 +71,30 @@ class Unsafe(Exception):
     """The root is readable by others. Exit code 2: refused, not warned."""
 
 
+ROOT_VAR = "SESSIONPHONE_ROOT"
+
+
 def root() -> pathlib.Path:
-    """The one directory this agent's Delta Chat account lives in."""
-    return pathlib.Path(os.environ.get("SESSIONPHONE_ROOT", DEFAULT_ROOT)).expanduser()
+    """The one directory this agent's Delta Chat account lives in (root_from)."""
+    return root_from()[0]
+
+
+def root_from() -> tuple[pathlib.Path, str]:
+    """The root, in `bot install`'s order, and where it came from in words:
+    SESSIONPHONE_ROOT in this shell (empty counts as unset), else the one
+    phone.json (or a drop-in) keeps for this bot (settings.kept), else
+    ~/.sessionphone. A lock in the file is not enforced here: only install,
+    which writes, refuses a shell value a file locks. Raises settings.Bad
+    for a settings file that cannot be read, or two bots and no name."""
+    v = os.environ.get(ROOT_VAR)
+    if v:
+        return pathlib.Path(v).expanduser(), f"{ROOT_VAR} in this shell"
+    # here, not at import: settings imports this module
+    from sessionphone import settings
+    v, where = settings.kept(ROOT_VAR)
+    if v:
+        return pathlib.Path(v).expanduser(), settings.shown(where)
+    return pathlib.Path(DEFAULT_ROOT).expanduser(), "the default"
 
 
 def accounts_dir() -> pathlib.Path:
@@ -90,13 +112,15 @@ def callers_path() -> pathlib.Path:
     return root() / "callers.txt"
 
 
-def ensure_private(create: bool = False) -> None:
+def ensure_private(create: bool = False, at: pathlib.Path | None = None) -> None:
     """The root holds the relay password and the keys: 0700, or refuse.
 
     `setup` makes it 0700; every other verb refuses a root that is wider,
     because a warning is read once and a world-readable key is read forever.
+    AT is the root to judge (install's, resolved with its settings file),
+    else root().
     """
-    r = root()
+    r = root() if at is None else at
     if create:
         r.mkdir(parents=True, exist_ok=True, mode=0o700)
         r.chmod(0o700)

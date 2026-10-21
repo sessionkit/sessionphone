@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from sessionphone import cli, service
+from sessionphone import cli, paths, service
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "sessionphone"
@@ -93,11 +93,13 @@ def test_settings_page_names_every_setting_the_tools_read():
     assert missing == [], f"docs/settings.md does not name: {missing}"
 
 
-def test_settings_page_says_dc_is_environment_not_the_cascade():
+def test_settings_page_says_where_bot_install_remembers_its_settings():
     page = _read("settings.md")
     head = " ".join(page.split("\n## ")[0].split())     # the point, above the first section
-    assert "environment variables, not the settings cascade" in head
-    assert "does not read the kit's settings cascade" in head
+    assert "reads its `DC_*` settings from its environment" in head
+    assert "does not read the kit's settings cascade" not in head
+    assert f"`{paths.kit_settings('phone', 'phone.json')}`" in head
+    assert "## What bot install remembers" in page
     label = re.search(r"\[the kit's settings guide\]\[([^\]]+)\]", head)
     assert label, "the lead does not link the kit's settings guide"
     assert "`docs/settings.md` in the sessionkit repo" in head, "offline, the lead names no path"

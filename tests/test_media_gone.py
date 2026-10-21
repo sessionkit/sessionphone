@@ -165,6 +165,12 @@ def test_bot_install_with_calls_off_and_no_pack_writes_a_chat_only_job(tmp_path)
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_CODE_AGENT", "SESSIONPHONE_ROOT", "PYTHONPATH")
            and not k.startswith(("DC_", "PIP_CHAT_"))}
+    # the suite's mail tripwire stays: install and setup run sessionmail (the bot's
+    # seat and its box), and this fresh process has no Popen guard of its own
+    probe_pub = tmp_path / "probe-chat.pub"
+    probe_pub.write_text("ssh-ed25519 AAAAtripwire probe-chat seat\n")
+    env.update(DC_MESSAGE=os.environ["DC_MESSAGE"], DC_SIGNER_SOCK=os.environ["DC_SIGNER_SOCK"],
+               DC_SIGNER_PUB=str(probe_pub))
     env.update(HOME=str(home), SESSIONPHONE_ROOT=str(root), DC_HOST="host.example", DC_AGENT="probe",
                DC_CALLS="off", PROBE_BLOCK=json.dumps(sorted(media.MODULES)), PROBE_OUT=str(out),
                PROBE_LINK=guard.LINK, PYTHONDONTWRITEBYTECODE="1")

@@ -6,7 +6,7 @@ Rename it. An empty value counts as unset. The defaults suit a bare install: one
 its state in one private root.
 
 The root is DC_ROOT, else sessionphone.paths.root() (SESSIONPHONE_ROOT,
-else ~/.sessionphone). It is mode 0700, and it holds the account, the
+else the root `bot install` keeps in phone.json, else ~/.sessionphone). It is mode 0700, and it holds the account, the
 outbox, the call dirs, the approved callers and the ear and mouth sockets.
 `sessionphone setup` makes it. bin/dc-env mirrors this file: change both
 or neither.
@@ -17,6 +17,7 @@ import socket
 import sys
 
 from sessionphone import paths  # the one root, shared with the setup verbs
+from sessionphone import settings  # sessionmail's own answer for its mail.json
 
 HOME = pathlib.Path.home()
 
@@ -53,30 +54,98 @@ def _get(e, name):
 # The agent: DC_AGENT, else the seat Claude Code was started as, else "claude".
 AGENT = (env("AGENT") or os.environ.get("CLAUDE_CODE_AGENT") or "claude").strip().lower()
 AGENT_NAME = env("AGENT_NAME") or AGENT.capitalize()
-# This machine's name. It's used only to mint Message-IDs and the default mail
-# addresses below. It's not the Delta Chat relay: that lives in the account.
-HOST = env("HOST") or socket.getfqdn() or "localhost"
+# sessionmail's own host settings (its host_of): both spellings, empty = unset.
+MAIL_HOST_VARS = ("SESSIONMAIL_HOST", "SESSION_MAIL_HOST")
+
+
+MAIL_HOST_KEY = settings.MAIL_KEYS["SESSIONMAIL_HOST"]
+FROM_MACHINE = "this machine's name"
+FROM_MAIL_JSON = f"sessionmail's {settings.shown(settings.MAIL_FILE)} `{MAIL_HOST_KEY}`"
+
+
+def mail_host_from(environ=None, ask=True):
+    """-> (the host sessionmail delivers this machine's mail on, where it came
+    from in words), in sessionmail's own order (its host_of): this
+    environment's $SESSIONMAIL_HOST, else $SESSION_MAIL_HOST; else the `host`
+    sessionmail keeps in its own mail.json; else the first label of this
+    machine's name (socket.gethostname()). Empty counts as unset, as in
+    sessionmail.
+
+    The file is asked of the sessionmail the bot sends with (its `message`:
+    DC_MESSAGE, else `message` on this environment's PATH, through
+    settings.mail_file, asked once per process), never read here. ASK=False
+    skips that step: the import-time defaults below take the environment
+    only, so importing this module runs nothing.
+
+    Both of sessionmail's carriers deliver <box>@<this host>: the mail drop keeps
+    a To whose domain is this host or under it, and postfix's boxes are keyed by
+    the short name. A DNS answer (getfqdn) is neither, and on a Mac it can be a
+    reverse-DNS name. seatmail.id_host is this same answer, so the two cannot
+    drift."""
+    e = os.environ if environ is None else environ
+    for var in MAIL_HOST_VARS:
+        if e.get(var):
+            return e[var], f"{var} in this environment"
+    if ask:
+        from sessionphone.bridge import seatmail  # here, not at import: seatmail imports this module
+        filed = settings.mail_text(settings.mail_file(seatmail.resolve_message(e)), MAIL_HOST_KEY)
+        if filed:
+            return filed, FROM_MAIL_JSON
+    return socket.gethostname().split(".")[0], FROM_MACHINE
+
+
+def mail_host(environ=None, ask=True):
+    """The host sessionmail delivers this machine's mail on (mail_host_from)."""
+    return mail_host_from(environ, ask)[0]
+
+
+# This machine's mail name. It's used only to mint Message-IDs and the default
+# mail addresses below. It's not the Delta Chat relay: that lives in the account.
+# At import, from the environment only (no sessionmail is asked): the bot
+# takes sessionmail's own file into account once, at start (take_mail_host).
+HOST = env("HOST") or mail_host(ask=False) or "localhost"
 ADDR = env("ADDR") or f"{AGENT}-chat@{HOST}"      # the bridge's own mail address
 MAILTO = env("MAILTO") or f"{AGENT}@{HOST}"       # the agent's box: where text in lands
 
 
-def host_problem(environ=None, fqdn=None):
-    """-> None, or why the bot must refuse to start: with no DC_HOST, this
-    machine's own name is not a mail domain, and an address is built from it.
+def mailto(environ=None):
+    """Where a bot run with `environ` mails Delta text: DC_MAILTO, else
+    <agent>@<DC_HOST, else mail_host()>. MAILTO's answer, read from `environ`
+    now (the plist's, at install), not frozen at import."""
+    e = os.environ if environ is None else environ
+    agent = (_get(e, "AGENT") or e.get("CLAUDE_CODE_AGENT") or "claude").strip().lower()
+    return _get(e, "MAILTO") or f"{agent}@{_get(e, 'HOST') or mail_host(e) or 'localhost'}"
 
-    On macOS getfqdn() can be a reverse-DNS name (1.0.0...ip6.arpa), and every
-    incoming chat was mailed to <agent>@<that> while the bot looked healthy
-    (measured live on a user's Mac in a cutover). A host is junk when it
-    is empty, a .arpa name (ip6.arpa, in-addr.arpa), localhost, or has no dot.
+
+def _junk(host):
+    """-> None, or what is wrong with HOST as a mail domain built from a DNS name:
+    empty, a .arpa name (ip6.arpa, in-addr.arpa), localhost, or no dot."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return "is empty"
+    if host == "arpa" or host.endswith(".arpa"):
+        return f"is {host!r}, a reverse-DNS name, not a mail domain"
+    if host == "localhost" or host.startswith("localhost.") or "." not in host:
+        return f"is {host!r}, which has no mail domain"
+    return None
+
+
+def host_problem(environ=None, host=None):
+    """-> None, or why the bot must refuse to start: with no DC_HOST, the
+    default addresses are built on mail_host(), and it names no machine.
+
+    The default host is sessionmail's own (mail_host): the host both of its
+    carriers deliver this machine's boxes on. A short name has no dot by
+    design and is accepted; it is refused only when it is empty or localhost.
+    It is never a DNS answer: on macOS getfqdn() can be a reverse-DNS name
+    (1.0.0...ip6.arpa), and every incoming chat was once mailed to
+    <agent>@<that> while the bot looked healthy (measured live on a user's Mac).
     A DC_HOST the operator named is trusted (DC_HOST=localhost included), and
     with both DC_ADDR and DC_MAILTO named, HOST only mints Message-IDs: no
     address is built from it, so nothing is refused.
 
     environ is the environment the bot will run with (os.environ, or the
-    plist's at install); fqdn stands in for socket.getfqdn() in tests.
-
-    SEAM, not a fork: the seat's mail domain belongs to sessionmail. When it
-    publishes one, this adopts it as the fallback before getfqdn().
+    plist's at install); host stands in for mail_host(environ) in tests.
     """
     e = os.environ if environ is None else environ
 
@@ -85,23 +154,48 @@ def host_problem(environ=None, fqdn=None):
 
     if get("HOST") or (get("ADDR") and get("MAILTO")):
         return None
-    host = (socket.getfqdn() if fqdn is None else fqdn).strip().lower().rstrip(".")
+    host = (mail_host(e) if host is None else host).strip().lower().rstrip(".")
     if not host:
         what = "is empty"
-    elif host == "arpa" or host.endswith(".arpa"):
-        what = f"is {host!r}, a reverse-DNS name, not a mail domain"
-    elif host == "localhost" or host.startswith("localhost.") or "." not in host:
-        what = f"is {host!r}, which has no mail domain"
+    elif host == "localhost" or host.startswith("localhost."):
+        what = f"is {host!r}, which names no machine"
     else:
         return None
     agent = (get("AGENT") or e.get("CLAUDE_CODE_AGENT") or "claude").strip().lower()
-    return (f"no DC_HOST is set and this machine's name {what}, so mail to the agent "
-            f"would go to {agent}@{host or 'localhost'}, which nobody reads. Set DC_HOST to "
-            f"this machine's mail domain (DC_HOST=mac.example.net) and run "
+    return (f"no DC_HOST is set and this machine's mail host {what}, so mail to the agent "
+            f"would go to {agent}@{host or 'localhost'}, which nobody reads. Set "
+            f"SESSIONMAIL_HOST (sessionmail's host for this machine) or DC_HOST to this "
+            f"machine's mail domain (DC_HOST=mac.example.net) and run "
             f"`sessionphone bot install` again, or name both DC_ADDR and DC_MAILTO.")
 
 
-HOST_PROBLEM = host_problem()   # refused in bot main(), never a crash on import
+def fqdn_problem(environ, fqdn):
+    """-> None, or why a host built from the DNS name FQDN is no mail domain,
+    when `environ` names no DC_HOST: the rule a caller that builds its host
+    from getfqdn() itself still judges by (_junk). A DC_HOST is trusted."""
+    if _get(environ, "HOST"):
+        return None
+    what = _junk(fqdn)
+    return None if what is None else f"no DC_HOST is set and this machine's name {what}"
+
+
+HOST_PROBLEM = host_problem(host=mail_host(ask=False))   # refused in bot main(), never a crash on import
+
+
+def take_mail_host():
+    """At the bot's start: HOST, ADDR, MAILTO and HOST_PROBLEM in the full
+    order, sessionmail's mail.json included (mail_host_from). They are
+    rebound only when that file gives the host, since without it the
+    import-time answer already is the full one. -> where the host came from."""
+    global HOST, ADDR, MAILTO, HOST_PROBLEM
+    host, where = mail_host_from()
+    if where != FROM_MAIL_JSON:
+        return where
+    HOST = env("HOST") or host
+    ADDR = env("ADDR") or f"{AGENT}-chat@{HOST}"
+    MAILTO = env("MAILTO") or f"{AGENT}@{HOST}"
+    HOST_PROBLEM = host_problem(host=host)
+    return where
 
 
 def callers_file(environ=None):
@@ -200,7 +294,23 @@ def callers_ignored(environ=None):
     return f"{name} is set and IGNORED: approved callers come from {f} only; add each {how}."
 
 
-ROOT = pathlib.Path(env("ROOT")).expanduser() if env("ROOT") else paths.root()
+BAD = []   # settings that did not parse, said once in the bot's log (never a crash on import)
+
+
+def _root():
+    """DC_ROOT, else paths.root(). At import this never raises: a settings
+    file that cannot be used gives the default root, and its refusal goes
+    in BAD (the verbs that need the root ask paths.root() and refuse)."""
+    if env("ROOT"):
+        return pathlib.Path(env("ROOT")).expanduser()
+    try:
+        return paths.root()
+    except settings.Bad as exc:
+        BAD.append(f"{exc} Using {paths.DEFAULT_ROOT} for now.")
+        return pathlib.Path(paths.DEFAULT_ROOT).expanduser()
+
+
+ROOT = _root()
 # The voice the bridge speaks in when nobody names one: a kokoro id (af_sky),
 # or a clone dir under ~/.voicemode/voices.
 VOICE = env("VOICE") or "af_sky"
@@ -214,7 +324,6 @@ SAY = env("SAY") or "dc-say"                      # the reply hint in bridged ma
 #          waits RING_WAIT seconds for `dc-answer CHAT_ID`. No answer (the
 #          agent is busy, or not running) = it answers as voicemail.
 ANSWER = (env("ANSWER") or "auto").strip().lower()
-BAD = []   # settings that did not parse, said once in the bot's log (never a crash on import)
 
 
 def number(name, default):
