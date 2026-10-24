@@ -344,7 +344,8 @@ def test_a_changed_agent_gets_its_own_line_not_the_env_rerun(rig, monkeypatch, g
     """job() always sets DC_AGENT to the install name (service.job), so "re-run with
     DC_AGENT=<old>" would only refuse again: a hand-edited legacy DC_AGENT gets its
     own line, and both ways it names work. The install name is service.agent():
-    DC_AGENT, else CLAUDE_CODE_AGENT, else claude; `bot install` has no name option."""
+    DC_AGENT, else this session's seat, else the one bot phone.json records, else
+    claude; `bot install` has no name option."""
     given_seat("bob-chat")     # this test installs as bob
     old = write_legacy(rig, DC_AGENT="Bob")
     before = old.read_bytes()
@@ -355,7 +356,8 @@ def test_a_changed_agent_gets_its_own_line_not_the_env_rerun(rig, monkeypatch, g
     assert msg.splitlines()[-1] == (
         f"This legacy job's DC_AGENT is Bob, not ada: install as bob (`sessionphone bot "
         f"uninstall` first, it removes {OLD}, then `DC_AGENT=Bob sessionphone bot install`: "
-        "install's name is DC_AGENT, else CLAUDE_CODE_AGENT, else claude), or "
+        "install's name is DC_AGENT, else this session's seat, else the one bot phone.json "
+        "records, else claude), or "
         "`sessionphone bot uninstall` first to accept the change, then `sessionphone bot install`.")
     assert "re-run with DC_AGENT" not in msg                  # the advice that loops
     assert "with the old values in the env" not in msg

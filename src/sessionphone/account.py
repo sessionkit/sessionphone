@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Iterator
+from importlib import resources
 from typing import Any
 
 from deltachat_rpc_client import Account, DeltaChat, Rpc
@@ -299,42 +300,37 @@ def link(timeout: float | None = 600.0, greet: bool = True) -> dict[str, Any]:
 # ---- the connect page -------------------------------------------------------
 
 
-BUILTIN_QR_PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connect to {{AGENT_NAME}} on Delta Chat</title>
-<style>
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
-  .qr svg { width: 16rem; height: 16rem; }
-  .link { word-break: break-all; font-size: 0.85rem; color: #555; }
-</style></head><body>
-<h1>Connect to {{AGENT_NAME}}</h1>
-<div class="qr">{{QR_SVG}}</div>
-<ol>
-  <li>Install Delta Chat on your phone and make a profile.</li>
-  <li>Tap the QR icon and scan this code.</li>
-  <li>Wait for {{AGENT_NAME}} to say it's linked.</li>
-</ol>
-<p class="link">Or open this link on the phone: <a href="{{INVITE}}">{{INVITE}}</a></p>
-</body></html>
-"""
+# The connect page ships as package data beside this module, so a checkout, a
+# wheel and a kit install all read the same bytes. There is no second copy.
+QR_PAGE = "pages/qr-page.html"
+
+
+QR_BORDER = 4    # the quiet zone, in modules: the QR spec's minimum
+QR_LIGHT = "#fff"
+QR_DARK = "#000"
 
 
 def qr_svg(link: str) -> str:
-    """The invite link as an inline SVG: pure Python, no browser needed."""
+    """The invite link as an inline SVG: pure Python, no browser needed.
+
+    Dark modules on an explicit white fill that covers the 4-module quiet
+    zone, so the code reads the same on a dark page. A `viewBox` and no
+    width or height, so the page's CSS scales the whole code to its box;
+    without one, a box smaller than the drawing crops it."""
     import io
 
     import segno
 
     buf = io.BytesIO()
-    segno.make(link, error="m").save(buf, kind="svg", xmldecl=False, svgns=True, scale=6, border=2)
+    segno.make(link, error="m", micro=False).save(
+        buf, kind="svg", xmldecl=False, svgns=True, scale=6, border=QR_BORDER,
+        dark=QR_DARK, light=QR_LIGHT, omitsize=True)
     return buf.getvalue().decode("utf-8")
 
 
-def default_template() -> pathlib.Path | None:
-    """The skill's own page, when the package runs from its plugin directory."""
-    candidate = pathlib.Path(__file__).resolve().parents[2] / "skills" / "sessionphone" / "references" / "qr-page.html"
-    return candidate if candidate.exists() else None
+def default_page() -> str:
+    """The connect page's template, read from the package itself."""
+    return resources.files("sessionphone").joinpath(QR_PAGE).read_text(encoding="utf-8")
 
 
 def qr_page(agent_name: str, template: pathlib.Path | None = None, link: str | None = None) -> str:
@@ -342,10 +338,9 @@ def qr_page(agent_name: str, template: pathlib.Path | None = None, link: str | N
     `{{QR_SVG}}` filled. A template with no invite placeholder is refused
     rather than printed unchanged, which would look like success."""
     link = link or invite()
-    path = template or default_template()
-    text = path.read_text(encoding="utf-8") if path else BUILTIN_QR_PAGE
+    text = template.read_text(encoding="utf-8") if template else default_page()
     if "{{INVITE}}" not in text and "{{QR_SVG}}" not in text:
-        raise ValueError(f"template has no {{{{INVITE}}}} or {{{{QR_SVG}}}} placeholder: {path}")
+        raise ValueError(f"template has no {{{{INVITE}}}} or {{{{QR_SVG}}}} placeholder: {template or QR_PAGE}")
     return (
         text.replace("{{AGENT_NAME}}", agent_name)
         .replace("{{INVITE}}", link)

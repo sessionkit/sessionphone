@@ -30,9 +30,9 @@ def test_no_doc_example_time_carries_a_non_utc_offset():
 
 
 def test_the_stamp_check_catches_an_offset():
-    for text in ("2030-01-03T12:00:00+0530", "2030-01-03T12:00+09:00", "2030-01-03 12:00:00-05:00"):
+    for text in ("2030-06-09T12:00:00+0530", "2030-06-09T12:00+09:00", "2030-06-09 12:00:00-05:00"):
         assert STAMP.search(text).group(1) not in UTC, text
-    for text in ("2030-01-03T12:00:00+0000", "2030-01-03T12:00:00Z", "2030-01-03 12:00"):
+    for text in ("2030-06-09T12:00:00+0000", "2030-06-09T12:00:00Z", "2030-06-09 12:00"):
         assert STAMP.search(text).group(1) in UTC, text
 
 

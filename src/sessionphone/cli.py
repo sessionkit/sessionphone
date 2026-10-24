@@ -31,6 +31,7 @@ from sessionphone import (
     account,
     avatar,
     channels,
+    displayname,
     hearing,
     media,
     paths,
@@ -159,7 +160,7 @@ def invite(as_qr: bool, invert: bool, png_file: pathlib.Path | None) -> None:
 @main.command(context_settings=CTX)
 @click.option("--name", default=None, help="the agent's name on the page (default: the account's display name)")
 @click.option("--template", type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path), default=None,
-              help="an HTML template with {{AGENT_NAME}} {{INVITE}} {{QR_SVG}} (default: the skill's qr-page.html)")
+              help="an HTML template with {{AGENT_NAME}} {{INVITE}} {{QR_SVG}} (default: the page the package ships)")
 def qr(name: str | None, template: pathlib.Path | None) -> None:
     """Print the connect page, a QR of the invite link, ready for `> connect.html`."""
     try:
@@ -272,6 +273,8 @@ def avatar_(path: pathlib.Path | None, clear: bool, profile: str | None) -> None
     account is touched. While the resident bot holds the account the change
     is handed to it as a job, and this waits for its answer. It sends
     nothing: the picture shows after this account's next message.
+    --clear also records that you chose no picture, so the bot does not
+    set the default one at its start; setting a PATH removes that record.
     Exit 0 done or shown; 1 not configured; 2 refused (the file, Delta
     Chat's own refusal, or --profile); 3 the bot did not take it (older
     than this, it refused, or `link` holds the account); 4 NOT CONFIRMED
@@ -298,6 +301,12 @@ def avatar_(path: pathlib.Path | None, clear: bool, profile: str | None) -> None
         return
     via = " (by the running bot)" if how == "bot" else ""
     click.echo(f"avatar: {'cleared' if clear else blob or 'set'}{via}")
+    try:        # the user's choice wins: the bot never sets the default over it
+        avatar.record_choice(clear)
+    except OSError as exc:
+        click.echo(f"warning: could not record that the picture was {'cleared' if clear else 'set'} "
+                   f"({avatar.marker()}: {exc.strerror or exc}); the bot may set the default "
+                   "picture at its next start", err=True)
     click.echo(f"note:   {avatar.SHOWS}")
 
 
@@ -515,7 +524,18 @@ def bot(ctx: click.Context) -> None:
                    "registry DIR if it has no key yet (`message seat init --registry DIR`), run "
                    "the seat's key agent, and save the signer, so later installs and starts sign. "
                    "A key already there is never minted again")
-def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None) -> None:
+@click.option("--hear-here", "hear_here", is_flag=True,
+              help="also let THIS Claude session hear the bot's box, by a session subscription "
+                   "(`message subscription add BOX`). It ends with this session: a later session "
+                   "hears the box only when started as the agent (`session start AGENT`), or "
+                   "after --hear-here again. Never done unless asked")
+@click.option("--replace", "replace", multiple=True, metavar="NAME",
+              help="retire bot NAME, which phone.json records on this bot's root (one Delta "
+                   "Chat account): boot out its launchd job, remove its plist, and forget it in "
+                   "phone.json. Without it, install refuses while another bot is recorded on "
+                   "the same root. Repeatable")
+def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None,
+                hear_here: bool = False, replace: tuple[str, ...] = ()) -> None:
     """Run the bot as this user's launchd job, now and at every login.
 
     DC_* variables set in this shell are carried into the job, and so are
@@ -527,8 +547,12 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     saved, once the job is loaded, in ~/.sessionkit/phone/settings/phone.json,
     one map per bot, and a later install with an empty shell uses them. A value
     set in this shell wins over the file; --forget KEY removes one. The bot is
-    DC_AGENT, else CLAUDE_CODE_AGENT, else the one bot the file records, else
-    claude; with two or more recorded and no name, install refuses. The
+    DC_AGENT, else this session's seat as sessionmail names it (`message
+    subscription list`) when a later session can be started as it, never a
+    session id or a plus address, else the one bot the file records, else
+    claude; with two or more recorded and no name, install refuses. Only
+    when sessionmail gives no answer is CLAUDE_CODE_AGENT taken instead of
+    the seat. The
     mail-route settings are not saved there: sessionmail keeps them in its own
     mail.json, and the `settings:` block says, for each one this shell set,
     whether it is kept and how. A saved DC_SIGNER_* path that has gone is
@@ -571,6 +595,13 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     kind is unknown and DC_STT_MODEL is unset (tag the URL or set the model).
     Refused too (exit 2, writing nothing) when this environment lacks the
     media pack the job runs on; the message says how to fetch it.
+    One root is one Delta Chat account: while phone.json records another
+    bot on this bot's root (its SESSIONPHONE_ROOT, DC_ROOT or DC_ACCOUNTS),
+    install refuses (exit 2, writing nothing) and names it, with the ways
+    past it. --replace NAME retires that bot: its launchd job is booted out,
+    its plist removed, and phone.json forgets it once the new job is loaded,
+    one `replaced bot` line each. Exit 1, the new job not started, when
+    launchd still lists it after its bootout: run install again.
     A job left by sessionphone 0.1.0 for the same agent (its old label) is
     retired first: booted out, its plist removed, one line each. Refused
     (exit 2, writing nothing, booting nothing out) when that old plist
@@ -578,6 +609,22 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     each one, old -> new, and the fix), or when the old job is loaded with
     its plist gone. Exit 1, the new job not started, when launchd still lists
     the old job after its bootout: run install again.
+    The `hear:` line says whether THIS session will hear Delta messages and
+    calls, as sessionmail measures it, never guessed. When it will not, it
+    says so first, then the ways out: `session start <agent>`, DC_AGENT or
+    DC_MAILTO, or --hear-here; and that warning is install's FIRST line,
+    ahead of `installed:` (a line that confirms it hears, or a Terminal's
+    advice, stays under `box:`). A warning only: the job is installed either
+    way, and the exit code does not change. From a shell that is no Claude
+    session it gives the advice, and how to send Delta text to another box.
+    When a default picture ships, the `picture:` line says the bot sets it
+    at its start if the account has none and it was not cleared
+    (`sessionphone avatar --clear`); nothing ships yet, so no line.
+    The `name:` line says the bot's Delta Chat name: DC_NAME, else the
+    agent's name, title-cased, which the bot sets at its start over an empty
+    name or the name of the agent it is or replaced (--replace). Any other
+    name was set by hand and is kept; the line says so, with the DC_NAME line
+    that changes it.
     Its last line, `hearing:`, says whether the bot will hear the caller: it
     sends a half-second test clip to the STT at DC_STT_URL, saying so first.
     """
@@ -593,7 +640,8 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     try:
         p = service.install(owner=owner, seeded=seeded.append, say=click.echo,
                             seated=lambda made, box: seated.append((made, box)),
-                            forget=forget, settled=settled.append, registry=registry)
+                            forget=forget, settled=settled.append, registry=registry,
+                            replace=replace)
     except settings.NotSaved as exc:   # the job is loaded: say all of it, then why, exit 1
         p, unsaved = exc.plist, exc
     except (paths.NotConfigured, paths.Unsafe, service.NoMailHost, service.NoSTTModel,
@@ -607,6 +655,9 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     res = settled[0] if settled else None
     name, env = (res.name, res.env) if res else (None, None)
     st = service.status(name)
+    first, later = _hear_lines(seated, hear_here)
+    for line in first:              # this session will NOT hear: the warning leads
+        click.echo(line)
     click.echo(f"installed: {p}")
     for made, _box in seated:
         click.echo(f"seat:      {made.line()}")
@@ -616,6 +667,12 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
         click.echo(f"channels:  {e.name} {e.target}, listed in {dc_env.channels_file(env)}")
     click.echo(f"running:   {'pid ' + str(st['pid']) if st['pid'] else 'not yet - see `sessionphone bot status`'}")
     click.echo(f"log:       {service.log_paths(name)[0]}")
+    said = avatar.install_line()
+    if said:
+        click.echo(said)
+    if res:
+        click.echo(displayname.install_line(dc_env.home(res.env, res.root), res.name, res.env.get("DC_NAME", ""),
+                                            tuple(res.replace)))
     probe = settings.mail_file(env.get("DC_MESSAGE")) if res else None
     if res:
         for line in settings.block(res, probe):
@@ -623,11 +680,36 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     _mail(p, probe)
     for _made, box in seated:
         click.echo(f"box:       {box.line()}")
-        if box.path is not None:
-            click.echo(f"hear:      {seat.hear_line(box.name, os.environ)}")
+        for line in later.get(box.name, ()):
+            click.echo(line)
     _hearing(p)
     if unsaved is not None:
         _fail(unsaved, 1)
+
+
+def _hear_lines(seated, hear_here: bool) -> tuple[list[str], dict[str, list[str]]]:
+    """`bot install`'s hear-here: and hear: lines for each box made, measured
+    once, --hear-here first (it subscribes, then the hear line measures again).
+    -> (first, later): when sessionmail says THIS session will NOT hear a box
+    (seat.deaf), its hear: warning and ways out, then its hear-here: line, go
+    in FIRST, ahead of `installed:`; else they stay in LATER, under the box's
+    own `box:` line, as before."""
+    first: list[str] = []
+    later: dict[str, list[str]] = {}
+    for _made, box in seated:
+        lines = later.setdefault(box.name, [])
+        if box.path is None:
+            if hear_here:
+                lines.append(f"hear-here: not done: box {box.name} is not on this host")
+            continue
+        here = f"hear-here: {seat.hear_here(box.name, os.environ)}" if hear_here else None
+        r = seat.reach(os.environ)
+        hear = f"hear:      {seat.hear_line(box.name, os.environ, r)}"
+        if seat.deaf(box.name, r):
+            first += [hear, *([here] if here else [])]
+        else:
+            lines += [*([here] if here else []), hear]
+    return first, later
 
 
 def _job_env(plist: pathlib.Path) -> tuple[dict | None, Exception | None]:
@@ -657,7 +739,9 @@ def _hearing(plist: pathlib.Path) -> None:
 
     Judged on the environment launchd runs the bot with, read back from the
     plist just installed (`job()` carries DC_* and service.MAIL_KEYS only), by
-    asking that STT to transcribe a test clip (hearing.py). Said, never a
+    asking that STT to transcribe a test clip (hearing.py). When the offered
+    route gives no answer, the speech weights' reader says whether its models
+    are downloading or not there yet (hearing.weights_for). Said, never a
     refusal: the exit code stays 0, and the job is already installed and loaded."""
     env, exc = _job_env(plist)
     if env is None:
@@ -665,24 +749,24 @@ def _hearing(plist: pathlib.Path) -> None:
                    f"{plist} ({exc}), so DC_STT_URL was not checked.")
         return
     v = hearing.probe(env, say=click.echo)
-    for line in hearing.lines(v, env, shell=os.environ):
+    w = hearing.weights_for(v, shell=os.environ)
+    for line in hearing.lines(v, env, shell=os.environ, weights=w):
         click.echo(line)
 
 
 def _which_bot(verb: str) -> tuple[str, str | None]:
     """The bot `sessionphone VERB` acts on, as install picks it
-    (settings.bot_name): DC_AGENT, else CLAUDE_CODE_AGENT, else the one bot
-    phone.json records, else claude. -> (name, its `bot:` line), the line
-    None when this shell named it (it is what was asked for). A settings
-    file that cannot be used, or two bots and no name, refuses (exit 2),
-    naming the way past it."""
+    (settings.bot_name): DC_AGENT, else this session's durable seat, else
+    the one bot phone.json records, else claude. -> (name, its `bot:` line), the line
+    None when this shell's own variables named it (settings.named_by_shell:
+    it is what was asked for). A settings file that cannot be used, or two
+    bots and no name, refuses (exit 2), naming the way past it."""
     try:
-        name, came = settings.bot_name(os.environ, verb)
+        name, came = settings.bot_name(os.environ, verb, ask=True)
     except settings.Bad as exc:
         _fail(Exception(f"{exc} Or name the bot in this shell, which reads no file: "
                         f"`DC_AGENT=NAME sessionphone {verb}`."), 2)
-    named = settings.shell_name(os.environ) is not None
-    return name, None if named else f"bot:     {name} ({came})"
+    return name, None if settings.named_by_shell(came) else f"bot:     {name} ({came})"
 
 
 @bot.command("uninstall", context_settings=CTX)
@@ -690,9 +774,9 @@ def bot_uninstall() -> None:
     """Stop the bot and remove its launchd job, and any job sessionphone 0.1.0
     left for it under the old label. The account stays.
 
-    The bot is the one install would pick: DC_AGENT, else CLAUDE_CODE_AGENT,
-    else the one bot ~/.sessionkit/phone/settings/phone.json records, else
-    claude; with two or more recorded and no name, it refuses (exit 2). With
+    The bot is the one install would pick: DC_AGENT, else this session's
+    durable seat, else the one bot ~/.sessionkit/phone/settings/phone.json
+    records, else claude; with two or more recorded and no name, it refuses (exit 2). With
     no name in this shell, its first line, `bot:`, says which it picked."""
     name, picked = _which_bot("bot uninstall")
     if picked:
@@ -743,14 +827,24 @@ def bot_status() -> None:
 
 @bot.command("run", context_settings=CTX)
 def bot_run() -> None:
-    """Run the bot in the foreground, for a test. Ctrl-C stops it."""
+    """Run the bot in the foreground, for a test. Ctrl-C stops it.
+
+    The bot is the one install would pick (as `bot uninstall` says):
+    DC_AGENT, else this session's durable seat, else the one bot
+    ~/.sessionkit/phone/settings/phone.json records, else claude; with two
+    or more recorded and no name, it refuses (exit 2). With no name in this
+    shell, its first line, `bot:`, says which it picked."""
     try:
         media.require("bot run")
     except media.Missing as exc:
         _fail(exc, 2)
         return
+    name, picked = _which_bot("bot run")
+    if picked:
+        click.echo(picked)
     # bot.py takes argv[1] as the agent when DC_AGENT is unset; here argv[1] is "bot"
-    os.environ.setdefault("DC_AGENT", service.agent())
+    os.environ["DC_AGENT"] = name
+    dc_env.bind_agent()     # AGENT, ADDR, MAILTO: this bot's, whatever read them first
     from sessionphone.bridge import bot as bridge_bot  # heavy: WebRTC, only when asked
 
     bridge_bot.main()
@@ -783,7 +877,8 @@ _ROOT_HELP = "the sessionphone root (default: $SESSIONPHONE_ROOT, else ~/.sessio
                    "a live seat on the line; it waits for the operator's GO")
 @click.option("--mail-to", "mail_to", default=None, metavar="ADDR",
               help="with --legs: the seat each finished turn of a web call is mailed to "
-                   "(default: $DC_MAILTO, else $DC_AGENT@HOST; with neither, --legs is refused)")
+                   "(default: $DC_MAILTO, else $DC_AGENT@HOST, HOST being $DC_HOST, else the mail drop's "
+                   "host part for this machine; with neither, --legs is refused)")
 @click.option("--heard-dir", "heard_dir", type=click.Path(file_okay=False, path_type=pathlib.Path), default=None,
               metavar="DIR", help="with --legs: the ears' heard log dir the turns are read from (default: "
                                   "$EARS_HEARD_DIR, else $VOICEMODE_BASE_DIR/logs/conversations, "

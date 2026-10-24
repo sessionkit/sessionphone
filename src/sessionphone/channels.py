@@ -8,7 +8,7 @@ The file is `channels.txt` in the bot's root, mode 0600; `DC_CHANNELS_FILE`
 overrides it. One entry per line, and `#` starts a comment:
 
     # NAME    TARGET                    # note
-    owner     owner@relay.example        # owner, joined 2030-01-03
+    owner     owner@relay.example        # owner, joined 2030-06-09
     family    chat:42                    # the family group
 
 NAME is lowercase `[a-z0-9_-]+`, unique, and not all digits (a tool always

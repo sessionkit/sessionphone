@@ -47,16 +47,16 @@ def _write(path, *recs):
 def test_lists_newest_first_deduped_by_chat_with_a_count(root):
     f = root / "public" / "rejected.jsonl"
     _write(f,
-           _rec("2030-01-03T12:00:00+1100", 43),
-           _rec("2030-01-03T12:01:00+1100", 50, kind="contact-request", addr="eve@relay.example", name="Eve"),
-           _rec("2030-01-03T12:02:00+1100", 43, kind="reaction"),
-           _rec("2030-01-03T12:03:00+1100", 43))
+           _rec("2030-06-09T12:00:00+1100", 43),
+           _rec("2030-06-09T12:01:00+1100", 50, kind="contact-request", addr="eve@relay.example", name="Eve"),
+           _rec("2030-06-09T12:02:00+1100", 43, kind="reaction"),
+           _rec("2030-06-09T12:03:00+1100", 43))
     r = CliRunner().invoke(cli, ["channels", "rejected", "--profile", "public"])
     assert r.exit_code == 0, r.output
     lines = r.output.splitlines()
-    assert lines[0].startswith("2030-01-03T12:03:00+1100  chat 43  x3  message,reaction  Bob <bob@relay.example>")
+    assert lines[0].startswith("2030-06-09T12:03:00+1100  chat 43  x3  message,reaction  Bob <bob@relay.example>")
     assert "not in /x/public/channels.txt" in lines[0]
-    assert lines[1].startswith("2030-01-03T12:01:00+1100  chat 50  x1  contact-request  Eve <eve@relay.example>")
+    assert lines[1].startswith("2030-06-09T12:01:00+1100  chat 50  x1  contact-request  Eve <eve@relay.example>")
     assert lines[2] == (f"to let one in: DC_CHANNELS_FILE={root / 'public' / 'channels.txt'} "
                         "sessionphone channels add NAME ADDRESS|chat:N")
     assert len(lines) == 3
@@ -64,12 +64,12 @@ def test_lists_newest_first_deduped_by_chat_with_a_count(root):
 
 def test_reads_the_rotated_file_too(root):
     f = root / "public" / "rejected.jsonl"
-    _write(f.with_name("rejected.jsonl.1"), _rec("2030-01-03T11:00:00+1100", 13))
-    _write(f, _rec("2030-01-03T12:00:00+1100", 43), _rec("2030-01-03T12:05:00+1100", 13))
+    _write(f.with_name("rejected.jsonl.1"), _rec("2030-06-09T11:00:00+1100", 13))
+    _write(f, _rec("2030-06-09T12:00:00+1100", 43), _rec("2030-06-09T12:05:00+1100", 13))
     r = CliRunner().invoke(cli, ["channels", "rejected", "--profile", "public"])
     assert r.exit_code == 0, r.output
     first, second = r.output.splitlines()[:2]
-    assert "chat 13  x2" in first and first.startswith("2030-01-03T12:05:00")
+    assert "chat 13  x2" in first and first.startswith("2030-06-09T12:05:00")
     assert "chat 43  x1" in second
 
 

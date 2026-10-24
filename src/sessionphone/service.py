@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from sessionphone import channels, paths, seat, settings
+from sessionphone import channels, displayname, paths, seat, settings
 from sessionphone.bridge import dc_env, seatmail, stt
 from sessionphone.procname import named_python
 
@@ -78,9 +78,10 @@ ORIGIN_NOT_CARRIED = (f"{ORIGIN_VAR} is set in this shell and NOT carried: a val
 
 
 def agent() -> str:
-    """Who the bot speaks for: DC_AGENT, else the Claude Code seat, else "claude"."""
-    raw = os.environ.get("DC_AGENT") or os.environ.get("CLAUDE_CODE_AGENT") or "claude"
-    return raw.strip().lower()
+    """Who the bot speaks for, picked as install picks it (dc_env.agent_from):
+    DC_AGENT, else this session's durable seat, else the one bot phone.json
+    records, else "claude"."""
+    return dc_env.agent_from()[0]
 
 
 def label(name: str | None = None) -> str:
@@ -220,7 +221,7 @@ def job(name: str | None = None, python: str | None = None, given=None) -> dict:
     log = str(root / "bot.launchd.log")
     return {
         "Label": label(name),
-        # the agent in argv is what `dc-live` finds with pgrep -f
+        # the agent in argv, so `ps` tells two bots apart (dc-live reads the bot's bot.pid)
         "ProgramArguments": [python or sys.executable, "-m", "sessionphone.bridge.bot", name],
         "EnvironmentVariables": env,
         "WorkingDirectory": str(root),
@@ -286,6 +287,12 @@ class LegacyCarryOver(Exception):
 
 class LegacyStillLoaded(RuntimeError):
     """The legacy job was booted out but launchd still lists it after
+    BOOTOUT_WAIT_S: the new job is not started beside it (never two bots on one
+    account). Exit code 1, saying what is on disk and to re-run install."""
+
+
+class RivalStillLoaded(RuntimeError):
+    """A bot --replace retires was booted out but launchd still lists it after
     BOOTOUT_WAIT_S: the new job is not started beside it (never two bots on one
     account). Exit code 1, saying what is on disk and to re-run install."""
 
@@ -395,7 +402,7 @@ def check_carry_over(name: str, new_env: dict) -> None:
     agent_was = next((was for k, was, _ in moved if k == "DC_AGENT"), None)
     if agent_was is not None:
         # job() always sets DC_AGENT to the install name, so the env cannot keep the old
-        # one; the name is agent(): DC_AGENT, else CLAUDE_CODE_AGENT (cli: no option).
+        # one; the name is install's pick, DC_AGENT first (cli: no name option).
         # A DC_AGENT=<old> install alone would leave this legacy job running beside it.
         # Both ways uninstall first, which removes the plist this guard compares, so each
         # install line carries the other moved keys install takes from the shell.
@@ -405,7 +412,8 @@ def check_carry_over(name: str, new_env: dict) -> None:
         fix = (f"This legacy job's DC_AGENT is {agent_was}, not {name}: install as {keep} "
                f"(`sessionphone bot uninstall` first, it removes {legacy_label(name)}, then "
                f"`DC_AGENT={shlex.quote(agent_was)} {env}{INSTALL}`: install's name is "
-               f"DC_AGENT, else CLAUDE_CODE_AGENT, else claude), or `sessionphone bot "
+               f"DC_AGENT, else this session's seat, else the one bot phone.json records, "
+               f"else claude), or `sessionphone bot "
                f"uninstall` first to accept the change, then `{env}{INSTALL}`."
                if keep and keep != name else
                f"This legacy job's DC_AGENT is {agent_was!r}, which install keeps as no name "
@@ -468,9 +476,59 @@ def _retire_legacy(name: str, say) -> list[str]:
     return said
 
 
+def _retire_rivals(replace, say) -> list[str]:
+    """Retire each bot `--replace` names (settings.Resolved.replace: bot ->
+    the root it shared): boot out its job if launchd has it, remove its
+    plist, and retire its legacy job too (_retire_legacy). -> one line per
+    act, each also given to SAY. phone.json forgets it later, in
+    settings.save, once the new job is loaded. Raises RivalStillLoaded, its
+    plist kept, if launchd still lists it BOOTOUT_WAIT_S after the bootout:
+    a re-run, which is safe, retires it then."""
+    said = []
+    for old, root in replace.items():
+        target = f"{domain()}/{label(old)}"
+        p = plist_path(old)
+        acts = []
+        if _loaded(target):
+            _launchctl("bootout", target)
+            if not _wait(target, loaded=False, wait_s=BOOTOUT_WAIT_S):
+                kept = f"its plist {p} is kept" if p.exists() else "it has no plist"
+                raise RivalStillLoaded(
+                    f"bot {old}'s launchd job {label(old)} is still going: launchd lists it "
+                    f"{BOOTOUT_WAIT_S:g} s after its bootout, so the new job was NOT started "
+                    f"({kept}). Re-run `{INSTALL} --replace {old}`: it is safe to repeat.")
+            acts.append("booted out")
+        if p.exists():
+            p.unlink()
+            acts.append("plist removed")
+        line = (f"replaced bot {old}, on the same root ({root}): launchd job {label(old)} "
+                f"{', '.join(acts) if acts else 'was not installed'}")
+        said.append(line)
+        if say is not None:
+            say(line)
+        said += _retire_legacy(old, say)
+    return said
+
+
+def _record_replaced(res, say) -> None:
+    """After --replace: write the retired bots' names under the root
+    (displayname.record_replaced), so the new bot's start takes the old
+    agent's name as a default nobody chose. A failed write is said, not raised:
+    the bot then keeps that name as the user's, and install's `name:` line
+    gives the DC_NAME line that changes it."""
+    if not res.replace:
+        return
+    try:
+        displayname.record_replaced(dc_env.home(res.env, res.root), res.replace)   # the bot's own home
+    except OSError as exc:
+        if say is not None:
+            say(f"warning: could not record the replaced bot under {res.root} ({exc.strerror or exc}); "
+                "the bot keeps its current name at its start")
+
+
 def install(name: str | None = None, owner: str | None = None,
             seeded=None, say=None, seated=None, shell=None, forget=(),
-            settled=None, registry: str | None = None) -> pathlib.Path:
+            settled=None, registry: str | None = None, replace=()) -> pathlib.Path:
     """Write the plist (0600) and (re)load it, and check that launchd has it
     loaded. Refuses an unconfigured or unsafe root, a junk mail host, an STT
     URL with no model, and a bot nobody may ring, before it touches the old
@@ -496,6 +554,14 @@ def install(name: str | None = None, owner: str | None = None,
     job would drop or change (check_carry_over), or if it is loaded with its
     plist gone (check_legacy_orphan). Raises LegacyStillLoaded, the new job
     neither written nor started, if launchd still lists it after its bootout.
+
+    Another bot phone.json records on the same root (one Delta Chat account)
+    is refused (settings.Rival, exit 2, writing nothing), naming it, unless
+    REPLACE (`--replace NAME`) names it. Then, where the legacy job is
+    retired, its job is booted out and its plist removed (_retire_rivals),
+    and phone.json forgets it once the new job is loaded. Raises
+    RivalStillLoaded, the new job neither written nor started, if launchd
+    still lists it after its bootout.
 
     The bot's seat (seat.py), after every refusal above and before install's
     first write of its own: DC_MESSAGE is pinned to the installing shell's
@@ -541,7 +607,7 @@ def install(name: str | None = None, owner: str | None = None,
     its `plist` the job's plist."""
     shell = os.environ if shell is None else shell
     res = settings.resolve(shell, name=name, forget=forget,
-                           runs_agent=lambda given: seat.runs_agent(given, shell))
+                           runs_agent=lambda given: seat.runs_agent(given, shell), replace=replace)
     name = res.name
     paths.ensure_private(at=res.root)
     j = job(name, python=named_python(), given=res.given)
@@ -593,14 +659,16 @@ def install(name: str | None = None, owner: str | None = None,
     if entry is not None and seeded is not None:
         seeded(entry)
     try:
+        _retire_rivals(res.replace, say)   # never two bots on one account: --replace NAME
+        _record_replaced(res, say)     # the bot's start renames a default it carried
         _retire_legacy(name, say)      # never two bots on one account
-    except LegacyStillLoaded as exc:   # say what this run did write
+    except (LegacyStillLoaded, RivalStillLoaded) as exc:   # say what this run did write
         wrote = [f"{owner.strip().lower()} approved in {dc_env.callers_file(env)}"] if owner else []
         if entry is not None:
             wrote.append(f"channel {entry.name} {entry.target} listed in {dc_env.channels_file(env)}")
         if not wrote:
             raise
-        raise LegacyStillLoaded(f"{exc} Kept from this run: {'; '.join(wrote)}.") from None
+        raise type(exc)(f"{exc} Kept from this run: {'; '.join(wrote)}.") from None
     p = plist_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     target = f"{domain()}/{label(name)}"

@@ -117,9 +117,10 @@ def home(tmp_path):
 
 
 def dc_channels(home, **extra):
-    """bin/dc-env's dc_channels, sourced as the tools source it."""
+    """bin/dc-env's dc_channels, sourced as the tools source it. The bot is
+    named (DC_AGENT), so dc-env says nothing of which bot it picked."""
     return subprocess.run(["bash", "-c", f'source "{BIN / "dc-env"}"; dc_channels'],
-                          env=clean_env(home, DC_ROOT=str(home / "root"), **extra),
+                          env=clean_env(home, DC_ROOT=str(home / "root"), DC_AGENT="ada", **extra),
                           capture_output=True, text=True, timeout=30, check=False)
 
 

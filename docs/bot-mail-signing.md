@@ -35,6 +35,10 @@ its sessionmail resolves it. That is sessionmail's own order:
    `~/.sessionkit/mail/settings/mail.json`. The key is `sendmail`; a key
    named `carrier` is not read.
 3. Else sessionmail's default, which is `drop` (from sessionmail 0.2.0 on).
+   A fresh install's `mail.json` has no `sendmail` key: the drop then comes
+   from the template sessionmail installs beside it, `mail.template.json`,
+   and the `seat:` line says ``from sessionmail's installed default,
+   ~/.sessionkit/mail/settings/mail.template.json `sendmail` ``, never `mail.json`.
 
 Whether postfix is installed does not decide it. A job with no `sendmail`
 setting uses the drop, even on a Mac that has postfix.

@@ -27,7 +27,7 @@ and adds a line under `[Unreleased]` in `CHANGELOG.md`.
 ```bash
 uv sync          # the dev environment, media pack included
 make test        # the pytest suite (uv run pytest -q)
-make check       # ruff, shellcheck, then pytest
+make check       # ruff, shellcheck, pytest, then bin/bridge-check (the bridge tests)
 make browser     # the web page in headless Chrome; not part of make test
 make scan        # the private-word scan; set SESSIONKIT_SCAN to the release-scan tool
 ```

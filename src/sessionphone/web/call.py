@@ -144,14 +144,11 @@ def legs_path_refusal(webdir: Path) -> str:
 class WebVoiceTrack(PipVoiceTrack):
     """The bridge's outgoing track, unchanged but for cut(): the bridge's logs
     through calls._hooks, which is set only by calls.setup() (the Delta bot).
-    Installing hooks would change a process-wide global, so cut() is restated
-    here without the log line (sp bridge/calls.py:733-745)."""
+    Installing hooks would change a process-wide global, so cut() here is the
+    track's drop(), which is the same cut without the log line."""
 
     def cut(self):
-        n = sum(len(a) for a in self.queue) + len(self.pending)
-        self.queue.clear()
-        self.pending = np.zeros(0, dtype=np.int16)
-        return n / OUT_RATE
+        return self.drop()
 
 
 # ---- the registry and one call --------------------------------------------------

@@ -21,6 +21,14 @@ same accounts dir fails to start ("accounts.lock file is already locked").
 - Held by `link` (or anything that is not a bot that reads this job): refused.
 
 Setting it sends nothing. The picture travels with the account's next message.
+
+The default picture: a slot, `images/default-avatar.png` (or `.jpg`) beside this
+module, package data. `default_path()` finds it, None when nothing ships there.
+The bot sets it at its start (`at_start`, it holds the account then), only when
+one ships, the account has no picture, and the user has not chosen none:
+`avatar --clear` leaves a marker under the root (`avatar-none`) and `avatar PATH`
+removes it, so the user's choice wins. `bot install` only says so
+(`install_line`).
 """
 from __future__ import annotations
 
@@ -49,6 +57,10 @@ SNIFF = 8               # the longest signature above
 TAKEN_WAIT = 10.0       # seconds for the bot to take the job (it polls each second): dc-env's dc_taken
 ACK_WAIT = 1.0          # then seconds for its ack (written BEFORE the job is unlinked): dc_ack
 POLL = 0.1
+
+IMAGES_DIR = pathlib.Path(__file__).resolve().parent / "images"
+DEFAULT_NAMES = ("default-avatar.png", "default-avatar.jpg")    # the first that is a file wins
+NONE_MARKER = "avatar-none"     # under the root: the user ran `avatar --clear`
 
 SHOWS = "it shows after this account's next message; nothing was sent"
 
@@ -100,8 +112,9 @@ def held(exc: BaseException) -> bool:
 
 
 def _root() -> pathlib.Path:
-    r = dc_env.env("ROOT")      # read now, never dc_env.ROOT (frozen at import)
-    return pathlib.Path(r).expanduser() if r else paths.root()
+    """The bot's home, read now (never dc_env.ROOT, frozen at import): the root,
+    or <root>/<DC_PROFILE> for a named profile (dc_env.home)."""
+    return dc_env.home()
 
 
 def outbox() -> pathlib.Path:
@@ -113,6 +126,83 @@ def outbox() -> pathlib.Path:
 def acks_dir() -> pathlib.Path:
     a = dc_env.env("ACKS")
     return pathlib.Path(a).expanduser() if a else _root() / "acks"
+
+
+def default_path(images: pathlib.Path | None = None) -> pathlib.Path | None:
+    """The default picture that ships with sessionphone, or None when none does:
+    the first of DEFAULT_NAMES that is a regular file in IMAGES (the package's
+    images/ directory)."""
+    d = IMAGES_DIR if images is None else images
+    for n in DEFAULT_NAMES:
+        p = d / n
+        try:
+            if paths.is_file(p):
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def marker(root: pathlib.Path | None = None) -> pathlib.Path:
+    """The file that records that the user chose no picture (`avatar --clear`)."""
+    return (_root() if root is None else pathlib.Path(root)) / NONE_MARKER
+
+
+def chose_none(root: pathlib.Path | None = None) -> bool:
+    """Did the user clear the picture (and not set one since)?"""
+    try:
+        return paths.exists(marker(root))
+    except OSError:
+        return True     # unreadable: never put a picture back on a guess
+
+
+def record_choice(cleared: bool, root: pathlib.Path | None = None) -> None:
+    """After `avatar --clear` (CLEARED) write the marker, 0600; after `avatar PATH`
+    remove it. Raises OSError."""
+    m = marker(root)
+    if cleared:
+        fd = os.open(m, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, b"the bot's picture was cleared by `sessionphone avatar --clear`; "
+                         b"the bot never sets the default picture while this file exists\n")
+        finally:
+            os.close(fd)
+    else:
+        try:
+            m.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def at_start(acct, root: pathlib.Path, images: pathlib.Path | None = None) -> str | None:
+    """The bot's start, holding ACCT: set the shipped default picture when one
+    ships, ACCT has none, and the user has not cleared it under ROOT. -> the one
+    line to log, or None when no default ships (nothing is read or changed).
+    A picture already there, or the user's --clear, is never changed. Raises
+    whatever core raises; the bot logs it and carries on."""
+    d = default_path(images)
+    if d is None:
+        return None
+    if chose_none(root):
+        return "picture: none (cleared with `sessionphone avatar --clear`); the default is not set"
+    if acct.get_avatar():
+        return "picture: kept (the account has one)"
+    try:
+        f = precheck(d)
+    except Failed as exc:
+        return f"picture: default not set: {exc}"
+    acct.set_avatar(str(f))
+    return f"picture: default set ({d.name})" if acct.get_avatar() else \
+        f"picture: default not set: Delta Chat kept no picture from {d.name}"
+
+
+def install_line(images: pathlib.Path | None = None) -> str | None:
+    """`bot install`'s `picture:` line, or None when no default ships."""
+    d = default_path(images)
+    if d is None:
+        return None
+    return (f"picture:   the bot sets the default picture ({d.name}) at its start when the account "
+            "has none and you have not cleared it (`sessionphone avatar PATH` sets your own)")
 
 
 # ---- the account, free ----------------------------------------------------

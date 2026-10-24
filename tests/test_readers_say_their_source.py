@@ -225,12 +225,14 @@ def test_a_kept_answer_cannot_be_changed_by_its_caller(monkeypatch, tmp_path, no
 @pytest.mark.parametrize("filed, said", [
     (("drop", "host"), f"drop (sessionmail's {MAIL_JSON} `sendmail`)"),
     (("drop", "default"), "drop (sessionmail's default)"),
-    (("/opt/mta/sendmail", "template"), f"MTA /opt/mta/sendmail (sessionmail's {MAIL_JSON} `sendmail`)"),
+    (("/opt/mta/sendmail", "host"), f"MTA /opt/mta/sendmail (sessionmail's {MAIL_JSON} `sendmail`)"),
+    (("/opt/mta/sendmail", "template"), ("MTA /opt/mta/sendmail (sessionmail's installed default, "
+                                         "~/.sessionkit/mail/settings/mail.template.json `sendmail`)")),
     ((None, "unreadable"), (f"not known: sessionmail could not read {MAIL_JSON}, and sends nothing "
                             "until it can")),
     (("smtp", "host"), (f'nowhere: {MAIL_JSON} `sendmail` is "smtp", which is not a carrier (`drop`, '
                         "or the absolute path of an MTA), so sessionmail refuses to send")),
-], ids=["file-drop", "default-drop", "file-mta", "unreadable", "not-a-carrier"])
+], ids=["file-drop", "default-drop", "file-mta", "template-mta", "unreadable", "not-a-carrier"])
 def test_carrier_names_what_sessionmail_reads_and_where(asked, filed, said):
     asked(sendmail=filed)
     assert seatmail.carrier({}) == said
@@ -498,7 +500,7 @@ def test_dc_env_falls_back_to_the_default_when_the_question_fails(phone_home):
 def test_dc_log_reads_the_root_phone_json_keeps_and_survives_a_broken_one(phone_home):
     root = phone_home / "ada-root"
     root.mkdir()
-    (root / "bot.log").write_text("2026-01-01 00:00:00 a line in the kept root\n")
+    (root / "bot.log").write_text("2030-06-09 00:00:00 a line in the kept root\n")
     _phone_json({"bots": {"ada": {"SESSIONPHONE_ROOT": "~/ada-root"}}})
     env = {"HOME": str(phone_home), "PATH": f"{REPO / '.venv/bin'}:/usr/bin:/bin"}
     run = [str(REPO / ".venv/bin/python"), str(REPO / "bin/dc-log"), "--raw"]

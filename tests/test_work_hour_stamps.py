@@ -81,7 +81,7 @@ def scan(root):
     return hits
 
 
-def stamp(time, day, date="2030-06-11"):
+def stamp(time, day, date="2030-06-09"):
     """A stamp built by concatenation, so no literal one sits in this file."""
     return time + " " + day + " " + date
 
@@ -117,8 +117,8 @@ def test_port_catches_a_work_hour_stamp(time, day):
     stamp("17" + ":00", "Fri"),  # 17:00 is not before 17:00
     stamp("23" + ":10", "Wed"),
     "10" + ":30 Tue",  # no date
-    "Tue 2030-06-11",  # the stripped form: no time of day
-    "10" + ":30 2030-06-11",  # no weekday
+    "Tue 2030-06-09",  # the stripped form: no time of day
+    "10" + ":30 2030-06-09",  # no weekday
 ])
 def test_port_passes_what_is_not_a_work_hour_stamp(text):
     assert work_hour("(Bob, voice " + text + ")") == []

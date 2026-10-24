@@ -123,7 +123,8 @@ def test_skill_on_a_call_says_dc_ears_is_needed_for_ears():
 
 def test_skill_voice_notes_names_the_codes_default():
     skill = _skill()
-    assert f"The default is VoiceMode's mlx-audio at `{dc_env.STT_DEFAULT}`" in skill
+    assert f"The default is an mlx-audio server at `{dc_env.STT_DEFAULT}`" in skill
+    assert "the kit's own speech server under Session Kit, or VoiceMode's standalone" in skill
     assert f"`ears serve` (Apple speech, macOS 27) is `{OLD_DEFAULT}`" in skill
     assert "A call uses the same endpoint for what the caller says" in skill
 
@@ -136,3 +137,60 @@ def test_pyproject_declares_no_ears_extra_and_says_why():
     flat = _flat(text)
     assert "# NO `ears` extra (not decided yet)." in flat
     assert "The bot hears a call through the # STT at DC_STT_URL, not through ears." in flat
+
+
+def test_skill_step_7_splits_the_kit_from_standalone():
+    """Under Session Kit the kit's own `ears services install` loads the
+    mlx-audio server on :8890, and a second mlx-audio job crash-loops. So
+    step 7 names the kit signal once, sends a kit seat to the read-only
+    `ears services status`, says a first-run download reads `not confirmed`
+    for a while, and keeps the VoiceMode offer for standalone only."""
+    step7 = _flat(_hearing_bullets())
+    kit, standalone = step7.split("**Standalone**", 1)
+    kit = kit.split("**Under the kit,**", 1)[1]
+    # the signal, stated once
+    assert "It is when `command -v sessionkit` prints a path." in step7
+    assert step7.count("command -v sessionkit") == 1
+    # under the kit: read-only status, never VoiceMode's installer
+    assert "run `ears services status` (read-only) and read its `speech` row" in kit
+    assert f"Never offer `{hearing.OFFERED_INSTALL}`" in kit
+    assert "crash-loop" in step7
+    assert "for a minute or more. Wait, then run `sessionphone bot install` again" in kit
+    assert "only on their explicit yes" not in kit
+    # every form of the kit's `speech` row has an answer: up, not running, held, absent
+    for row in ("`mlx-audio on :8890`", "`none on :8890`", "`none answering`",
+                "`:8890 held`", "No `speech` row"):
+        assert row in kit, row
+    assert "install nothing over it" in kit
+    # install loads the kit's server only on `none on :8890`; on `none answering` a job is
+    # loaded, and install refuses a second (sessionvoice speech.py, `refuse-loaded-down`)
+    installs = kit.split("`ears services install`", 1)
+    assert "`none on :8890`" in installs[0] and "`none answering`" not in installs[0]
+    assert "install will not add a second" in installs[1]
+    # standalone: the VoiceMode offer, cost first, on an explicit yes
+    assert f"`{hearing.OFFERED_INSTALL}`" in standalone
+    assert "Tell them the cost first" in standalone
+    assert "only on their explicit yes, given in this conversation" in standalone
+
+
+def test_skill_step_7_and_the_hearing_line_agree_under_the_kit():
+    """The skill and the `hearing:` line ask the same question (is `sessionkit`
+    on PATH?) and, under the kit, name the same commands: the kit's status and
+    installer, never VoiceMode's. The step says so, and no longer tells the
+    seat to look past the line."""
+    step7 = _flat(_hearing_bullets())
+    kit = step7.split("**Standalone**", 1)[0].split("**Under the kit,**", 1)[1]
+    assert f"`command -v {hearing.KIT_COMMAND}`" in step7
+    assert f"`{hearing.KIT_STATUS}`" in kit and f"`{hearing.KIT_INSTALL}`" in kit
+    assert ("The `hearing:` line agrees: it finds the same `sessionkit` on PATH, points at "
+            f"`{hearing.KIT_STATUS}`, and does not name VoiceMode's command.") in kit
+    assert "even though the `hearing:` line names it" not in step7
+
+
+def test_readme_voice_call_names_both_servers_and_no_second_install():
+    text = _flat((ROOT / "README.md").read_text(encoding="utf-8"))
+    para = text.split("**What a voice call needs.**", 1)[1].split("**What does not work", 1)[0]
+    assert f"The default is an mlx-audio server, `{dc_env.STT_DEFAULT}`" in para
+    assert "The default is VoiceMode's mlx-audio" not in para
+    assert "Under Session Kit it is the kit's own speech server" in para
+    assert "do not install VoiceMode's as well" in para

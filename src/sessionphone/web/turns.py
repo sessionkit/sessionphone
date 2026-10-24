@@ -28,7 +28,7 @@ local part of Seat.addr) as "<Name>'s web call", under the bot's DC_SIGNER_*
 key; `sessionphone web --legs` refuses to start when that key is another
 seat's, or when `message` has no --message-id (seatmail.check). The ids are
 minted at seatmail.id_host(), sessionmail's own host; the Reply-To keeps
-Seat.host (DC_HOST), the box a reply is spoken from.
+Seat.host (DC_HOST, else dc_env.host_part()), the box a reply is spoken from.
 
 RETRY: only a refusal that sent NOTHING (sent=no) of a WORLD kind
 (seatmail.WORLD_KINDS: exec, identity, mta, undeliverable) is tried again, at
@@ -42,7 +42,6 @@ import asyncio
 import glob
 import json
 import os
-import socket
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -110,7 +109,7 @@ def seat_for(to: str, host: str, environ: Mapping[str, str] | None = None) -> Se
 
 
 def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = None,
-               fqdn: str | None = None) -> tuple[Seat | None, str]:
+               fqdn: str | None = None, hostname: str | None = None) -> tuple[Seat | None, str]:
     """-> (the Seat, '') for `sessionphone web --legs`, or (None, why it must refuse).
 
     The To is --mail-to, else DC_MAILTO, else <DC_AGENT>@<HOST>, with NO further
@@ -118,15 +117,20 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
     the shell that started the server, not the seat a Delta turn wakes, and an
     address nobody reads is worse than no start.
 
-    The host is DC_HOST, else this machine's name (fqdn stands in for
-    socket.getfqdn() in tests), as dc_env.HOST. A junk one is refused even
-    with --mail-to: the Reply-To and the Message-IDs are built from it.
-    dc_env.fqdn_problem() judges that DNS name, asked about DC_HOST alone:
-    the bot's own default host is sessionmail's (dc_env.mail_host), not this."""
+    The host is DC_HOST, else dc_env.host_part(): the rule the mail drop uses to
+    qualify a bare From. That is this machine's DNS name when it is the short
+    host or a name under it (a tailnet name), else the short host, never a
+    reverse-DNS name. fqdn and hostname stand in for socket.getfqdn() and
+    socket.gethostname() in tests; with DC_HOST set neither is asked. When
+    host_part gives no host, localhost, or a .arpa name (SESSIONMAIL_HOST can
+    name one), --legs is refused even with --mail-to: the Reply-To is built
+    from it. A dotless short host is a mail host and is accepted."""
     e = os.environ if environ is None else environ
-    if fqdn is None:                     # only when needed: a reverse lookup can be slow
-        fqdn = "" if dc_env._get(e, "HOST") else socket.getfqdn()
-    host = dc_env._get(e, "HOST") or fqdn or "localhost"
+    named = dc_env._get(e, "HOST")
+    derived = None if named else dc_env.host_part(
+        e, resolve_fqdn=None if fqdn is None else (lambda: fqdn),
+        resolve_hostname=None if hostname is None else (lambda: hostname))
+    host = named or derived or "localhost"
     to = (mail_to or "").strip() or dc_env._get(e, "MAILTO")
     if not to and dc_env._get(e, "AGENT"):
         to = f"{dc_env._get(e, 'AGENT').strip().lower()}@{host}"
@@ -138,11 +142,13 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
     if not box.strip() or not domain.strip():   # `--mail-to alice` would go to a local user, not the seat
         return None, (f"--legs mails each finished turn of a web call to the seat, and {to!r} is not a mail "
                       "address: name the seat's box as BOX@HOST (--mail-to, or DC_MAILTO)")
-    only_host = {k: v for k, v in e.items() if k in ("DC_HOST", f"{dc_env.ALIAS}HOST")}
-    if dc_env.fqdn_problem(only_host, fqdn):
-        return None, (f"--legs: no DC_HOST is set and this machine's name, {fqdn.strip()!r}, is not a mail "
-                      f"domain, so each turn's Reply-To and Message-ID would be built on it. Set DC_HOST "
-                      f"to this machine's mail domain (DC_HOST=mac.example.net)")
+    what = None if named else dc_env.host_part_problem(derived)
+    if what:
+        where = next((var for var in dc_env.MAIL_HOST_VARS if (e.get(var) or "").strip()),
+                     "sessionmail's mail.json `host`, else this machine's name")
+        return None, (f"--legs: no DC_HOST is set and this machine's mail host (from {where}) {what}, "
+                      f"so each turn's Reply-To would be built on it. Set DC_HOST to this "
+                      f"machine's mail domain (DC_HOST=mac.example.net), or SESSIONMAIL_HOST to its host")
     return seat_for(to, host, e), ""
 
 

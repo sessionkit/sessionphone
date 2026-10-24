@@ -19,7 +19,9 @@ import pytest
 # such variable for the whole session. A test that needs one sets it itself
 # (monkeypatch.setenv); the autouse tripwires below set DC_SENDMAIL, DC_MESSAGE
 # and DC_SIGNER_* per test, after this.
-_SEAT_ENV_NAMES = ("CLAUDE_CODE_AGENT", "SESSIONPHONE_ROOT")
+# EMAIL too: a task seat's plus address there makes CLAUDE_CODE_AGENT a role
+# (settings.task_seat), so a suite run from one would name bots differently.
+_SEAT_ENV_NAMES = ("CLAUDE_CODE_AGENT", "SESSIONPHONE_ROOT", "EMAIL")
 _SEAT_ENV_PREFIXES = ("DC_", "PIP_CHAT_")
 _early = sorted(m for m in sys.modules if m == "sessionphone" or m.startswith("sessionphone."))
 if _early:   # the isolation below would be too late to matter: say so, loudly
@@ -40,7 +42,19 @@ from sessionphone import settings as _settings
 _kept_file = _settings.FILE
 _no_file_dir = tempfile.mkdtemp(prefix="no-phone-json-")
 _settings.FILE = os.path.join(_no_file_dir, "phone.json")
-from sessionphone.bridge import dc_env as _dc_env  # noqa: F401 - binds dc_env.ROOT now
+# dc_env binds AGENT (and ADDR, MAILTO, the greetings) on first use, as install
+# picks the bot: sessionmail is asked, then phone.json is read. Bound here, in
+# the same bare install (no file, sessionmail not asked), before any test can
+# put a DC_AGENT in os.environ (bot.py copies argv[1] into it at import, and
+# under pytest argv[1] is a pytest flag).
+from sessionphone import reach as _reach
+from sessionphone.bridge import dc_env as _dc_env
+
+_real_ask = _reach.ask
+_reach.ask = lambda shell, env=None, exe=None: _reach.Reach(answered=False, said="not asked at import")
+_dc_env.bind_agent()
+_reach.ask = _real_ask
+_reach._ASKED.clear()
 
 _settings.FILE = _kept_file
 os.rmdir(_no_file_dir)
@@ -153,10 +167,14 @@ def launchd(monkeypatch, clock):
 
     Every `bot install` that succeeds ends with the hearing probe (PHONE-18), so
     this rig's world has no STT either: hearing.RUN answers as curl does when
-    nothing listens. A test of the hearing line sets its own RUN."""
+    nothing listens. A test of the hearing line sets its own RUN. Nor is it
+    Session Kit: `bot install` passes the shell's own environment, and a host
+    with `sessionkit` on PATH must not pick the line's branch. A test of the
+    kit's line puts the real hearing.under_kit back."""
     fake = FakeLaunchd()
     monkeypatch.setattr(service, "_launchctl", fake)
     monkeypatch.setattr(hearing, "RUN", no_stt)
+    monkeypatch.setattr(hearing, "under_kit", lambda shell: False)
     return fake
 
 
@@ -253,8 +271,10 @@ def _message_tripwire_script(tmp_path_factory):
     start probe (seatmail.PROBE_ARGS, PHONE-72 part 2b), answered as a
     sessionmail with SM-716 answers it (exit 2, kind message-id); and install's
     box step, `setup --box NAME` (done) and `path NAME` (a path under
-    /nonexistent). A test of either uses fake_message, which can answer it
-    otherwise."""
+    /nonexistent); and `subscription list`, read only, which the bot's
+    name is picked by (reach.ask), answered as no answer (exit 1), as
+    no_reach answers it in process: a dc-* tool's child asks it. A test of
+    any of these uses fake_message, which can answer it otherwise."""
     from sessionphone.bridge import seatmail
     probe = " ".join(seatmail.PROBE_ARGS)
     script = tmp_path_factory.mktemp("message") / "message"
@@ -265,6 +285,9 @@ def _message_tripwire_script(tmp_path_factory):
                       # install's box step (seat.ensure_box) delivers nothing: a box is made and named
                       'if [ "$1" = setup ] && [ "$2" = --box ]; then echo "box: $3 DONE"; exit 0; fi\n'
                       'if [ "$1" = path ]; then echo "/nonexistent/tripwire-boxes/$2"; exit 0; fi\n'
+                      # what reaches this session (reach.ask, read only): no answer, as no_reach gives
+                      'if [ "$*" = "subscription list" ]; then\n'
+                      '  echo "message tripwire: not asked in the tests" >&2; exit 1\nfi\n'
                       'printf \'%s | %s\\n\' "$PYTEST_CURRENT_TEST" "$*" >> "$MESSAGE_TRIP_LOG"\n'
                       "cat > /dev/null\n"
                       'echo \'{"sent": "no", "kind": "mta", "message": "message tripwire", "notices": []}\'\n'
@@ -285,6 +308,23 @@ def _real_messages() -> set[str]:
 
 
 _REAL_MESSAGES = _real_messages()   # measured once, before any test edits PATH or HOME
+
+# A child process cannot be guarded by the Popen wrap below, and a dc-* tool
+# run with the DC_* scrubbed (so no DC_MESSAGE) asks the `message` on PATH which
+# bot it is (bin/dc-env -> dc_env.agent_from -> `message subscription list`).
+# So the suite's PATH starts with a stand-in `message`, put there once, AFTER
+# the real ones were measured: `subscription list` gets no answer (exit 1), as
+# no_reach gives in process; anything else is recorded in $MESSAGE_TRIP_LOG,
+# as the tripwire records it, and refused (exit 3).
+_STAND_IN_DIR = tempfile.mkdtemp(prefix="no-sessionmail-")
+_stand_in = pathlib.Path(_STAND_IN_DIR) / "message"
+_stand_in.write_text('#!/bin/sh\n'
+                     'if [ "$*" = "subscription list" ]; then\n'
+                     '  echo "message stand-in: not asked in the tests" >&2; exit 1\nfi\n'
+                     'printf \'%s | PATH %s\\n\' "$PYTEST_CURRENT_TEST" "$*" >> "${MESSAGE_TRIP_LOG:-/dev/null}"\n'
+                     "cat > /dev/null\nexit 3\n")
+_stand_in.chmod(0o755)
+os.environ["PATH"] = os.pathsep.join(p for p in (_STAND_IN_DIR, os.environ.get("PATH", "")) if p)
 
 
 def _is_real_message(argv0) -> bool:
@@ -532,6 +572,64 @@ def imgtext_starts(monkeypatch):
     yield starts
 
 
+@pytest.fixture(autouse=True)
+def name_root_is_tmp(monkeypatch, tmp_path):
+    """bot.main() settles the bot's name at its start (displayname.at_start)
+    under dc_env.ROOT, which, bound at import as above, is the user's REAL
+    default root: it reads the saved invite there, may write it again, and
+    removes the record of a replaced bot. So no test touches the real one:
+    called with that root, at_start runs on a fresh tmp root instead. A test
+    that gives its own root (monkeypatch dc_env.ROOT, or a direct call) is
+    left alone."""
+    from sessionphone import displayname
+    from sessionphone.bridge import dc_env
+    real, run = pathlib.Path(dc_env.ROOT), displayname.at_start
+    spare = tmp_path / "name-root"
+
+    def at_start(acct, root, *a, **k):
+        if pathlib.Path(root) == real:
+            spare.mkdir(mode=0o700, exist_ok=True)
+            root = spare
+        return run(acct, root, *a, **k)
+    monkeypatch.setattr(displayname, "at_start", at_start)
+
+
+@pytest.fixture(autouse=True)
+def pid_file_in_tmp(monkeypatch, tmp_path_factory):
+    """bot.main() writes the bot's pid file (bridge/pidfile.py) once it holds
+    the account, at dc_env.PID_FILE, bound at import under the user's REAL
+    default root as above: the suite would overwrite a live bot's bot.pid
+    there, and at its exit remove it, so dc-live would call that bot dead.
+    So dc_env.PID_FILE, and bot.PID_FILE when the bot is loaded, name a tmp
+    file. Yields it."""
+    from sessionphone.bridge import dc_env
+    f = tmp_path_factory.mktemp("bot-pid") / "bot.pid"     # never in tmp_path: tests list it
+    monkeypatch.setattr(dc_env, "PID_FILE", f)
+    bot = sys.modules.get("sessionphone.bridge.bot")
+    if bot is not None:
+        monkeypatch.setattr(bot, "PID_FILE", f)
+    yield f
+
+
+@pytest.fixture(autouse=True)
+def home_lock_is_tmp(monkeypatch, tmp_path):
+    """bot.main() locks <home>/.bot.lock for its life (bot.take_home_lock), and
+    the home, bound at import as above, is the user's REAL default root. So no
+    test writes a lock there, or holds it across tests in one process: called
+    with no home, take_home_lock locks a fresh tmp home instead. A test of the
+    lock itself passes its own home and is left alone."""
+    bot = sys.modules.get("sessionphone.bridge.bot")
+    if bot is None:
+        yield
+        return
+    run, spare = bot.take_home_lock, tmp_path / "lock-home"
+    monkeypatch.setattr(bot, "take_home_lock", lambda home=None: run(spare if home is None else home))
+    yield
+    if bot._HOME_LOCK is not None:      # the process outlives the test: let the lock go
+        os.close(bot._HOME_LOCK)
+        bot._HOME_LOCK = bot._HOME_LOCKED = None
+
+
 # ---- the STT tripwire (PHONE-18) ----------------------------------------------
 # `bot install` now ends by asking the STT at DC_STT_URL to transcribe a test
 # clip (sessionphone/hearing.py). No test may reach a live STT: the fleet's run
@@ -611,6 +709,27 @@ def stt_tripwire(tmp_path_factory, monkeypatch):
         pytest.fail(f"a test reached a live STT (stub hearing.RUN, or pass probe(run=...)):\n{log.read_text()}")
 
 
+# ---- no test runs the real speech-weights reader ------------------------------
+# `bot install`'s hearing line may ask `ears services weights --json` where the
+# speech models stand (hearing.weights_state). A real `ears` on the PATH of the
+# Mac running the suite would make every install test's wording depend on that
+# Mac's cache. So hearing.WEIGHTS_RUN answers as an ears without the verb does
+# (exit 2), and the line stays as it was. A test of the reader passes its own
+# run= or sets WEIGHTS_RUN. Yields the argv of each call.
+
+
+@pytest.fixture(autouse=True)
+def no_ears_weights(monkeypatch):
+    calls = []
+
+    def older_ears(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 2, "", "Error: No such command 'weights'.\n")
+
+    monkeypatch.setattr(hearing, "WEIGHTS_RUN", older_ears)
+    yield calls
+
+
 # ---- the test-time ANCHOR: synthetic 2030 dates --------------------------------
 # A lone typed date or time in a test, one nothing else compares with, is the
 # ANCHOR or a variation RELATIVE to it (ANCHOR - timedelta(days=1)), never a
@@ -654,6 +773,20 @@ def no_session_cli(monkeypatch):
     of the hear line sets its own answer."""
     from sessionphone import seat
     monkeypatch.setattr(seat, "_list_agents", lambda shell: None)
+
+
+@pytest.fixture(autouse=True)
+def no_reach(monkeypatch):
+    """No test asks the real sessionmail what reaches this session (`message
+    subscription list`: install names the bot after the session's seat, and
+    the hear line is measured by it). Here sessionmail gives no answer, so
+    the bot is named as before it could be asked (DC_AGENT, CLAUDE_CODE_AGENT,
+    the recorded bot, claude). A test of either sets its own answer
+    (tests/test_hear_measured.py)."""
+    from sessionphone import reach
+    monkeypatch.setattr(reach, "ask", lambda shell, env=None, exe=None:
+                        reach.Reach(answered=False, said="not asked in the tests"))
+    monkeypatch.setattr(reach, "_ASKED", {})
 
 
 @pytest.fixture(autouse=True)

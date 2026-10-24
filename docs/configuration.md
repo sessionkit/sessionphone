@@ -188,7 +188,9 @@ use, so an edit takes effect at once.
   install` refuses while `DC_CALLERS` is set.
 - A bot run `--profile public` gates inbound too: it reads its own list
   (`<root>/public/channels.txt`), and logs each sender it rejects to
-  `rejected.jsonl` beside that list.
+  `rejected.jsonl` beside that list. Its log line names the profile and that
+  list. Every per-account file of a named profile lives under
+  `<root>/<profile>/` (docs/settings.md, "Two profiles on one root").
 
 Mail into a live call has two files of its own, in the root:
 

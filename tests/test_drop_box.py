@@ -144,10 +144,19 @@ def test_have_box_only_reads_when_the_box_is_there(drop):
     assert drop.argvs() == [["path", "claude"]]                 # no setup: nothing written
 
 
-def test_have_box_off_this_host_asks_nothing(drop):
+def test_have_box_off_this_host_asks_nothing_on_an_mta(drop, monkeypatch):
+    monkeypatch.setenv("SESSIONMAIL_SENDMAIL", "/usr/sbin/sendmail")
     env = {**os.environ, "DC_MAILTO": "claude@elsewhere.example"}
     box = seat.have_box(env, env)
     assert box.path is None and drop.argvs() == []
+
+
+def test_have_box_off_this_host_refuses_on_the_drop(drop):
+    env = {**os.environ, "DC_MAILTO": "claude@elsewhere.example"}
+    with pytest.raises(seat.NoBox) as e:
+        seat.have_box(env, env)
+    assert "claude@elsewhere.example is not on this host" in str(e.value)
+    assert drop.argvs() == []
 
 
 def test_have_box_that_cannot_be_made_refuses(drop, monkeypatch):

@@ -50,7 +50,7 @@ import traceback
 from sessionphone.bridge import dc_env
 
 PROFILE = dc_env.env("PROFILE", "")
-SOCK = dc_env.path("EARS_SOCK", *([PROFILE] if PROFILE else []), "call-ears.sock")
+SOCK = dc_env.path("EARS_SOCK", "call-ears.sock")   # under the profile's home: <ROOT>/<PROFILE>/ for a named one
 RATE = 16000                    # IN_RATE: what the bot's ears are fed
 HEADER_TIMEOUT_S = 5.0
 QUEUE_S = 5.0

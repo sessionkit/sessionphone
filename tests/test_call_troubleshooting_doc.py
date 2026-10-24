@@ -196,6 +196,23 @@ def _drive_noreply(mp, out):
         mgr.start()
 
 
+def _drive_first_wait(mp, out):
+    """PHONE-211: the first call's wait, the line then the music, ended by the probe."""
+    import numpy as np
+
+    from sessionphone import hearing
+    from sessionphone.bridge import firstcall
+    mp.setattr(calls, "_hooks", calls.Hooks(out.append, None, None))
+    mp.setattr(firstcall, "POLL_S", 0.001)
+    answers = iter([False, True])
+    pcm = np.full(calls.OUT_SAMPLES, 1, dtype=np.int16)
+    asyncio.run(firstcall.wait(
+        calls.PipVoiceTrack(),
+        weights=lambda: hearing.Weights("downloading", 10**9, 3 * 10**9, 2_864_263_300),
+        probe=lambda: next(answers), render=lambda text: pcm, load_music=lambda: pcm,
+        log=calls.log))
+
+
 def _drive_ice(mp, out):
     """do-003: ICE states and the selected pair, every candidate type."""
     i = rig("test_ice_log")
@@ -265,7 +282,8 @@ def emitted(_message_tripwire_script, tmp_path_factory):
         mp.setattr(seatmail, "MESSAGE", None)
         mp.setattr(dc_env, "MAILTO", BOX)
         mp.setattr(calls, "_call_id", None)
-        for drive in (_drive_turns, _drive_noreply, _drive_ice, _drive_redact, _drive_heard):
+        for drive in (_drive_turns, _drive_noreply, _drive_ice, _drive_redact, _drive_heard,
+                      _drive_first_wait):
             drive(mp, out)
     assert not trips.exists() or not trips.read_text(), f"a drive ran message:\n{trips.read_text()}"
     return out

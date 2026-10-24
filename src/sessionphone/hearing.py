@@ -19,9 +19,25 @@ the environment the launchd job carries:
 - The verdict is `yes`, `NO` or `not confirmed`. Every verdict names the URL,
   that it is DC_STT_URL (set, or the default), what was sent, what came back,
   and what that means for a call. When it is NO it points to the one route
-  offered, VoiceMode's mlx-audio on :8890, which sessionphone does not
-  install. It never says which model the server serves, only which model
-  was requested.
+  offered, an mlx-audio server on :8890, which sessionphone does not
+  install. Under Session Kit (`sessionkit` on the PATH `bot install` ran
+  with, the signal the skill's step 7 uses) that server is the kit's own:
+  the line points at `ears services status` and `ears services install`,
+  and never at VoiceMode's installer, since a second mlx-audio job beside
+  the kit's leaves one of the two crash-looping. Standalone it is
+  VoiceMode's, with VoiceMode's command. It never says which model the
+  server serves, only which model was requested.
+
+When the probe gets no answer, the speech models may simply not be on this
+Mac yet: the server's first request downloads them, and a probe that times
+out at 30 s says nothing about why. So for the offered route (the one server
+on this Mac the weights are for) `weights_state()` asks
+`ears services weights --json`, a read-only, filesystem-only reader of the
+speech weights in the Hugging Face cache. The line then says `downloading`
+with how far it has got, or that the models are not downloaded yet and the
+first call fetches them. The first call waits only for the stt and tts
+weights: the voices pack missing alone is no wait. A reader that is absent,
+fails, or answers in a schema it does not know leaves the line as it was.
 
 `setup` never probes: hearing is judged where the bot is installed.
 """
@@ -31,6 +47,7 @@ import io
 import json
 import math
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -45,14 +62,25 @@ from sessionphone.bridge import dc_env, stt
 MAX_TIME_S = 30          # curl's -m for the probe; the bot's own requests keep 120
 RUN_TIMEOUT_S = 40       # the subprocess's own cap, above curl's (transcribe: 130 over 120)
 CLIP = "a half-second test clip"
-# The one route offered: VoiceMode's mlx-audio. sessionphone does not install it.
+# The one route offered: mlx-audio on :8890. sessionphone does not install it.
 OFFERED_URL = "mlx-audio+http://127.0.0.1:8890/v1/audio/transcriptions"
 OFFERED_PORT = 8890
-OFFERED_INSTALL = "voicemode service install mlx-audio"
+OFFERED_INSTALL = "voicemode service install mlx-audio"   # standalone only, never under the kit
+# Under Session Kit the server on :8890 is the kit's own (ears services install loads it)
+KIT_COMMAND = "sessionkit"         # on PATH: this is Session Kit (SKILL.md step 7's signal)
+KIT_STATUS = "ears services status"
+KIT_INSTALL = "ears services install"
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 HEAD = "hearing:   "
 INDENT = " " * len(HEAD)
 WIDTH = 88
+# the speech weights' reader (ears, read-only and filesystem-only); see weights_state()
+EARS_COMMAND = "ears"
+WEIGHTS_ARGV = ("services", "weights", "--json")
+WEIGHTS_SCHEMA = "ears.weights/1"
+WEIGHTS_TIMEOUT_S = 10
+WEIGHT_STATES = ("cached", "downloading", "missing")
+FIRST_CALL_USES = ("stt", "tts")   # what a first call waits for; the voices pack is not
 # curl -s prints no error of its own, so the common exit codes are named here
 CURL_RC = {6: "could not resolve the host", 7: "connection refused", 28: "timed out",
            52: "the server closed the connection with no reply", 56: "the connection broke"}
@@ -88,6 +116,102 @@ class Verdict:
 
 
 RUN = subprocess.run     # how the request is run; tests replace it (tests/conftest.py)
+WEIGHTS_RUN = subprocess.run   # how the weights reader is run; tests replace it (tests/conftest.py)
+
+
+@dataclass(frozen=True)
+class Weights:
+    """The speech weights, as `ears services weights --json` reads them.
+
+    state is keyed on what a first call needs, the stt and tts weights, never
+    on the reader's own top-level state: `downloading` if either is,
+    `cached` if both are, else `missing`. done and total are the reader's
+    top-level bytes (total None when it cannot know it). size is the bytes
+    the stt and tts weights not yet cached come to, None when unknown."""
+    state: str
+    done: int
+    total: int | None
+    size: int | None = None
+
+    @property
+    def wait(self) -> bool:
+        """A first call waits for the models: they are downloading, or it fetches them."""
+        return self.state != "cached"
+
+
+def _int(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and x >= 0
+
+
+def weights_state(environ: dict | None = None, run=None) -> Weights | None:
+    """Ask `ears services weights --json` (found on environ's PATH) where the
+    speech weights stand. -> Weights, or None when it cannot be told: no
+    `ears` there, the verb exits non-zero (an older ears), the output does not
+    parse, or its schema is not ears.weights/1. Never raises; read-only, and
+    safe to call often (the reader touches only the filesystem)."""
+    env = os.environ if environ is None else environ
+    exe = shutil.which(EARS_COMMAND, path=env.get("PATH") or "")
+    if exe is None:
+        return None
+    try:
+        r = (run or WEIGHTS_RUN)([exe, *WEIGHTS_ARGV], capture_output=True, text=True,
+                                 timeout=WEIGHTS_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        doc = json.loads(r.stdout or "")
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("schema") != WEIGHTS_SCHEMA:
+        return None
+    done, total, rows = doc.get("bytes_done"), doc.get("bytes_total"), doc.get("weights")
+    if not _int(done) or not (total is None or _int(total)) or not isinstance(rows, list):
+        return None
+    needed = []
+    for w in rows:
+        if not isinstance(w, dict) or w.get("state") not in WEIGHT_STATES:
+            return None
+        if w.get("use") in FIRST_CALL_USES:
+            needed.append(w)
+    if {w.get("use") for w in needed} != set(FIRST_CALL_USES):
+        return None                  # no stt or no tts row: it cannot say what a call waits for
+    states = {w["state"] for w in needed}
+    state = ("downloading" if "downloading" in states
+             else "cached" if states == {"cached"} else "missing")
+    fetch = [w.get("bytes_total") for w in needed if w["state"] != "cached"]
+    size = sum(fetch) if fetch and all(_int(b) for b in fetch) else None
+    return Weights(state, done, total, size)
+
+
+def weights_for(v: Verdict, shell=None, run=None) -> Weights | None:
+    """The weights, read only when they can explain verdict v: the clip was
+    sent to the offered route (this Mac's :8890, the server the weights are
+    for) and it did not answer yes. Otherwise None, and nothing is run."""
+    if v.answer == "yes" or not v.sent or not _offered(v.bare):
+        return None
+    return weights_state(os.environ if shell is None else shell, run=run)
+
+
+def size(n: int) -> str:
+    """Bytes in decimal units, as a person reads a download: 412 MB, 2.9 GB."""
+    for unit, scale in (("GB", 10**9), ("MB", 10**6), ("KB", 10**3)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}" if unit == "GB" else f"{n // scale} {unit}"
+    return f"{n} B"
+
+
+def downloading(w: Weights) -> str:
+    """`downloading 412 MB of 2.9 GB`, or `downloading, 412 MB so far` when the
+    total is not known: the reader's top-level bytes."""
+    if w.total is None:
+        return f"downloading, {size(w.done)} so far"
+    return f"downloading {size(w.done)} of {size(w.total)}"
+
+
+def _about(w: Weights) -> str:
+    return f" (about {size(w.size)})" if w.size is not None else ""
 
 
 def probe(environ: dict, run=None, say=print, clock=time.monotonic) -> Verdict:
@@ -178,13 +302,38 @@ def _cmd(line: str) -> tuple[str, str]:
     return ("cmd", line)
 
 
-def _route(environ: dict, setting: bool) -> list[tuple[str, str]]:
+def under_kit(shell) -> bool:
+    """Is this Session Kit? It is when `sessionkit` is on the shell's PATH, as
+    `command -v sessionkit` asks in the skill's step 7. shell is the
+    environment `bot install` ran in; with no PATH there, the answer is no."""
+    return shutil.which(KIT_COMMAND, path=shell.get("PATH") or "") is not None
+
+
+def _route(environ: dict, setting: bool, kit: bool = False) -> list[tuple[str, str]]:
     """The offered route, as paragraphs (_p wraps, _cmd is a command shown as
     is). setting: the URL is not the route's, so the re-install
-    line carries DC_STT_URL."""
+    line carries DC_STT_URL. kit: this is Session Kit, so the server on the
+    route's port is the kit's own, and VoiceMode's installer is never named."""
     _, _, model = stt.resolve(OFFERED_URL, dc_env.stt_model(environ))
     again = (f"DC_STT_URL={OFFERED_URL} sessionphone bot install" if setting
              else "sessionphone bot install")
+    if kit:
+        return [
+            _p(f"This is Session Kit ({KIT_COMMAND} is on PATH), so the STT on 127.0.0.1:{OFFERED_PORT} "
+               f"is the kit's own speech server, if it loads one; the bot asks it for the model "
+               f"{model}. Do not install VoiceMode's mlx-audio beside it: one of the two would "
+               "crash-loop. Read the kit's `speech` row (read-only):"),
+            _cmd(KIT_STATUS),
+            _p(f"`none on :{OFFERED_PORT}`: no server and no job, and the kit's installer loads one:"),
+            _cmd(KIT_INSTALL),
+            _p(f"`mlx-audio on :{OFFERED_PORT}`: it is up, and its first request downloads that "
+               "model, so hearing can read `not confirmed` (or NO) for a minute or more. Wait, "
+               "then check again:"),
+            _cmd(again),
+            _p("Any other row names who holds the port: install nothing over it. No `speech` "
+               "row: this kit loads no speech server, so the sessionphone skill offers "
+               "VoiceMode's."),
+        ]
     return [
         _p(f"The STT route sessionphone offers is VoiceMode's mlx-audio on 127.0.0.1:{OFFERED_PORT} "
               f"(Apple Silicon); the bot asks it for the model {model}. sessionphone does not "
@@ -195,10 +344,12 @@ def _route(environ: dict, setting: bool) -> list[tuple[str, str]]:
     ]
 
 
-def lines(v: Verdict, environ: dict, shell: dict | None = None) -> list[str]:
+def lines(v: Verdict, environ: dict, shell: dict | None = None,
+          weights: Weights | None = None) -> list[str]:
     """The `hearing:` lines for verdict v, for a bot run with `environ`. shell is
     the environment `bot install` ran in, to say when only the deprecated
-    PIP_CHAT_STT_URL was set there (the job carries DC_* only)."""
+    PIP_CHAT_STT_URL was set there (the job carries DC_* only). weights is
+    weights_for(v)'s answer: None leaves every line as it was."""
     calls_off = (dc_env._get(environ, "CALLS") or "on") == "off"
     via_ears = dc_env._get(environ, "EARS") == "1"
     where = f"{v.bare} (DC_STT_URL, {'as set' if v.user_set else 'the default'})"
@@ -228,6 +379,25 @@ def lines(v: Verdict, environ: dict, shell: dict | None = None) -> list[str]:
                            "sent, so this says nothing about that server. Fix that, then run "
                            "`sessionphone bot install` again."))
         return _render(paras)
+    sh = os.environ if shell is None else shell
+    kit = under_kit(sh)
+    # the weights speak only for the offered route, this Mac's own server
+    w = weights if weights is not None and weights.wait and _offered(v.bare) else None
+    first = "the first call" if calls_here else "the first voice note"
+    if v.answer == "not confirmed" and w is not None:
+        if w.state == "downloading":
+            paras.append(_p(f"{downloading(w)}. {lead}{where} was sent {CLIP} and gave "
+                               f"{v.came_back}: the speech models it needs are still downloading "
+                               f"to this Mac, so it cannot answer yet. {first.capitalize()} waits for "
+                               "that download to finish. Run `sessionphone bot install` again when it has."))
+        else:
+            paras.append(_p(f"not confirmed. {lead}{where} was sent {CLIP} and gave {v.came_back}. "
+                               f"The speech models it needs are not downloaded yet{_about(w)}: the "
+                               f"first request fetches them. {first.capitalize()} waits for that download. Run "
+                               "`sessionphone bot install` again in a few minutes."))
+        if kit:
+            paras += [_p("Watch the download (read-only):"), _cmd(KIT_STATUS)]
+        return _render(paras)
     if v.answer == "not confirmed":
         paras.append(_p(f"not confirmed. {lead}{where} was sent {CLIP} and gave {v.came_back}. "
                            "A first request can be slow while the server loads its model. Run "
@@ -247,17 +417,23 @@ def lines(v: Verdict, environ: dict, shell: dict | None = None) -> list[str]:
                            "server's log."))
     else:
         paras.append(_p(f"NO. {lead}{where} {sent}, and nothing answered: {v.came_back}. {means}"))
+    if w is not None and w.state == "downloading":
+        paras.append(_p(f"Its speech models are {downloading(w)}. Once a server answers, "
+                           f"{first} waits for that download to finish."))
+    elif w is not None:
+        paras.append(_p(f"Its speech models are not downloaded yet{_about(w)}: once a server "
+                           f"answers, its first request fetches them, and "
+                           f"{first} waits for that download."))
     # the route is offered only for the route's own URL or the default;
     # a URL the user set names their own server
     if _offered(v.bare):
         if not v.answered:
-            paras += _route(environ, setting=False)
+            paras += _route(environ, setting=False, kit=kit)
     elif v.user_set:
         paras.append(_p("That is the DC_STT_URL you set: start or fix that server, or unset "
                            "DC_STT_URL to use the default."))
     else:
-        paras += _route(environ, setting=True)
-    sh = os.environ if shell is None else shell
+        paras += _route(environ, setting=True, kit=kit)
     if not v.user_set and sh.get(f"{dc_env.ALIAS}STT_URL"):
         paras.append(_p(f"{dc_env.ALIAS}STT_URL is set in this shell, but the job carries DC_* "
                            "settings only, so it was not used: rename it DC_STT_URL."))

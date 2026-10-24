@@ -575,7 +575,7 @@ def test_the_default_mta_is_only_named_never_run():
     calls = {ast.unparse(c.func) for c in ast.walk(fn) if isinstance(c, ast.Call)}
     assert calls <= {"e.get", "v.strip", "settings.mail_file", "resolve_message", "(probe or {}).get",
                      "settings.shown", "json.dumps", "isinstance", "value.startswith",
-                     "settings.mail_carrier", "_said_of"}, calls
+                     "settings.mail_carrier", "_said_of", "_from"}, calls     # _from: words only
 
 
 def test_check_passes_with_message_and_a_signer(fake_message):

@@ -394,17 +394,19 @@ class EchoGuard:
 
     # ---- what we played
 
-    def spoken(self, text, duration, at=None, source="bridge"):
+    def spoken(self, text, duration, at=None, source="bridge", start=None):
         """Record one clip we have just handed to the outgoing track.
 
         `duration` is the clip's length in SECONDS - for PCM that is
         len(pcm) / rate. Clips queue behind each other exactly as the track
         plays them, so a clip handed over while three are still playing
-        becomes audible when those three have finished, not now."""
+        becomes audible when those three have finished, not now. `start`,
+        when the caller knows it, is when the clip will start to play: the
+        track's queue holds another source's line ahead of it."""
         now = self.clock() if at is None else at
         self._expire(now)
         ours = [p for p in self.played if p.source == source]
-        start = max(now, ours[-1].end if ours else 0.0)
+        start = max(now, start or 0.0, ours[-1].end if ours else 0.0)
         p = Played(text, start, start + max(0.0, duration), source)
         self.played.append(p)
         queued = start - now                    # audio still to play ahead of it

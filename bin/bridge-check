@@ -2,8 +2,9 @@
 # bridge-check [-h] - the gate before any commit to the bridge: nothing lands that
 # does not compile, import under a bare install's environment, and pass the
 # bridge tests. Exit non-zero = do not commit.
-# `make check` is ruff + pytest on the package; this is the bridge, whose
-# script-style tests pytest does not collect.
+# `make test` is pytest on the package; this is the bridge, whose
+# script-style tests pytest does not collect. `make bridge` runs it, and
+# `make check` runs it after lint and test.
 # It also reports the bot's undelivered agent mail: how many wait
 # for a retry and how many are dead, in DC_UNDELIVERED as dc-env names it. That
 # line is information about the running bot, not the code: it never fails the gate.

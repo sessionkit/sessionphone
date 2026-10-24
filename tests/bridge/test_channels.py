@@ -441,7 +441,7 @@ def _tts_fallback_job(rig, monkeypatch, chat_id):
         raise RuntimeError("tts curl rc=7 bytes=0")
     monkeypatch.setattr(calls, "tts_pcm48", refused)
     s = object.__new__(calls.CallSession)
-    s.chat_id, s.lines = chat_id, []
+    s.chat_id, s.lines, s.voice = chat_id, [], calls.PipVoiceTrack()
     asyncio.run(s.speak("Hi Alice."))
     (job,) = [json.loads(p.read_text()) for p in rig.out.glob("*.json")]
     assert job["chat_id"] == chat_id and job["text"].startswith("(unspoken, TTS failed) ")

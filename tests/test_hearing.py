@@ -38,6 +38,7 @@ OLD_DEFAULT = "http://127.0.0.1:2023/v1/audio/transcriptions"   # `ears serve`, 
 OWN = "mlx-audio+http://stt.example.net:9000/v1/audio/transcriptions"
 OWN_BARE = "http://stt.example.net:9000/v1/audio/transcriptions"
 PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"
+UNDER_KIT = hearing.under_kit   # the real check; the launchd rig replaces it with "no" (conftest)
 
 
 class FakeCurl:
@@ -265,6 +266,97 @@ def test_an_alias_only_in_the_shell_is_named():
     assert "PIP_CHAT_STT_URL is set in this shell" in text and "rename it DC_STT_URL" in text
 
 
+# ---- under Session Kit: the kit's own server, never VoiceMode's installer ----
+
+@pytest.fixture
+def kit_path(tmp_path):
+    """A PATH on which `sessionkit` is found, as on a Session Kit Mac."""
+    bin_ = tmp_path / "kit-bin"
+    bin_.mkdir()
+    exe = bin_ / hearing.KIT_COMMAND
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    return str(bin_)
+
+
+def test_under_kit_is_sessionkit_on_the_shells_path(kit_path, tmp_path):
+    assert hearing.under_kit({"PATH": f"/nonexistent:{kit_path}"})
+    assert not hearing.under_kit({"PATH": str(tmp_path)})           # no sessionkit there
+    assert not hearing.under_kit({"PATH": ""}) and not hearing.under_kit({})
+
+
+def _kit_lines(env, curl, kit_path):
+    v, _, _ = _probe(env, curl)
+    return hearing.lines(v, env, shell={"PATH": kit_path})
+
+
+@pytest.mark.parametrize("env", [{}, {"DC_STT_URL": hearing.OFFERED_URL}], ids=["default", "offered"])
+def test_no_under_the_kit_points_at_ears_services_never_voicemode(env, kit_path):
+    """The kit's `ears services install` loads mlx-audio on :8890; a second
+    mlx-audio job beside it crash-loops. So under the kit the line sends the
+    user to the kit's read-only status, names the kit's installer for an
+    empty port only, and never names VoiceMode's installer (SKILL.md step 7)."""
+    lines = _kit_lines(env, FakeCurl(rc=7), kit_path)
+    text = _flat(lines)
+    assert lines[0].startswith("hearing:   NO.")
+    assert "A call will connect, but the bot will not hear the caller" in text
+    assert "voicemode service install" not in text and hearing.OFFERED_INSTALL not in lines
+    assert "This is Session Kit (sessionkit is on PATH)" in text
+    assert "the kit's own speech server" in text and f"the model {PARAKEET}" in text
+    assert "Do not install VoiceMode's mlx-audio beside it: one of the two would crash-loop" in text
+    # status first, read-only; the installer only for `none on :8890`
+    status = lines.index(f"{hearing.INDENT}  {hearing.KIT_STATUS}")
+    install = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL}")
+    assert status < install
+    assert "(read-only):" in lines[status - 1]
+    assert "`none on :8890`: no server and no job" in _flat(lines[status + 1:install])
+    assert "the kit's own speech server, if it loads one" in text
+    # the first-run download belongs to the `mlx-audio on :8890` row (as in
+    # SKILL.md step 7), so its wait-and-retry comes before the other rows
+    again = lines.index(f"{hearing.INDENT}  sessionphone bot install")
+    up = _flat(lines[install + 1:again])
+    assert up.startswith("`mlx-audio on :8890`: it is up, and its first request downloads that model")
+    assert "can read `not confirmed` (or NO) for a minute or more. Wait, then check again" in up
+    assert "No `speech` row" not in up and "VoiceMode's" not in up
+    rest = _flat(lines[again + 1:])
+    assert "Any other row names who holds the port: install nothing over it" in rest
+    assert "No `speech` row: this kit loads no speech server" in rest
+    assert rest.endswith("the sessionphone skill offers VoiceMode's.")
+    assert not any("DC_STT_URL=" in ln for ln in lines)
+
+
+def test_no_under_the_kit_at_a_default_off_the_route_carries_the_setting(monkeypatch, kit_path):
+    monkeypatch.setattr(dc_env, "STT_DEFAULT", OLD_DEFAULT)
+    lines = _kit_lines({}, FakeCurl(rc=7), kit_path)
+    assert "voicemode service install" not in _flat(lines)
+    assert f"{hearing.INDENT}  DC_STT_URL={hearing.OFFERED_URL} sessionphone bot install" in lines
+    assert f"{hearing.INDENT}  sessionphone bot install" not in lines
+
+
+def test_under_the_kit_a_server_that_answers_or_a_url_the_user_set_gets_no_route(kit_path):
+    """The kit changes only the route's lines: a 500 on :8890 is still "check its
+    log", and a URL the user set still names their own server."""
+    env = {"DC_STT_URL": hearing.OFFERED_URL}
+    text = _flat(_kit_lines(env, FakeCurl(body="model load failed", status=500), kit_path))
+    assert "check that server's log" in text
+    assert hearing.KIT_STATUS not in text and "voicemode" not in text
+    env = {"DC_STT_URL": OWN}
+    text = _flat(_kit_lines(env, FakeCurl(rc=7), kit_path))
+    assert "the DC_STT_URL you set" in text
+    assert hearing.KIT_STATUS not in text and "voicemode" not in text
+
+
+def test_standalone_keeps_the_voicemode_line(tmp_path):
+    """No sessionkit on the shell's PATH: the line offers VoiceMode's, as before."""
+    v, _, _ = _probe({}, FakeCurl(rc=7))
+    lines = hearing.lines(v, {}, shell={"PATH": str(tmp_path)})
+    text = _flat(lines)
+    assert "VoiceMode's mlx-audio on 127.0.0.1:8890" in text and "sessionphone does not install it" in text
+    assert f"{hearing.INDENT}  {hearing.OFFERED_INSTALL}" in lines
+    assert hearing.KIT_STATUS not in text and hearing.KIT_INSTALL not in text
+    assert "Session Kit" not in text
+
+
 # ---- bot install: the lines, the job's env, and before the first call -------
 
 @pytest.fixture
@@ -339,6 +431,20 @@ def test_install_with_a_url_of_the_users_own_gives_no_route(rig, monkeypatch):
     text = _flat(block)
     assert OWN_BARE in text and "the DC_STT_URL you set" in text
     assert "voicemode" not in text
+
+
+def test_install_under_the_kit_points_at_ears_services(rig, monkeypatch, kit_path):
+    """`bot install` judges the kit on the shell it ran in (cli passes os.environ)."""
+    monkeypatch.setattr(hearing, "under_kit", UNDER_KIT)
+    monkeypatch.setenv("PATH", f"{kit_path}:{os.environ.get('PATH', '')}")
+    r, _ = _install(monkeypatch, FakeCurl(rc=7))
+    assert r.exit_code == 0, r.output
+    _, block = _hearing_block(r.output)
+    text = _flat(block)
+    assert block[0].startswith("hearing:   NO.") and "This is Session Kit" in text
+    assert any(ln.strip() == hearing.KIT_STATUS for ln in block)
+    assert any(ln.strip() == hearing.KIT_INSTALL for ln in block)
+    assert "voicemode service install" not in r.output
 
 
 def test_a_refused_install_probes_nothing(rig, monkeypatch):
@@ -617,3 +723,307 @@ def test_a_stub_server_on_an_ephemeral_port_is_allowed_end_to_end(stt_tripwire):
     body = _StubSTT.got[0]
     assert f'name="model"\r\n\r\n{PARAKEET}'.encode() in body and b"RIFF" in body
     assert not stt_tripwire.exists() or stt_tripwire.read_text() == ""
+
+
+# ---- the speech weights: `downloading` with progress, never a bare timeout ----
+# `ears services weights --json` (schema ears.weights/1) reads the speech
+# weights from the Hugging Face cache. These build its answer as fixtures; no
+# test runs a real ears (conftest no_ears_weights).
+
+TOTALS = {"stt": 2_508_940_517, "tts": 355_322_783, "voices": 56_471_015}
+REPOS = {"stt": PARAKEET, "tts": "mlx-community/Kokoro-82M-bf16", "voices": "example/voices"}
+SHA = "0" * 40
+
+
+def _row(use, state, done=None, total="known"):
+    total = TOTALS[use] if total == "known" else total
+    if done is None:
+        done = TOTALS[use] if state == "cached" else 0
+    return {"repo": REPOS[use], "use": use, "state": state, "bytes_done": done,
+            "bytes_total": total, "expected": SHA, "cached_ref": SHA if state == "cached" else None,
+            "drift": False}
+
+
+def _doc(*rows, **over):
+    """The reader's one object: top-level state and bytes from the rows, as the contract sums them."""
+    rows = list(rows) or [_row(u, "cached") for u in TOTALS]
+    states = {r["state"] for r in rows}
+    totals = [r["bytes_total"] for r in rows]
+    doc = {"schema": "ears.weights/1", "cache": "/hf/hub",
+           "state": "downloading" if "downloading" in states else "cached" if states == {"cached"} else "missing",
+           "bytes_done": sum(r["bytes_done"] for r in rows),
+           "bytes_total": None if None in totals else sum(totals), "weights": rows}
+    doc.update(over)
+    return doc
+
+
+class FakeEars:
+    """Stands in for hearing.WEIGHTS_RUN: records each argv and answers with stdout and rc, or raises."""
+
+    def __init__(self, doc=None, rc=0, stdout=None, raises=None):
+        self.out = stdout if stdout is not None else json.dumps(_doc() if doc is None else doc) + "\n"
+        self.rc, self.raises, self.calls = rc, raises, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append({"argv": argv, "kw": kw})
+        if self.raises:
+            raise self.raises
+        return subprocess.CompletedProcess(argv, self.rc, self.out, "")
+
+
+@pytest.fixture
+def ears_path(tmp_path):
+    """A PATH on which an `ears` is found (it never runs: the reader is a FakeEars)."""
+    bin_ = tmp_path / "ears-bin"
+    bin_.mkdir()
+    exe = bin_ / hearing.EARS_COMMAND
+    exe.write_text("#!/bin/sh\nexit 99\n")
+    exe.chmod(0o755)
+    return str(bin_)
+
+
+def _read(ears_path, fake):
+    return hearing.weights_state({"PATH": ears_path}, run=fake)
+
+
+DOWNLOADING = _doc(_row("stt", "downloading", done=412_000_000), _row("tts", "cached"), _row("voices", "cached"))
+MISSING = _doc(_row("stt", "missing"), _row("tts", "missing"), _row("voices", "missing"))
+
+
+def test_the_reader_runs_the_verb_found_on_path(ears_path):
+    fake = FakeEars()
+    w = _read(ears_path, fake)
+    [call] = fake.calls
+    assert call["argv"] == [os.path.join(ears_path, "ears"), "services", "weights", "--json"]
+    assert call["kw"]["timeout"] == hearing.WEIGHTS_TIMEOUT_S and call["kw"]["capture_output"]
+    assert w == hearing.Weights("cached", sum(TOTALS.values()), sum(TOTALS.values()), None)
+    assert not w.wait
+
+
+@pytest.mark.parametrize(("doc", "state", "size"), [
+    (DOWNLOADING, "downloading", TOTALS["stt"]),
+    (_doc(_row("stt", "cached"), _row("tts", "downloading", done=5), _row("voices", "missing")), "downloading",
+     TOTALS["tts"]),
+    (MISSING, "missing", TOTALS["stt"] + TOTALS["tts"]),
+    (_doc(_row("stt", "cached"), _row("tts", "missing"), _row("voices", "cached")), "missing", TOTALS["tts"]),
+    (_doc(_row("stt", "missing", total=None), _row("tts", "missing"), _row("voices", "cached")), "missing", None),
+], ids=["stt-downloading", "tts-downloading", "all-missing", "tts-missing", "size-unknown"])
+def test_each_state_is_keyed_on_stt_and_tts(ears_path, doc, state, size):
+    w = _read(ears_path, FakeEars(doc))
+    assert (w.state, w.size, w.wait) == (state, size, True)
+    assert (w.done, w.total) == (doc["bytes_done"], doc["bytes_total"])   # the top-level bytes
+
+
+@pytest.mark.parametrize("voices", ["missing", "downloading"])
+def test_voices_alone_is_not_a_wait(ears_path, voices):
+    """A host installed before the prefetch: voices (and so the top level) is not
+    cached while stt and tts are, and speech works. No wait."""
+    doc = _doc(_row("stt", "cached"), _row("tts", "cached"), _row("voices", voices))
+    assert doc["state"] == voices                       # the top level says otherwise
+    w = _read(ears_path, FakeEars(doc))
+    assert w.state == "cached" and not w.wait
+
+
+def test_new_keys_under_schema_1_are_read(ears_path):
+    doc = _doc(_row("stt", "downloading", done=7), _row("tts", "cached"), _row("voices", "cached"), later="x")
+    doc["weights"][0]["eta_s"] = 30
+    assert _read(ears_path, FakeEars(doc)).state == "downloading"
+
+
+@pytest.mark.parametrize("fake", [
+    FakeEars(rc=2, stdout=""),
+    FakeEars(rc=1),
+    FakeEars(stdout="downloading 412 MB of 2.9 GB\n"),
+    FakeEars(stdout=""),
+    FakeEars(stdout=json.dumps(_doc()) + "\n" + json.dumps(_doc())),
+    FakeEars(_doc(schema="ears.weights/2")),
+    FakeEars(_doc(schema=None)),
+    FakeEars(stdout="[]"),
+    FakeEars(_doc(weights=None)),
+    FakeEars(_doc(bytes_done=None)),
+    FakeEars(_doc(bytes_done=True)),
+    FakeEars(_doc(bytes_total="2.9 GB")),
+    FakeEars(_doc(_row("stt", "fetching"), _row("tts", "cached"))),
+    FakeEars(_doc(_row("stt", "cached"), _row("voices", "cached"))),
+    FakeEars(raises=subprocess.TimeoutExpired("ears", 10)),
+    FakeEars(raises=PermissionError(13, "Permission denied", "ears")),
+], ids=["older-ears", "rc1", "text", "empty", "two-objects", "schema-2", "no-schema", "not-an-object",
+        "no-weights", "no-bytes", "bool-bytes", "text-total", "unknown-state", "no-tts", "timeout", "cannot-run"])
+def test_every_fallback_is_none(ears_path, fake):
+    assert _read(ears_path, fake) is None
+
+
+def test_no_ears_on_path_runs_nothing(tmp_path):
+    fake = FakeEars(DOWNLOADING)
+    assert hearing.weights_state({"PATH": str(tmp_path)}, run=fake) is None
+    assert hearing.weights_state({}, run=fake) is None
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(("n", "text"), [
+    (0, "0 B"), (999, "999 B"), (56_471_015, "56 MB"), (412_000_000, "412 MB"),
+    (2_508_940_517, "2.5 GB"), (sum(TOTALS.values()), "2.9 GB"),
+])
+def test_sizes_read_as_a_download_does(n, text):
+    assert hearing.size(n) == text
+
+
+def test_the_reader_is_asked_only_when_the_offered_route_gave_no_answer(ears_path):
+    shell = {"PATH": ears_path}
+    fake = FakeEars(DOWNLOADING)
+    for env, curl in [({}, FakeCurl()),                                      # yes
+                      ({"DC_STT_URL": OWN}, FakeCurl(rc=28)),                 # the user's own server
+                      ({"DC_STT_URL": "http://127.0.0.1:7000/v1/audio/transcriptions"}, FakeCurl())]:  # refused
+        v, _, _ = _probe(env, curl)
+        assert hearing.weights_for(v, shell, run=fake) is None
+    assert fake.calls == []
+    for curl in (FakeCurl(rc=28), FakeCurl(rc=7)):
+        v, _, _ = _probe({}, curl)
+        assert hearing.weights_for(v, shell, run=fake).state == "downloading"
+    assert len(fake.calls) == 2
+
+
+def _weights(doc, ears_path):
+    return _read(ears_path, FakeEars(doc))
+
+
+def test_not_confirmed_while_downloading_says_downloading_with_progress(ears_path, tmp_path):
+    w = _weights(DOWNLOADING, ears_path)
+    v, _, _ = _probe({}, FakeCurl(rc=28))
+    lines = hearing.lines(v, {}, shell={"PATH": str(tmp_path)}, weights=w)
+    text = _flat(lines)
+    done = 412_000_000 + TOTALS["tts"] + TOTALS["voices"]
+    assert lines[0].startswith(f"hearing:   downloading {hearing.size(done)} of 2.9 GB.")
+    assert "not confirmed" not in text
+    assert f"{DEFAULT} (DC_STT_URL, the default) was sent a half-second test clip" in text
+    assert "curl rc=28" in text and "still downloading" in text
+    assert "The first call waits for that download to finish." in text
+    assert "sessionphone bot install` again" in text
+    assert hearing.KIT_STATUS not in text                    # standalone
+
+
+def test_a_total_it_cannot_know_says_so_far(ears_path, tmp_path):
+    doc = _doc(_row("stt", "downloading", done=412_000_000, total=None), _row("tts", "cached"),
+               _row("voices", "cached"))
+    assert doc["bytes_total"] is None
+    v, _, _ = _probe({}, FakeCurl(rc=28))
+    lines = hearing.lines(v, {}, shell={"PATH": str(tmp_path)}, weights=_weights(doc, ears_path))
+    done = 412_000_000 + TOTALS["tts"] + TOTALS["voices"]
+    assert lines[0].startswith(f"hearing:   downloading, {hearing.size(done)} so far.")
+    assert " of " not in lines[0]
+
+
+def test_not_confirmed_while_missing_says_the_first_request_fetches_them(ears_path, tmp_path):
+    v, _, _ = _probe({}, FakeCurl(rc=28))
+    text = _flat(hearing.lines(v, {}, shell={"PATH": str(tmp_path)}, weights=_weights(MISSING, ears_path)))
+    assert text.startswith("hearing: not confirmed.")
+    assert "The speech models it needs are not downloaded yet (about 2.9 GB): the first request fetches them." in text
+    assert "The first call waits for that download." in text
+
+
+def test_missing_with_an_unknown_size_names_no_size(ears_path, tmp_path):
+    doc = _doc(_row("stt", "missing", total=None), _row("tts", "missing"), _row("voices", "cached"))
+    v, _, _ = _probe({}, FakeCurl(rc=28))
+    text = _flat(hearing.lines(v, {}, shell={"PATH": str(tmp_path)}, weights=_weights(doc, ears_path)))
+    assert "not downloaded yet: the first request fetches them" in text and "GB" not in text
+
+
+@pytest.mark.parametrize("curl", [FakeCurl(rc=28), FakeCurl(rc=7), FakeCurl(body="boom", status=500)],
+                         ids=["not-confirmed", "NO", "NO-500"])
+@pytest.mark.parametrize("doc", [_doc(), _doc(_row("stt", "cached"), _row("tts", "cached"), _row("voices", "missing")),
+                                 None], ids=["cached", "voices-missing-alone", "fallback"])
+def test_cached_voices_alone_or_no_reader_leaves_the_line_as_it_was(ears_path, tmp_path, curl, doc):
+    w = _weights(doc, ears_path) if doc else None
+    v, _, _ = _probe({}, curl)
+    shell = {"PATH": str(tmp_path)}
+    assert hearing.lines(v, {}, shell=shell, weights=w) == hearing.lines(v, {}, shell=shell)
+
+
+def test_a_url_of_the_users_own_is_not_explained_by_this_macs_weights(ears_path):
+    """The weights are the offered route's: a server elsewhere is told nothing about them."""
+    env = {"DC_STT_URL": OWN}
+    v, _, _ = _probe(env, FakeCurl(rc=28))
+    w = _weights(DOWNLOADING, ears_path)
+    assert hearing.lines(v, env, shell={}, weights=w) == hearing.lines(v, env, shell={})
+
+
+@pytest.mark.parametrize(("doc", "says"), [
+    (DOWNLOADING, "Its speech models are downloading "),
+    (MISSING, "Its speech models are not downloaded yet (about 2.9 GB)"),
+], ids=["downloading", "missing"])
+def test_no_keeps_its_advice_and_adds_where_the_models_stand(ears_path, tmp_path, doc, says):
+    v, _, _ = _probe({}, FakeCurl(rc=7))
+    shell = {"PATH": str(tmp_path)}
+    lines = hearing.lines(v, {}, shell=shell, weights=_weights(doc, ears_path))
+    text = _flat(lines)
+    assert lines[0].startswith("hearing:   NO.") and says in text
+    assert "the first call waits for that download" in text
+    for line in hearing.lines(v, {}, shell=shell):            # today's advice, every line of it
+        assert line.strip() in text or _flat([line]) in text
+
+
+def test_voice_notes_only_waits_for_the_first_voice_note(ears_path):
+    env = {"DC_CALLS": "off"}
+    v, _, _ = _probe(env, FakeCurl(rc=28))
+    text = _flat(hearing.lines(v, env, shell={}, weights=_weights(DOWNLOADING, ears_path)))
+    assert "The first voice note waits" in text and "first call" not in text
+
+
+def test_under_the_kit_the_download_points_at_ears_services_status(ears_path, kit_path):
+    for doc in (DOWNLOADING, MISSING):
+        v, _, _ = _probe({}, FakeCurl(rc=28))
+        lines = hearing.lines(v, {}, shell={"PATH": kit_path}, weights=_weights(doc, ears_path))
+        text = _flat(lines)
+        assert f"{hearing.INDENT}  {hearing.KIT_STATUS}" in lines
+        assert "Watch the download (read-only):" in text
+        assert "voicemode" not in text.lower() and hearing.KIT_INSTALL not in text
+
+
+def test_under_the_kit_no_while_downloading_keeps_the_kits_rows(ears_path, kit_path):
+    v, _, _ = _probe({}, FakeCurl(rc=7))
+    lines = hearing.lines(v, {}, shell={"PATH": kit_path}, weights=_weights(DOWNLOADING, ears_path))
+    text = _flat(lines)
+    assert "Its speech models are downloading" in text and "This is Session Kit" in text
+    assert f"{hearing.INDENT}  {hearing.KIT_STATUS}" in lines and "voicemode service install" not in text
+
+
+def test_install_says_downloading_through_the_reader(rig, monkeypatch, ears_path):
+    """End to end: the reader is found on the PATH `bot install` ran with."""
+    fake = FakeEars(DOWNLOADING)
+    monkeypatch.setattr(hearing, "WEIGHTS_RUN", fake)
+    monkeypatch.setenv("PATH", f"{ears_path}:{os.environ.get('PATH', '')}")
+    r, _ = _install(monkeypatch, FakeCurl(rc=28))
+    assert r.exit_code == 0, r.output
+    _, block = _hearing_block(r.output)
+    assert block[0].startswith("hearing:   downloading ") and " of 2.9 GB." in block[0]
+    assert len(fake.calls) == 1
+    assert r.output.splitlines()[-len(block):] == block
+
+
+def test_install_under_the_kit_says_downloading_and_points_at_status(rig, monkeypatch, ears_path, kit_path):
+    monkeypatch.setattr(hearing, "under_kit", UNDER_KIT)
+    monkeypatch.setattr(hearing, "WEIGHTS_RUN", FakeEars(MISSING))
+    monkeypatch.setenv("PATH", f"{kit_path}:{ears_path}:{os.environ.get('PATH', '')}")
+    r, _ = _install(monkeypatch, FakeCurl(rc=28))
+    assert r.exit_code == 0, r.output
+    _, block = _hearing_block(r.output)
+    text = _flat(block)
+    assert text.startswith("hearing: not confirmed.") and "not downloaded yet (about 2.9 GB)" in text
+    assert any(ln.strip() == hearing.KIT_STATUS for ln in block)
+
+
+def test_install_with_an_older_ears_keeps_not_confirmed(rig, monkeypatch, ears_path, no_ears_weights):
+    """The verb is absent (conftest's reader exits 2, as an older ears does): today's wording."""
+    monkeypatch.setenv("PATH", f"{ears_path}:{os.environ.get('PATH', '')}")
+    r, _ = _install(monkeypatch, FakeCurl(rc=28))
+    assert r.exit_code == 0, r.output
+    text = _flat(_hearing_block(r.output)[1])
+    assert text.startswith("hearing: not confirmed.") and "A first request can be slow" in text
+    assert no_ears_weights == [[os.path.join(ears_path, "ears"), "services", "weights", "--json"]]
+
+
+def test_install_that_hears_never_asks_the_reader(rig, monkeypatch, ears_path, no_ears_weights):
+    monkeypatch.setenv("PATH", f"{ears_path}:{os.environ.get('PATH', '')}")
+    r, _ = _install(monkeypatch, FakeCurl())
+    assert r.exit_code == 0 and "hearing:   yes." in r.output, r.output
+    assert no_ears_weights == []

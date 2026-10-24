@@ -63,6 +63,9 @@ def rig(monkeypatch, tmp_path, launchd, given_seat):
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(service, "ears_src", lambda: None)
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "mac.example.net")
+    # this machine is mac, so a shell with no SESSIONMAIL_HOST still finds its
+    # To (ada@mac.example.net) on this host, whatever host runs the suite
+    monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "mac.local")
     return tmp_path / "job.plist"
 
 

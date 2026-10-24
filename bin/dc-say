@@ -58,13 +58,14 @@ ACK="$DC_ACKS/$(date +%Y%m%d-%H%M%S)-say-$$.json"
 if [ -n "$CALL" ]; then
   # The cheap check first: the bot writes the live call to disk, so we can
   # refuse here without the account lock and without queueing a word.
-  if [ ! -f "$DC_LIVE" ]; then
+  LIVE="$(dc_live "$PROFILE")" || exit 2   # the live call of the bot this job goes to
+  if [ ! -f "$LIVE" ]; then
     echo "dc-say: REFUSED - no call is live. Nothing was sent." >&2
     exit 3
   fi
   HAVE=$(python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get("call_id",""))
-except Exception: print("")' "$DC_LIVE")
+except Exception: print("")' "$LIVE")
   if [ "$HAVE" != "$CALL" ]; then
     echo "dc-say: REFUSED - call $CALL is over; the live call is msg ${HAVE:-none}. Nothing was sent." >&2
     exit 3

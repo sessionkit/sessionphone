@@ -78,6 +78,8 @@ from sessionphone import media                         # a pack gone under a liv
 from sessionphone.bridge import seatmail               # the `message` binary, for `message verify`
 from sessionphone.bridge import recording              # is a call's audio kept? off by default
 from sessionphone import paths                         # kit settings paths, one layout
+from sessionphone import hearing                       # weights_state() and probe(): will the call hear?
+from sessionphone.bridge import firstcall              # >>> first-call-wait: the line and the music
 # A second profile (the PUBLIC relay) runs this same file
 # under its own launchd job: its own call dir, its profile name in the call's
 # mail-thread id (chat ids are per account - chat 12 exists on both), and a
@@ -550,6 +552,9 @@ def watch_ice(pc):
 # has no speech server and no ffmpeg; say renders 48 kHz s16 itself.
 TTS_MODE = (dc_env.env("TTS", "auto") or "auto").strip().lower()
 SAY_BIN = "/usr/bin/say"
+# >>> first-call-wait: a line, then music, while the speech models download
+FIRST_CALL_WAIT = dc_env.FIRST_CALL_WAIT
+WAIT_MUSIC = dc_env.WAIT_MUSIC
 
 
 def _answers(url, timeout=0.3):
@@ -768,8 +773,95 @@ def set_recorder(rec):
     _recorder = rec
 # <<< recording-patch
 
+def _line_log(msg):
+    """The track also serves web calls, which install no hooks: log only when the bot did."""
+    if _hooks is not None:
+        log(msg)
+
+
+class VoiceLine:
+    """One line on a PipVoiceTrack: a mouth line (header to D) or a bot reply
+    (one speak() call). Open one with PipVoiceTrack.line().
+
+    A line owns the track from its turn until it ends. Until its turn it
+    waits, and what it says waits with it, in its own buffer; at its turn the
+    buffer goes onto the track in one step. So a line is never spliced into
+    another, and lines play in the order they arrived. No writer ever waits:
+    say() and end() return at once, so a waiting mouth still reads its own C
+    or EOF, and a waiting bot reply still renders.
+
+    state: "waiting", "owning", "done" (ended and released) or "cut"."""
+
+    def __init__(self, track, who=""):
+        self.track, self.who = track, who
+        self.state = "waiting"
+        self.buf = []              # (pcm, on_queue) said while waiting
+        self.complete = False      # end() was called while waiting
+        self.said = False          # it has said a piece (buffered or not)
+        self._on_over = None
+
+    @property
+    def live(self):
+        """Owning or waiting: a line that can still reach the call."""
+        return self.state in ("waiting", "owning")
+
+    @property
+    def was_cut(self):
+        return self.state == "cut"
+
+    def say(self, pcm, on_queue=None):
+        """Queue PCM on this line. on_queue(start_at, seconds) is called when it
+        reaches the track, with the wall-clock time it will start to play.
+        -> False when the line is over (cut or ended) and the PCM was dropped."""
+        if not self.said and self.live:
+            self.said = True
+            if self.state == "waiting":
+                self.track.said_n += 1     # a waiting line is talking too (firstcall reads said_n)
+        if self.state == "owning":
+            self.track._append(pcm, on_queue)
+            return True
+        if self.state == "waiting":
+            self.buf.append((pcm, on_queue))
+            return True
+        return False
+
+    def end(self, on_over=None):
+        """All said: the next line may have the track once this one's audio is
+        on it. on_over() is called once, when the line is over: its audio all
+        on the track, or cut (see was_cut). On a line that is over already
+        (cut, or ended before) it only calls on_over, at once."""
+        self._on_over = on_over
+        if self.state == "owning":
+            self.track._release(self)
+        elif self.state == "waiting":
+            self.complete = True
+        else:
+            self._over(self.state)
+
+    def _over(self, state):
+        self.state = state
+        cb, self._on_over = self._on_over, None
+        if cb is not None:
+            try:
+                cb()
+            except Exception:  # noqa: BLE001 - one writer's bookkeeping must not stop another's line
+                _line_log("voice line: on_over failed:\n" + traceback.format_exc())
+
+    def cut(self):
+        """A cut of the WHOLE track (PipVoiceTrack.cut), but only while this line
+        is live. -> the seconds dropped, or None when the line was already over
+        (a cut that already dropped it must not cut the next line too)."""
+        if not self.live:
+            return None
+        return self.track.cut()
+
+
 class PipVoiceTrack(MediaStreamTrack):
-    """Outgoing audio: whatever is queued, else silence, paced at 20 ms."""
+    """Outgoing audio: whatever is queued, else silence, paced at 20 ms.
+
+    One line at a time: a writer opens a VoiceLine (line()), and the line
+    that arrived first owns the track until it ends; the others wait in
+    arrival order and are never spliced in. A cut drops them all."""
     kind = "audio"
 
     def __init__(self):
@@ -777,11 +869,92 @@ class PipVoiceTrack(MediaStreamTrack):
         self.queue = collections.deque()      # int16 arrays at 48 kHz
         self.pending = np.zeros(0, dtype=np.int16)
         self.overlay = np.zeros(0, dtype=np.int32)   # sounds, mixed OVER whatever plays
+        self.bed = None                       # int16 looped while nothing is queued (hold)
+        self._bed_at = 0
+        self.said_n = 0                       # lines queued by say(), ever
+        self.owner = None                     # the VoiceLine that has the track
+        self.waiting = collections.deque()    # VoiceLines behind it, in arrival order
         self._start = None
         self._timestamp = 0
 
     def say(self, pcm):
+        """Queue PCM with no line: straight onto the track. A held bed ends
+        here, for good: see hold()."""
         self.queue.append(pcm)
+        self.said_n += 1
+        self.bed = None
+
+    # ---- one line at a time
+
+    def line(self, who=""):
+        """Open a line. Its arrival is now: it owns the track at once if
+        nothing does, else it waits behind the lines that arrived before it."""
+        ln = VoiceLine(self, who)
+        self.waiting.append(ln)
+        self._grant()
+        return ln
+
+    def queued_s(self):
+        """Seconds of audio on the track still to play."""
+        return (sum(len(a) for a in self.queue) + len(self.pending)) / OUT_RATE
+
+    def _append(self, pcm, on_queue=None):
+        start_at = time.time() + self.queued_s()
+        self.say(pcm)
+        if on_queue is not None:
+            try:
+                on_queue(start_at, len(pcm) / OUT_RATE)
+            except Exception:  # noqa: BLE001 - one writer's bookkeeping must not stop another's line
+                _line_log("voice line: on_queue failed:\n" + traceback.format_exc())
+
+    def _release(self, ln):
+        if self.owner is ln:
+            self.owner = None
+        ln._over("done")
+        self._grant()
+
+    def _grant(self):
+        """Hand the track to the next waiting line, its buffer onto the queue in
+        one step. A line that already ended passes the track straight on."""
+        while self.owner is None and self.waiting:
+            ln = self.waiting.popleft()
+            self.owner, ln.state = ln, "owning"
+            buf, ln.buf = ln.buf, []
+            for pcm, on_queue in buf:
+                self._append(pcm, on_queue)
+            if ln.complete:
+                self.owner = None
+                ln._over("done")
+
+    # >>> first-call-wait: the bed (bridge/firstcall.py)
+    # A bed is what the track plays when it has nothing to say: the first call's
+    # wait music, looped with no gap. It is not a line: it plays only when no line
+    # is queued, so a line queued before it is held plays first, and it never
+    # reaches the transcript, the said rows or the echo guard. speaking() does not
+    # count it, and a cut (barge-in) leaves it alone. The next line queued by say()
+    # ends it at once (the call is talking now, so it never returns between
+    # sentences), as does unhold(). The recording gets it: the caller heard it.
+
+    def hold(self, pcm):
+        """Loop PCM (int16, 48 kHz) under nothing, from the next frame that has no line."""
+        x = np.asarray(pcm, dtype=np.int16)
+        self.bed, self._bed_at = (x if len(x) else None), 0
+
+    def unhold(self):
+        """Drop the bed, from the next frame. -> whether one was held."""
+        held, self.bed = self.bed is not None, None
+        return held
+
+    def _bed_samples(self):
+        out = np.empty(OUT_SAMPLES, dtype=np.int16)
+        n = 0
+        while n < OUT_SAMPLES:
+            take = min(OUT_SAMPLES - n, len(self.bed) - self._bed_at)
+            out[n:n + take] = self.bed[self._bed_at:self._bed_at + take]
+            n += take
+            self._bed_at = (self._bed_at + take) % len(self.bed)
+        return out
+    # <<< first-call-wait
 
     # Sounds follow the ears into the call: the sounds for the user's voice play
     # back through the call while the user is on one. A sound is not a line: it is
@@ -818,12 +991,26 @@ class PipVoiceTrack(MediaStreamTrack):
 
         The track keeps pacing and emits silence, so the connection is
         untouched - only the words go."""
+        secs = self.drop()
+        # >>> recording-interrupt
+        log(f"interruption dropped={secs:.2f}s")
+        # <<< recording-interrupt
+        return secs
+
+    def drop(self):
+        """cut() without the log line: everything queued goes, the line that
+        owns the track and every line waiting behind it are cut (their buffers
+        too), and the track is free. Sounds and the bed stay. -> seconds dropped."""
         n = sum(len(a) for a in self.queue) + len(self.pending)
         self.queue.clear()
         self.pending = np.zeros(0, dtype=np.int16)
-        # >>> recording-interrupt
-        log(f"interruption dropped={n / OUT_RATE:.2f}s")
-        # <<< recording-interrupt
+        lines = ([self.owner] if self.owner is not None else []) + list(self.waiting)
+        self.owner = None
+        self.waiting.clear()
+        for ln in lines:
+            n += sum(len(pcm) for pcm, _ in ln.buf)
+            ln.buf = []
+            ln._over("cut")
         return n / OUT_RATE
 # <<< echo-patch cut
 
@@ -840,6 +1027,8 @@ class PipVoiceTrack(MediaStreamTrack):
             out = np.concatenate([self.pending, np.zeros(OUT_SAMPLES - len(self.pending), np.int16)])
             self.pending = np.zeros(0, dtype=np.int16)
             return out
+        if self.bed is not None:              # >>> first-call-wait: nothing to say
+            return self._bed_samples()
         return np.zeros(OUT_SAMPLES, dtype=np.int16)
 
     async def recv(self):
@@ -1580,6 +1769,7 @@ class CallSession:
     turn_n = 0           # turns mailed (or tried) on this call, counting from 1
     awaiting = ()        # (n, msgid, t_mailed) of mailed turns with no reply yet, by n
     # <<< turn-log
+    wait_task = None     # >>> first-call-wait: the wait's task while it runs; close() cancels it
 
     def __init__(self, manager, account, chat_id, msg_id=None, offer_sdp=None, has_video=False):
         self.manager, self.account = manager, account
@@ -1861,9 +2051,32 @@ class CallSession:
             hello = f"Hi {self.caller}, {dc_env.AGENT_NAME} here."   # a public-profile ring names whoever it rings
         # a chosen line and voice win; who = the voice, so the transcript says who spoke
         first = GREETING_VOICEMAIL if self.voicemail else GREETING      # >>> ring-first
+        if FIRST_CALL_WAIT and self.wait_task is None:   # >>> first-call-wait: beside the greeting
+            self.wait_task = asyncio.ensure_future(self._first_call_wait())
         await self._rec_notice_speak()  # >>> recording-notice: before the greeting
         await self.speak(self.greeting or (first if not self.outgoing else hello),
                          self.greet_voice, self.greet_voice or None)
+
+    # >>> first-call-wait
+    async def _first_call_wait(self):
+        """The first call's wait (bridge/firstcall.py): while the stt and tts
+        weights are not cached, a line saying so (macOS say), then the music
+        file as the track's bed, until the call can hear. Cancelled with the call."""
+        render = (lambda text: apple_pcm48(text)) if os.path.exists(SAY_BIN) else None
+        try:
+            await firstcall.wait(
+                self.voice,
+                weights=lambda: hearing.weights_state(os.environ),
+                probe=lambda: hearing.probe(os.environ, say=lambda _m: None).answer == "yes",
+                render=render,
+                load_music=lambda: firstcall.music(WAIT_MUSIC, log=log, ffmpeg=FFMPEG),
+                log=log)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.voice.unhold()
+            log("first-call wait failed:\n" + traceback.format_exc())
+    # <<< first-call-wait
 
     # ---- incoming
 
@@ -2475,70 +2688,91 @@ class CallSession:
 
     async def speak(self, text, voice=None, who=None, fallback=True):
         """Say TEXT into the call. fallback: a line TTS could not say is sent
-        as chat text instead (False: it is only logged)."""
+        as chat text instead (False: it is only logged).
+
+        The whole reply is ONE line on the track (PipVoiceTrack.line), and it
+        takes its place as it arrives, here: a line already speaking (the
+        mouth, another reply) finishes first, and nothing lands between this
+        reply's sentences. A cut ends it: no later sentence is rendered or said.
+        Never waits for the track or for playback."""
         voice, who = voice or dc_env.VOICE, who or dc_env.AGENT_NAME   # >>> identity
         loop = asyncio.get_running_loop()
+        line = self.voice.line(who)
         # >>> said-rows: one utt per line, like the mouth. A sentence starts
-        # playing when it is queued or when the one before it ends, so the
-        # line's end is estimated as it is queued; `said` is written then.
+        # playing when it reaches the track, behind what is queued there, so
+        # the line's end is estimated then; `said` is written at that end.
         utt, played, failed, started = uuid.uuid4().hex[:12], 0.0, 0, False
         # <<< said-rows
-        for s in sentences(text):
-            try:
-                t = time.time()
-                pcm = await loop.run_in_executor(None, tts_pcm48, s, voice)
-                self.voice.say(pcm)
+
+        def queued(s):
+            def on_queue(start_at, dur):       # the sentence is on the track now
+                nonlocal played, started
                 # >>> said-rows
-                dur = len(pcm) / OUT_RATE
-                now = time.time()
-                self._play_end = max(getattr(self, "_play_end", 0.0), now) + dur
+                self._play_end = max(getattr(self, "_play_end", 0.0), start_at) + dur
                 played += dur
                 if not started:
                     started = True
                     self.heard.saying(text, utt=utt, voice=voice, who=who)
                 # <<< said-rows
 # >>> echo-patch speak
-                self.echo.spoken(s, len(pcm) / OUT_RATE)
+                self.echo.spoken(s, dur, start=start_at)
 # <<< echo-patch speak
-                self.lines.append((time.time(), who, s))
-                log(f"SPOKE {len(pcm)/OUT_RATE:.1f}s (tts {time.time()-t:.1f}s, {voice}): {s[:60]}")
-            except Exception as e:
-                log(f"tts failed: {e}")
-                if not fallback:
-                    failed += 1
-                    continue
-                # >>> tts-fallback
-                # He must still receive the words. An outbox job is the
-                # lock-safe path (the same one dc-say uses); the bot's own
-                # runner sends it as chat text.
-                try:
-                    outbox = pathlib.Path(os.environ.get(
-                        "DC_OUTBOX", dc_env.ROOT / "outbox"))
-                    outbox.mkdir(parents=True, exist_ok=True)
-                    # no_speak: these are the words that could NOT be said;
-                    # speaking them into the live call re-fed the failure,
-                    # marker and all ("(unspoken, TTS failed)" voiced in
-                    # a demo).
-                    # Chat text only. Same key as the original bridge's fix.
-                    job = {"chat_id": int(self.chat_id),
-                           "text": f"(unspoken, TTS failed) {s}",
-                           "no_speak": True}
-                    (outbox / f"{time.time():.6f}.json").write_text(
-                        json.dumps(job), encoding="utf-8")
-                    log(f"tts fallback: sent as text: {s[:60]}")
-                except Exception:
-                    log("tts fallback FAILED too - the line is lost")
-                # <<< tts-fallback
-                failed += 1   # >>> said-rows
-        # >>> said-rows
-        if started:
+            return on_queue
+
+        def over():                            # all on the track, or cut
+            # >>> said-rows
+            if not started:
+                return
+            cut = line.was_cut
             fields = dict(utt=utt, voice=voice, who=who, played_s=round(played, 2),
-                          dur_s=round(played, 2), cut=False,
-                          reason="tts-failed" if failed else "done",
+                          dur_s=round(played, 2), cut=cut,
+                          reason="cut" if cut else "tts-failed" if failed else "done",
                           text_played_est=text)
-            loop.call_later(max(0.0, self._play_end - time.time()),
+            loop.call_later(max(0.0, getattr(self, "_play_end", 0.0) - time.time()),
                             lambda: self.heard.said(**fields))
-        # <<< said-rows
+            # <<< said-rows
+
+        try:
+            for s in sentences(text):
+                if line.was_cut:
+                    break
+                try:
+                    t = time.time()
+                    pcm = await loop.run_in_executor(None, tts_pcm48, s, voice)
+                    if line.was_cut:       # cut while it rendered: it is not said
+                        break
+                    line.say(pcm, queued(s))
+                    self.lines.append((time.time(), who, s))
+                    log(f"SPOKE {len(pcm)/OUT_RATE:.1f}s (tts {time.time()-t:.1f}s, {voice}): {s[:60]}")
+                except Exception as e:
+                    log(f"tts failed: {e}")
+                    if not fallback:
+                        failed += 1
+                        continue
+                    # >>> tts-fallback
+                    # He must still receive the words. An outbox job is the
+                    # lock-safe path (the same one dc-say uses); the bot's own
+                    # runner sends it as chat text.
+                    try:
+                        outbox = dc_env.path("OUTBOX", "outbox")   # this profile's, never another's
+                        outbox.mkdir(parents=True, exist_ok=True)
+                        # no_speak: these are the words that could NOT be said;
+                        # speaking them into the live call re-fed the failure,
+                        # marker and all ("(unspoken, TTS failed)" voiced in
+                        # a demo).
+                        # Chat text only. Same key as the original bridge's fix.
+                        job = {"chat_id": int(self.chat_id),
+                               "text": f"(unspoken, TTS failed) {s}",
+                               "no_speak": True}
+                        (outbox / f"{time.time():.6f}.json").write_text(
+                            json.dumps(job), encoding="utf-8")
+                        log(f"tts fallback: sent as text: {s[:60]}")
+                    except Exception:
+                        log("tts fallback FAILED too - the line is lost")
+                    # <<< tts-fallback
+                    failed += 1   # >>> said-rows
+        finally:
+            line.end(over)         # the next line may have the track: never left holding it
 
     # ---- the end
 
@@ -2549,11 +2783,16 @@ class CallSession:
         if self.answer_go is not None:  # stop ringing now, not at RING_WAIT
             self.answer_go.set()
         # <<< ring-first
+        if self.wait_task is not None:  # >>> first-call-wait: the music stops with the call
+            self.wait_task.cancel()
         self._roots_end()               # the turnover clock starts
         if self.pc is None:
             return
         pc, self.pc = self.pc, None
         log(f"closing msg {self.msg_id}: {why}")
+        voice = getattr(self, "voice", None)
+        if callable(getattr(voice, "drop", None)):
+            voice.drop()                # no line may hold the track of a call that is gone
         self._live_clear()              # >>> call-id: before anything can block
         set_call_id(None)               # >>> call-id-log: stop stamping
         earleg.end(self, why)           # >>> ear-leg: every listener hears the call end

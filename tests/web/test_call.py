@@ -702,15 +702,35 @@ def test_t8_cli_legs_with_no_seat_named_exits_2_and_makes_nothing(short_root, mo
 
 
 def test_t8_cli_legs_on_a_junk_host_exits_2_even_with_mail_to(short_root, monkeypatch, tmp_path):
+    """PHONE-217: a reverse-DNS getfqdn() no longer refuses (the host is dc_env.host_part,
+    the short host); a .arpa host that SESSIONMAIL_HOST names still does (PHONE-98)."""
     no_seat_env(monkeypatch)
     monkeypatch.delenv("DC_HOST", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SESSIONMAIL_HOST", "x.ip6.arpa")
     monkeypatch.setattr(socket, "getfqdn", lambda *a: "1.0.0.0.ip6.arpa")
     root = short_root / "r"
     r = CliRunner().invoke(cli.main, ["web", "--legs", "--port", "0", "--root", str(root),
                                       "--mail-to", f"alice@{TURN_HOST}"])
-    assert r.exit_code == 2 and "DC_HOST" in r.output and "ip6.arpa" in r.output
+    assert r.exit_code == 2 and "DC_HOST" in r.output and "'x.ip6.arpa'" in r.output
     assert not root.exists()
+
+
+def test_t8_cli_legs_on_a_reverse_dns_fqdn_takes_the_short_host(short_root, monkeypatch, tmp_path):
+    """PHONE-217's bug at the CLI: getfqdn() is the loopback PTR, SESSIONMAIL_HOST is set
+    (the autouse fixture's). The seat's host is the short host, never a refusal naming .arpa."""
+    no_seat_env(monkeypatch)
+    monkeypatch.delenv("DC_HOST", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "1.0.0.0.ip6.arpa")
+    from sessionphone.web import turns
+    seen, real = [], turns.named_seat
+    monkeypatch.setattr(turns, "named_seat", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
+    root = short_root / "r"
+    r = CliRunner().invoke(cli.main, ["web", "--legs", "--port", "0", "--root", str(root),
+                                      "--mail-to", f"alice@{TURN_HOST}"])
+    (seat, why), = seen
+    assert why == "" and seat.host == TURN_IDS and "ip6.arpa" not in r.output
 
 
 def test_t8_the_seat_refusal_comes_after_the_legs_refusals(tmp_path, monkeypatch):

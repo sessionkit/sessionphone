@@ -40,7 +40,7 @@ def test_apple_renders_48k_speech():
 
 def test_kokoro_defaults_to_mlx_audio_with_its_model(monkeypatch):
     """kokoro-fastapi on :8880 is retired; mlx-audio refuses the bare name "kokoro"
-    (404, measured Wed 2030-06-12), so the default must name the repo."""
+    (404, measured Sun 2030-06-09), so the default must name the repo."""
     import subprocess
     import sys
     env = {k: v for k, v in os.environ.items()

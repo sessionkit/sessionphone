@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # dc-env - sourced by every dc-* tool: who the bridge is, and where its state lives.
 #
-# The agent comes from DC_AGENT, then CLAUDE_CODE_AGENT, then "claude". The
-# root comes from DC_ROOT, then SESSIONPHONE_ROOT, then the root `sessionphone
-# bot install` keeps in ~/.sessionkit/phone/settings/phone.json (asked of the
-# package's own Python, so the tools and the bot read one root), then
-# ~/.sessionphone. If that question cannot be answered, it is ~/.sessionphone.
-# Every path a tool touches derives from the root unless its own DC_X is set.
+# The agent is the bot `sessionphone bot install` would pick: DC_AGENT, then
+# this session's durable seat (asked of sessionmail), then the one bot
+# ~/.sessionkit/phone/settings/phone.json records, then "claude". With no
+# DC_AGENT in this shell, each tool says on stderr which bot it picked. The
+# root comes from DC_ROOT, then SESSIONPHONE_ROOT, then the root install keeps
+# in phone.json for that bot, then ~/.sessionphone. Both are asked of the
+# package's own Python (dc_env.py), so the tools and the bot pick one name and
+# one root. If that question cannot be answered: claude, and ~/.sessionphone.
+# Every path a tool touches derives from the root unless its own DC_X is set:
+# from the bot's home, the root itself, or <root>/<profile>/ when DC_PROFILE
+# names a profile in this shell (dc_env.home), as the bot's own job does.
 # Mirrors src/sessionphone/bridge/dc_env.py exactly - change both or neither.
 # Run on its own (it is on the PATH with the tools), it answers -h/--help with
 # this header and refuses anything else: it is a library, not a tool.
@@ -28,29 +33,55 @@ _DC_PY="$_DC_HOME/.venv/bin/python"
 # a wheel install: dc-env sits in the env's own bin/, beside its python
 [ -x "$_DC_PY" ] || _DC_PY="$(dirname "${BASH_SOURCE[0]}")/python"
 [ -x "$_DC_PY" ] || _DC_PY=python3
-# dc_kept_root: the root sessionphone.paths.root() names with no root in this
-# shell (the one phone.json keeps, else the default); nothing when it cannot say.
-dc_kept_root() {
+# dc_kept: dc_env.py's own answer for this shell, three lines: the bot
+# (dc_env.AGENT), where its name came from (dc_env.AGENT_FROM) and the root
+# with no DC_ROOT (dc_env.ROOT: SESSIONPHONE_ROOT, else the one phone.json
+# keeps, else the default); nothing when it cannot say.
+dc_kept() {
   "$_DC_PY" -c 'import sys
 sys.path[0] = sys.argv.pop(1)
-from sessionphone import paths
-print(paths.root())' "$_DC_HOME/src" 2>/dev/null
+from sessionphone.bridge import dc_env
+print(dc_env.AGENT); print(dc_env.AGENT_FROM); print(dc_env.ROOT)' "$_DC_HOME/src" 2>/dev/null
 }
-# shellcheck disable=SC2018,SC2019  # lowers A-Z only, unchanged here (dc_env.py lowers any letter)
-DC_AGENT="$(printf %s "${DC_AGENT:-${CLAUDE_CODE_AGENT:-claude}}" | tr 'A-Z' 'a-z')"
-if [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-}" ]; then
-  DC_ROOT="$(dc_kept_root)" || DC_ROOT=""
+_DC_NAMED="${DC_AGENT:-}"
+if [ -z "$_DC_NAMED" ] || { [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-}" ]; }; then
+  _DC_KEPT="$(dc_kept)" || _DC_KEPT=""
+  if [ -z "$_DC_NAMED" ]; then
+    _DC_AGENT_FROM="$(printf '%s\n' "$_DC_KEPT" | sed -n 2p)"
+    DC_AGENT="$(printf '%s\n' "$_DC_KEPT" | sed -n 1p)"
+    if [ -z "$DC_AGENT" ]; then
+      DC_AGENT=claude
+      _DC_AGENT_FROM="the default: the package could not be asked ($_DC_PY)"
+    fi
+    case "$_DC_AGENT_FROM" in
+      *" in this shell") ;;     # the shell's own variable named it: what was asked for
+      *) echo "$(basename "$0"): bot $DC_AGENT ($_DC_AGENT_FROM)" >&2 ;;
+    esac
+  fi
+  if [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-}" ]; then
+    DC_ROOT="$(printf '%s\n' "$_DC_KEPT" | sed -n 3p)"
+  fi
 fi
+# shellcheck disable=SC2018,SC2019  # lowers A-Z only, unchanged here (dc_env.py lowers any letter)
+DC_AGENT="$(printf %s "$DC_AGENT" | tr 'A-Z' 'a-z')"
 DC_ROOT="${DC_ROOT:-${SESSIONPHONE_ROOT:-$HOME/.sessionphone}}"
-DC_LIVE="${DC_LIVE:-$DC_ROOT/call-live.json}"
-DC_ACKS="${DC_ACKS:-$DC_ROOT/acks}"
-DC_CALLS_DIR="${DC_CALLS_DIR:-$DC_ROOT/calls}"
-DC_LOG="${DC_LOG:-$DC_ROOT/bot.log}"
+# the bot's home (dc_env.home): every per-account file lives under it. The root
+# for the default profile; <root>/<profile>/ for a named one (DC_PROFILE).
+_DC_PROFILE="$(printf %s "${DC_PROFILE:-}" | tr -d '[:space:]')"
+_DC_BOT_HOME="$DC_ROOT${_DC_PROFILE:+/$_DC_PROFILE}"
+_DC_LIVE_GIVEN="${DC_LIVE:-}"     # dc_live: a DC_LIVE this shell names wins; else beside the outbox
+DC_LIVE="${DC_LIVE:-$_DC_BOT_HOME/call-live.json}"
+DC_ACKS="${DC_ACKS:-$_DC_BOT_HOME/acks}"
+DC_CALLS_DIR="${DC_CALLS_DIR:-$_DC_BOT_HOME/calls}"
+DC_LOG="${DC_LOG:-$_DC_BOT_HOME/bot.log}"
 # the undelivered spool (bridge/spool.py): failed agent mail, waiting and dead/
-DC_UNDELIVERED="${DC_UNDELIVERED:-$DC_ROOT/undelivered}"
-# what `pgrep -f` finds: the launchd job runs `python -m sessionphone.bridge.bot AGENT`
-DC_BOT="${DC_BOT:-sessionphone.bridge.bot $DC_AGENT}"
-export DC_AGENT DC_ROOT DC_LIVE DC_ACKS DC_CALLS_DIR DC_LOG DC_UNDELIVERED DC_BOT
+DC_UNDELIVERED="${DC_UNDELIVERED:-$_DC_BOT_HOME/undelivered}"
+# the bot's pid file (bridge/pidfile.py): the bot writes it once it holds the
+# account, and dc-live reads it to know the bot runs (DC_BOT is no longer read).
+# It follows the home, as the bot's PID_FILE does, so dc-live under DC_PROFILE
+# reads its own bot's pid file, never the default bot's.
+DC_PID_FILE="${DC_PID_FILE:-$_DC_BOT_HOME/bot.pid}"
+export DC_AGENT DC_ROOT DC_LIVE DC_ACKS DC_CALLS_DIR DC_LOG DC_UNDELIVERED DC_PID_FILE
 # the heard feed into a webxdc app (bridge/xdc_feed.py): chat ids the
 # heard log may be read out into (unset = none, so no feed binds; list only
 # your own 1:1 chat), and feeds at once. The bot reads them from ITS OWN
@@ -58,11 +89,24 @@ export DC_AGENT DC_ROOT DC_LIVE DC_ACKS DC_CALLS_DIR DC_LOG DC_UNDELIVERED DC_BO
 DC_XDC_FEED_CHATS="${DC_XDC_FEED_CHATS:-}"
 DC_XDC_FEEDS_MAX="${DC_XDC_FEEDS_MAX:-2}"
 export DC_XDC_FEED_CHATS DC_XDC_FEEDS_MAX
-# dc_outbox [PROFILE]: "" = the bot's own account; a named profile is a second
-# bot with its own outbox (chat ids are per profile). DC_OUTBOX overrides.
+# the first call's wait (bridge/firstcall.py): on/off, and the music file it
+# plays while the speech models download (missing = the line alone). The bot
+# reads them from ITS OWN environment. The music is root-wide: one for every
+# profile (dc_env.ROOT_WIDE).
+DC_FIRST_CALL_WAIT="${DC_FIRST_CALL_WAIT:-on}"
+DC_WAIT_MUSIC="${DC_WAIT_MUSIC:-$DC_ROOT/wait-music.opus}"
+export DC_FIRST_CALL_WAIT DC_WAIT_MUSIC
+# the bot's Delta Chat display name (sessionphone/displayname.py): unset = the
+# agent's name, title-cased, unless the account has one set by hand. The bot
+# reads it from ITS OWN environment, at its start.
+DC_NAME="${DC_NAME:-}"
+export DC_NAME
+# dc_outbox [PROFILE]: "" = the bot's own account (its home: DC_PROFILE in this
+# shell, else the root); a named profile is a second bot with its own outbox
+# (chat ids are per profile). DC_OUTBOX overrides.
 dc_outbox() {
   case "${1:-}" in
-    "")     printf %s "${DC_OUTBOX:-$DC_ROOT/outbox}" ;;
+    "")     printf %s "${DC_OUTBOX:-$_DC_BOT_HOME/outbox}" ;;
     public) printf %s "${DC_OUTBOX_PUBLIC:-$DC_ROOT/public/outbox}" ;;
     *) echo "$(basename "$0"): unknown --profile '$1' (known: public)" >&2; return 2 ;;
   esac
@@ -126,6 +170,16 @@ sys.exit(main(sys.argv[1:]))' "$_DC_HOME/src" precheck --list "$list" --outbox "
   # shellcheck disable=SC2034  # read by the tool that sourced this
   DC_DEST="${out#*$'\n'}"
   return 0
+}
+# dc_live [PROFILE]: the live-call file of the bot that reads that outbox, as
+# dc_channels finds the list: beside the outbox the job goes to. A bot's home
+# holds both. DC_LIVE, if this shell sets it, names the default profile's.
+# With no DC_OUTBOX that is DC_LIVE's own default; a profile bot's reply hint
+# (DC_OUTBOX=<home>/outbox dc-say --call) finds <home>/call-live.json.
+dc_live() {
+  local out; out="$(dc_outbox "${1:-}")" || return 2
+  if [ -z "${1:-}" ] && [ -n "$_DC_LIVE_GIVEN" ]; then printf %s "$_DC_LIVE_GIVEN"
+  else printf %s "$(dirname "$out")/call-live.json"; fi
 }
 # <<< channels-precheck
 # >>> job-shape

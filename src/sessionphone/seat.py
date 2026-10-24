@@ -28,7 +28,9 @@
    <agent>`, then `message path <agent>` proves it is there. The bot asks
    again at every start (have_box): the mail drop never makes a box, and a
    send to a box that is not there is refused (rc=3), so the box is made, or
-   the start refused, before the first send.
+   the start refused, before the first send. An address off this host has no
+   box here to make: on an MTA its reader makes it, and on the mail drop,
+   which delivers locally only, the start is refused.
 
 Nothing here decides must-sign: seatmail.signing() does, from the carrier
 this bot's own `message send` will use, and every Seat carries its mode and
@@ -48,6 +50,7 @@ import subprocess
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 
+from sessionphone import reach as reach_
 from sessionphone.bridge import dc_env, seatmail
 
 # What a sessionmail must offer before install runs the bot's seat agent itself:
@@ -73,8 +76,28 @@ HEAR = "To hear Delta messages, start Claude with: session start {agent}"
 # `claude` gets no copy, and nothing tells it so.
 DOORBELL = (" (it runs `claude --agent {agent}`: only a session started as {agent} hears "
             "the box; a plain `claude` gets no copy of its mail, and nothing says so)")
-HEARD = "this session is {agent}: Delta messages reach it"
 NO_AGENT_FILE = ' (no agent file "{agent}" yet: see the README)'
+# How to send Delta text to another box, said wherever the box is named.
+CHANGE = (" To send Delta text to another box, install again with DC_AGENT=NAME (the agent a "
+          "session is started as) or DC_MAILTO=ADDR (a box a session hears).")
+# Said only when sessionmail, asked, says this session hears the box.
+HEARD = ("this session hears box {agent} ({how}): Delta messages and calls reach it, "
+         "while it runs")
+UNBOXED = ("; this session has no mail box yet, so nothing reaches it until its "
+           "`pager listen` makes one")
+# Said FIRST when sessionmail, asked, says this session does not hear the box.
+DEAF = ("this session will NOT hear Delta messages or calls: they go to box {agent}, and "
+        "this session hears {hears}. Ways out: start Claude with `session start {agent}` "
+        "(only a session started as {agent} hears that box, today and in later sessions); "
+        "or install again with DC_AGENT=NAME (the agent a session is started as) or "
+        "DC_MAILTO=ADDR (a box a session hears); or `sessionphone bot install --hear-here`, "
+        "which lets this session hear box {agent} until this session ends.")
+UNASKED = (" Whether this session hears it was not measured: `message subscription list` "
+           "gave no answer ({said}).")
+# `bot install --hear-here`: a session subscription, which sessionmail ends with the session.
+HEAR_HERE_ARGS = ("subscription", "add")
+HEAR_HERE_ENDS = ("it ends with this session: a later session does not hear the box unless "
+                  "it is started with `session start {agent}`, or runs --hear-here again")
 
 
 class NoSigner(Exception):
@@ -102,7 +125,9 @@ class SeatFailed(RuntimeError):
 
 class NoBox(Exception):
     """The box Delta text goes to is not on this host, and `message setup
-    --box` did not make it. Exit code 2, naming the step to run."""
+    --box` did not make it; or its address is off this host and the carrier is
+    the mail drop, which delivers locally only. Exit code 2, naming the step
+    to run."""
 
 
 @dataclass
@@ -401,10 +426,25 @@ def _box_path(exe: str, name: str, tenv: Mapping[str, str]) -> str | None:
 
 
 BOT_AGAIN = "`sessionphone bot install` again"
+BOT_SETTING = "DC_MAILTO"
+
+
+def _off_host(box: Box, env: Mapping[str, str], setting: str) -> Box:
+    """BOX is off this host: its reader makes it, on a carrier that reaches it.
+    The mail drop delivers on this host only, so there every send to it would
+    be refused: raise NoBox, one line naming the address and what to do (the
+    SETTING that names a box here, or a carrier that reaches it). -> BOX on
+    any other carrier."""
+    if seatmail.on_drop(env):
+        host = (dc_env.mail_host(env) or "").strip() or "unknown"
+        raise NoBox(f"{box.mailto} is not on this host ({host}), and the mail drop delivers "
+                    f"locally only: set {setting} to a box on this host, or use a carrier "
+                    f"that reaches it (an MTA in {seatmail.CARRIER_VAR}).")
+    return box
 
 
 def have_box(env: Mapping[str, str], shell: Mapping[str, str], mailto: str | None = None, *,
-             what: str = "Delta text", again: str = BOT_AGAIN) -> Box:
+             what: str = "Delta text", again: str = BOT_AGAIN, setting: str = BOT_SETTING) -> Box:
     """The bot's start, and `sessionphone web --legs`' (MAILTO: the web seat's
     To): the box its mail goes to must exist before the first send. The mail
     drop never makes a box, and a send to one that is not there is refused
@@ -412,11 +452,13 @@ def have_box(env: Mapping[str, str], shell: Mapping[str, str], mailto: str | Non
     `message path` first (reads only), for the box and, for a plus address,
     its base (seatmail.cc_boxes: the drop delivers `base+tag` there); only
     when sessionmail says there is neither does it make one (ensure_box).
-    -> the Box (its path None off this host, where its reader makes it).
-    Raises NoBox, naming WHAT the box is for and what to run AGAIN."""
+    -> the Box (its path None off this host, where its reader makes it, on a
+    carrier that reaches it). Raises NoBox, naming WHAT the box is for and what
+    to run AGAIN; off this host on the mail drop, naming the address and the
+    SETTING that names a box here (_off_host)."""
     box = box_for(env, mailto)
     if not on_host(box.mailto, env):
-        return box
+        return _off_host(box, env, setting)
     exe = seatmail.resolve_message(env)
     if exe is None:
         raise NoBox(seatmail.check(env) or "no `message` binary")
@@ -425,19 +467,21 @@ def have_box(env: Mapping[str, str], shell: Mapping[str, str], mailto: str | Non
         box.path = _box_path(exe, name, tenv)
         if box.path is not None:
             return box
-    return ensure_box(env, shell, mailto, what=what, again=again)
+    return ensure_box(env, shell, mailto, what=what, again=again, setting=setting)
 
 
 def ensure_box(env: Mapping[str, str], shell: Mapping[str, str], mailto: str | None = None, *,
-               what: str = "Delta text", again: str = BOT_AGAIN) -> Box:
+               what: str = "Delta text", again: str = BOT_AGAIN, setting: str = BOT_SETTING) -> Box:
     """Make the box Delta text goes to (or MAILTO's, when given), when it is on
     this host: `message setup --box NAME`, then `message path NAME`. Only
     `message path` is believed: setup can exit 4 (steps left for the operator)
     with the box made. -> the Box, its path None when the address is off this
-    host. Raises NoBox, naming WHAT the box is for and what to run AGAIN."""
+    host (on a carrier that reaches it). Raises NoBox, naming WHAT the box is
+    for and what to run AGAIN; off this host on the mail drop, naming the
+    address and the SETTING that names a box here (_off_host)."""
     box = box_for(env, mailto)
     if not on_host(box.mailto, env):
-        return box
+        return _off_host(box, env, setting)
     exe = seatmail.resolve_message(env)
     if exe is None:
         raise NoBox(seatmail.check(env) or "no `message` binary")
@@ -473,19 +517,88 @@ def _list_agents(shell: Mapping[str, str]) -> set[str] | None:
 def hear_words(agent: str) -> str:
     """How a Claude session hears the box AGENT, asking nothing: `session
     start AGENT`, which runs `claude --agent AGENT`, the one session the
-    doorbell rings for. A plain `claude` gets no copy."""
-    return HEAR.format(agent=agent) + DOORBELL.format(agent=agent)
+    doorbell rings for. A plain `claude` gets no copy. Then how to send
+    Delta text to another box (CHANGE). The bot's start says this: it cannot
+    know which session installed it."""
+    return HEAR.format(agent=agent) + DOORBELL.format(agent=agent) + "." + CHANGE
 
 
-def hear_line(agent: str, shell: Mapping[str, str]) -> str:
-    """What to do so a Claude seat hears the agent's box. A seat started as
-    `session start <agent>` hears it; a plain seat does not. When this shell
-    already is that agent, it says so. sessionmail cannot say whether anyone
-    else hears the box, so nothing more is claimed."""
-    if (shell.get("CLAUDE_CODE_AGENT") or "").strip().lower() == agent:
-        return HEARD.format(agent=agent)
-    line = hear_words(agent)
+Reach = reach_.Reach
+
+
+def reach(shell: Mapping[str, str]) -> Reach:
+    """Ask sessionmail what reaches the session this shell is in (reach_.ask):
+    `message subscription list`, run as sessionmail's other tools are
+    (tool_env), read only. Asked afresh: --hear-here measures again after it
+    subscribes."""
+    exe = seatmail.resolve_message(shell)
+    if exe is None:
+        return Reach(answered=False, said="no `message` binary")
+    return reach_.ask(shell, tool_env(shell, exe), exe)
+
+
+def _hears_what(r: Reach) -> str:
+    """What this session hears, in words, for DEAF."""
+    own = sorted(a for a in r.addresses if a != r.seat)
+    parts = ["its own session box"]
+    if r.seat:
+        parts.append(f"its seat {r.seat}")
+    parts += own
+    return "only " + (", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0])
+
+
+def deaf(agent: str, r: Reach) -> bool:
+    """Did sessionmail, asked, say THIS Claude session will not hear box AGENT?
+    The one case hear_line WARNS (DEAF), and `bot install` then prints that
+    warning first. A Terminal (no session) or no answer is advice, not this."""
+    return r.answered and r.session and not r.hears(agent)
+
+
+def hear_line(agent: str, shell: Mapping[str, str], r: Reach | None = None) -> str:
+    """Will a Claude session hear the box AGENT? Measured, never guessed:
+    sessionmail is asked what reaches this session (reach, or R when given).
+    Heard: says so, and how. Not heard, in a Claude session: says so FIRST
+    (DEAF), then the ways out. Not a session (a Terminal), or sessionmail
+    gave no answer: the advice (hear_words), and why nothing was measured.
+    It never refuses anything: install has written the bot either way."""
+    r = reach(shell) if r is None else r
+    if r.answered and r.hears(agent):
+        how = f"its seat {r.seat}" if r.seat == agent else "by a subscription"
+        return HEARD.format(agent=agent, how=how) + ("" if r.boxed else UNBOXED)
+    if deaf(agent, r):
+        line = DEAF.format(agent=agent, hears=_hears_what(r))
+    else:
+        line = hear_words(agent)
+        if not r.answered:
+            line += UNASKED.format(said=r.said)
     known = _list_agents(shell)
     if known is None or agent not in known:
         line += NO_AGENT_FILE.format(agent=agent)
     return line
+
+
+def hear_here(agent: str, shell: Mapping[str, str]) -> str:
+    """`bot install --hear-here`: let THIS session hear box AGENT, by a session
+    subscription (`message subscription add AGENT`), which sessionmail ends
+    with the session. -> one line saying what was done, or why not. Never
+    raises: install has written the bot either way."""
+    r = reach(shell)
+    if r.answered and not r.session:
+        return (f"not done: this shell is not a Claude session, so there is no session to "
+                f"subscribe to box {agent}")
+    if r.hears(agent):
+        return f"not needed: this session already hears box {agent}"
+    exe = seatmail.resolve_message(shell)
+    if exe is None:
+        return "not done: no `message` binary"
+    argv = [exe, *HEAR_HERE_ARGS, agent]
+    try:
+        done = _run(argv, tool_env(shell, exe), TOOL_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"not done: `message subscription add {agent}` could not be run: {exc}"
+    if done.returncode != 0:
+        return (f"not done: `message subscription add {agent}` said: {_said(done)} "
+                f"(exit {done.returncode})")
+    return (f"this session now hears box {agent} (`message subscription add {agent}`); "
+            + HEAR_HERE_ENDS.format(agent=agent))
+

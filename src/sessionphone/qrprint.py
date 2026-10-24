@@ -23,7 +23,7 @@ import pathlib
 
 ERROR = "m"
 BORDER = 4          # the quiet zone, in modules
-PNG_SCALE = 12      # px a module: a ~57-module invite is ~680 px, scannable at arm's length
+PNG_SCALE = 12      # px a module: an invite is v9, 53 modules + 8 of quiet zone = 732 px, scannable at arm's length
 
 # (top, bottom) -> character, 1 is a dark module. The default is segno's map.
 _INVERTED = {(0, 0): " ", (1, 0): "▀", (0, 1): "▄", (1, 1): "█"}

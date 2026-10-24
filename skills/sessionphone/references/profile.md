@@ -28,6 +28,20 @@ sessionphone avatar /path/to/face.png   # set it
 sessionphone avatar --clear             # remove it
 ```
 
+**Another agent's bot.** `DC_AGENT` picks the bot, as `bot install` picks it,
+and the command acts on the root that bot's install kept (in
+`~/.sessionkit/phone/settings/phone.json`):
+
+```bash
+DC_AGENT=<agent> sessionphone avatar /path/to/face.png
+DC_AGENT=<agent> DC_NAME='Name' sessionphone bot install   # its name (below)
+```
+
+Without `DC_AGENT` the bot is this session's, else the one bot the file
+records, else `claude`. With two or more recorded and none named, the command
+refuses (exit 1) and changes nothing, so name one, `claude` included.
+`SESSIONPHONE_ROOT=DIR` points at a root directly, and wins over the file.
+
 It works whether or not the bot is running. When the account is free, the
 command opens it and sets the picture itself. When the resident bot holds the
 account, the command hands the change to the bot as a job and waits for the
@@ -57,6 +71,47 @@ picture stays.
 It sends nothing. The picture shows after the account's next message (below).
 It sets the default profile's picture only: `--profile public` is refused
 (exit 2) for now.
+
+**The default picture.** sessionphone has a slot for a default picture,
+`images/default-avatar.png` (or `.jpg`) inside the package. None ships yet.
+When one does, the bot sets it at its start, the one time it holds the
+account and can see the picture there. It does that only when the account has
+no picture and the user has not chosen none:
+
+| the account at the bot's start            | what the bot does | its `bot.log` line |
+|-------------------------------------------|-------------------|--------------------|
+| no picture                                | sets the default  | `picture: default set (default-avatar.png)` |
+| a picture (yours, or the default already) | nothing           | `picture: kept (the account has one)` |
+| cleared with `sessionphone avatar --clear` | nothing          | `picture: none (cleared with ...)` |
+| no default shipped                        | nothing           | (no line) |
+
+`sessionphone avatar --clear` leaves a file, `avatar-none`, under the root.
+That is how the bot knows the empty picture was a choice. `sessionphone
+avatar PATH` removes the file. `bot install` prints one `picture:` line
+saying this when a default ships, and none when nothing ships.
+
+**The name follows the agent.** The bot sets its name at its start: `DC_NAME`
+when it is set, else the agent's name, title-cased (`versa` -> `Versa`). The
+agent's name goes only over a name nobody chose: an empty one, or the name of
+the agent the bot is or replaced with `bot install --replace`. Any other name,
+such as `setup --name` gave it, is the user's and is kept.
+
+```bash
+DC_NAME='Ada Lovelace' sessionphone bot install   # give the bot this name
+```
+
+| the name at the bot's start                      | what the bot does | its `bot.log` line |
+|--------------------------------------------------|-------------------|--------------------|
+| `DC_NAME` is set and differs                     | sets `DC_NAME`    | `name: 'Claude' -> 'Ada' (DC_NAME); ...` |
+| empty, or the name of the agent it is or replaced | sets the agent's name | `name: 'Claude' -> 'Versa' (the agent's name); ...` |
+| the agent's name already                         | nothing           | (no line) |
+| any other name                                   | keeps it          | `name: kept 'Ada Lovelace', ...; to change it: DC_NAME=...` |
+
+When the name changes, the bot writes the saved invite (`invite.txt` under the
+root) again: the invite carries the name, and `invite` and `qr` read it.
+`bot install --replace OLD` leaves the old agent's name in `name-replaced`
+under the root for the bot's next start, which removes it. `bot install`
+prints one `name:` line saying what the bot will do.
 
 ## Several profiles, each with its own face
 

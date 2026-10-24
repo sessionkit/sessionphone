@@ -44,14 +44,18 @@ The keys, by what they set:
 
 `<root>` is the bot's root: `DC_ROOT`, else `SESSIONPHONE_ROOT`, else the
 root `bot install` keeps in `phone.json` (below), else `~/.sessionphone`.
+`<home>` is the bot's home: `<root>` itself for the default profile, and
+`<root>/<profile>` for a bot run with `DC_PROFILE` (see
+[Two profiles on one root](#two-profiles-on-one-root)).
 `<agent>` is `DC_AGENT` as below, and `<Name>` is `DC_AGENT_NAME`.
 
 ## Identity and mail
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `DC_AGENT` | name | `CLAUDE_CODE_AGENT`, else `claude` | who the bot speaks for, in lower case. It names the launchd job |
+| `DC_AGENT` | name | as **Which bot** below, for `bot install`, `bot run` and the `dc-*` tools alike | who the bot speaks for, in lower case. It names the launchd job |
 | `DC_AGENT_NAME` | text | `<agent>`, capitalised | the name in greetings and in the mail's From |
+| `DC_NAME` | text | `<agent>`, title-cased, unless the account has a name set by hand | the bot's Delta Chat display name, the name people see. The bot sets it at its start and writes the saved invite again, so `invite` and `qr` show it. Unset, it is the agent's name over an empty name or the name of the agent the bot is or replaced (`--replace`); any other name was set by hand and is kept. See [The bot's name][bots-name] in the README |
 | `DC_HOST` | host | sessionmail's host: `SESSIONMAIL_HOST`, else the `host` in sessionmail's `mail.json`, else the first part of this machine's name | the domain the default addresses are built on. The bot refuses to start when it is unset and that host is empty or `localhost` |
 | `DC_ADDR` | address | `<agent>-chat@<host>` | the bot's own From seat. Its local part is the seat the key signs as. Do not set it to the agent's box: the signer and the From would be different seats, and the bot refuses |
 | `DC_MAILTO` | address | `<agent>@<host>` | where Delta text goes: the agent's box, where chat and call turns are mailed |
@@ -82,9 +86,25 @@ leaves the last settings that worked.
   uv tool, and sessionmail's mail-route settings (below).
 - **`bot install --forget KEY`** drops a saved value, for this run and every
   later one. It is repeatable.
-- **Which bot:** `DC_AGENT`, else `CLAUDE_CODE_AGENT`, else the one bot the
-  file records, else `claude`. With two or more recorded and no name in your
-  shell, install refuses (exit 2) and names them.
+- **Which bot:** `DC_AGENT`, else the seat sessionmail says the installing
+  session has (`message subscription list`), when a later session can be
+  started as it, else the one bot the file records, else `claude`. A session
+  id or a `+` address never names the bot, so a plain `claude` or a task
+  seat (whose `CLAUDE_CODE_AGENT` is a role) gets the recorded bot, else
+  `claude`. Only when sessionmail gives no answer is `CLAUDE_CODE_AGENT`
+  taken instead. With two or more recorded and no name in your shell,
+  install refuses (exit 2) and names them.
+- **One bot to a root:** a root is one Delta Chat account. When the files
+  record another bot whose root (`DC_ROOT`, else `SESSIONPHONE_ROOT`, else
+  `~/.sessionphone`) or account folder (`DC_ACCOUNTS`, else
+  `<root>/accounts`) is this bot's, install refuses (exit 2, writing
+  nothing) and names it. **`bot install --replace NAME`** retires it: its
+  launchd job is booted out and its plist removed, before the new job is
+  started, and `phone.json` forgets it once the new job is loaded. It is
+  repeatable. A `--replace` of this bot itself, of a bot on another root, or
+  of one a drop-in records or a `_locked` path holds, is refused. If launchd
+  still lists the old job after its bootout, the new job is not started
+  (exit 1): run install again.
 - **Drop-ins:** `phone.d/*.json` beside the file are read after it, in name
   order, a later file winning. Install never writes them. A value your shell
   gives for a key a drop-in sets is used for that run and not saved.
@@ -109,15 +129,23 @@ leaves the last settings that worked.
 Install is not the only reader. Each of these takes the same order (your
 shell, then the file, then the default) and says which it took:
 
-- **`bot status` and `bot uninstall`** act on the bot install would pick.
+- **`bot status` and `bot uninstall`** act on the bot install would pick,
+  asking sessionmail for the session's seat as install does.
   When your shell names none, a `bot:` line says which, and where from. A name in your
   shell is taken before any file is read, so `DC_AGENT=NAME sessionphone bot
   uninstall` works past a file that cannot be read. With no name in your
   shell, a file that cannot be read, or two bots recorded, refuses (exit 2).
+- **`bot run`** runs the bot install would pick, in the foreground, and
+  says which with a `bot:` line when your shell names none.
+- **The `dc-*` tools** (`bin/dc-env`) and the bot's own settings module
+  (`bridge/dc_env.py`) pick the same bot. With no `DC_AGENT` in your shell,
+  each tool says which on stderr (`dc-say: bot ada (...)`). The bot's
+  launchd job always carries `DC_AGENT`, so the bot never asks.
 - **The root** (`SESSIONPHONE_ROOT`), for every verb and the `dc-*` tools:
-  your shell's, else the one the file keeps for that bot, else
-  `~/.sessionphone`. A lock is not enforced here: only install, which writes,
-  refuses a value your shell gives.
+  your shell's, else the one the file keeps for the bot install would pick,
+  else `~/.sessionphone`. sessionmail is asked only when the file records a
+  bot, since with none the name changes nothing. A lock is not enforced
+  here: only install, which writes, refuses a value your shell gives.
 
 ## Mail route
 
@@ -155,29 +183,57 @@ carrier. A change in `mail.json` reaches the bot at its next start.
 
 ## Paths
 
-Each one is a path, and each defaults to a place under `<root>`.
+Each one is a path, and each defaults to a place under `<home>`, except the
+root itself and `DC_VOICES`, which every profile shares under `<root>`.
 
 | Key | Default | What it holds |
 | --- | --- | --- |
 | `SESSIONPHONE_ROOT` | the root `bot install` keeps, else `~/.sessionphone` | the root, for every verb and the bot |
 | `DC_ROOT` | `SESSIONPHONE_ROOT`'s root | the bot's root, when it differs |
-| `DC_ACCOUNTS` | `<root>/accounts` | the Delta Chat account and its keys |
-| `DC_OUTBOX` | `<root>/outbox` | the jobs the `dc-*` tools leave for the bot |
-| `DC_ACKS` | `<root>/acks` | where the tools wait for the bot's answer to a job |
-| `DC_LOG` | `<root>/bot.log` | the bot's log |
-| `DC_SEEN` | `<root>/bridged-ids.txt` | the message ids already mailed, so a restart never mails one again |
-| `DC_UNDELIVERED` | `<root>/undelivered` | agent mail that failed to send, waiting for a retry |
-| `DC_CALLERS_FILE` | `<root>/callers.txt` | who may ring the bot |
-| `DC_CHANNELS_FILE` | `<root>/channels.txt` | where the bot may send |
-| `DC_GUESTS` | `<root>/call-guests.txt` | who may mail into a call |
+| `DC_ACCOUNTS` | `<home>/accounts` | the Delta Chat account and its keys |
+| `DC_OUTBOX` | `<home>/outbox` | the jobs the `dc-*` tools leave for the bot |
+| `DC_ACKS` | `<home>/acks` | where the tools wait for the bot's answer to a job |
+| `DC_LOG` | `<home>/bot.log` | the bot's log |
+| `DC_SEEN` | `<home>/bridged-ids.txt` | the message ids already mailed, so a restart never mails one again |
+| `DC_UNDELIVERED` | `<home>/undelivered` | agent mail that failed to send, waiting for a retry |
+| `DC_CALLERS_FILE` | `<home>/callers.txt` | who may ring the bot |
+| `DC_CHANNELS_FILE` | `<home>/channels.txt` | where the bot may send |
+| `DC_GUESTS` | `<home>/call-guests.txt` | who may mail into a call |
 | `DC_VOICES` | `<root>/voices.json` | which voice reads each sender's mail into a call |
-| `DC_CALLS_DIR` | `<root>/calls` | one directory per call |
-| `DC_LIVE` | `<root>/call-live.json` | the live call's state |
-| `DC_EARS_SOCK` | `<root>/call-ears.sock` | the socket the ears open a call on |
-| `DC_MOUTH_SOCK` | `<root>/call-mouth.sock` | the socket the mouth speaks into a call on |
+| `DC_CALLS_DIR` | `<home>/calls` | one directory per call |
+| `DC_LIVE` | `<home>/call-live.json` | the live call's state |
+| `DC_PID_FILE` | `<home>/bot.pid` | the running bot's pid, start time, command line and root, written once it holds the account and removed at its clean exit. `dc-live` reads it to know the bot is running |
+| `DC_EARS_SOCK` | `<home>/call-ears.sock` | the socket the ears open a call on |
+| `DC_MOUTH_SOCK` | `<home>/call-mouth.sock` | the socket the mouth speaks into a call on |
 | `DC_INVITE` | unset | a file the bot writes its live invite link to at start |
-| `DC_PROFILE` | unset | a second profile's name, such as `public`. Its sockets go under `<root>/<profile>/` |
+| `DC_PROFILE` | unset | a second profile's name, such as `public`. Everything per-account then goes under `<root>/<profile>/`, its home |
 | `DC_OUTBOX_PUBLIC` | `<root>/public/outbox` | the public profile's outbox, read by `sessionphone channels`. Its list sits beside it |
+
+### Two profiles on one root
+
+One root can run two bots, each its own Delta Chat account: the default
+profile, and a named one (`DC_PROFILE=public`). Chat ids belong to one
+account (chat 12 on one is another chat on the other), so each bot keeps
+everything about its account in its own home: the default profile in
+`<root>`, a named one in `<root>/<profile>/`. That is its channels list,
+callers, outbox, seen ids, acks, undelivered mail, calls, live call, log,
+sockets and (with no `DC_ACCOUNTS`) its account. A named profile with no
+`callers.txt` of its own refuses every call and says so at start, naming
+the file. An explicit `DC_<NAME>` still wins.
+
+The bot refuses to start (exit 2, one line naming the path and the fix) when:
+
+- a named profile's channels list or callers file is the default
+  profile's own (`<root>/channels.txt`, `<root>/callers.txt`), say by a
+  `DC_CHANNELS_FILE` pointing there;
+- another bot already runs on the same home: each bot holds
+  `<home>/.bot.lock` while it runs, and the refusal names the holder's pid;
+- its outbox holds jobs older than `DC_OUTBOX_STALE_S`, queued while no bot
+  read it. The line gives the count, the oldest one's age and how to drop
+  them (`rm`) or send them (`touch`, then start again).
+
+`bot install` counts two profiles on one root as two homes, so they are not
+rivals; two bots on one home still are.
 
 ## Chat
 
@@ -190,6 +246,7 @@ Each one is a path, and each defaults to a place under `<root>`.
 | `DC_XDC_MATCH` | `key=value,...` | unset | only a JSON payload that matches ANY listed pair is a tap. Values compare as strings |
 | `DC_XDC_FEED_CHATS` | chat ids, comma-separated | none | the chats the heard log may be read out into. List only your own 1:1 chat |
 | `DC_XDC_FEEDS_MAX` | number | `2` | how many feeds may run at once |
+| `DC_OUTBOX_STALE_S` | seconds | `3600` | a job older than this in the outbox when the bot starts makes it refuse to start, so a backlog is never sent late without a person's word |
 
 ## Calls
 
@@ -203,6 +260,8 @@ Each one is a path, and each defaults to a place under `<root>`.
 | `DC_GREETING_VOICEMAIL` | text | `<Name> can't pick up right now. Leave a message and it reaches <Name> as mail.` | said when a call goes to voicemail |
 | `DC_NO_REPLY_S` | seconds | `0` (off) | after this long with no reply to a turn, say the holding line, once |
 | `DC_HOLDING_LINE` | text | `I heard you, give me a moment.` | the holding line |
+| `DC_FIRST_CALL_WAIT` | `on`/`off` | `on` | while the speech models are still downloading, a call hears a line saying so, then the music file, until it can hear. Off, that first call is silent until the models are in |
+| `DC_WAIT_MUSIC` | path | `<root>/wait-music.opus` | the music for that wait: any audio file the bot can decode. Missing or unreadable, the line repeats every 20 s with the download's progress instead |
 | `DC_HOLD_TURN` | `1`/`0` | `1` | keep a turn open while the caller is still speaking. `0` lets a turn go out while they talk on |
 | `DC_PREVIEWS` | `1`/`0` | `0` | mail the turn so far as a preview while the caller speaks. Needs ears |
 | `DC_BARGE_IN` | `1`/`0` | `0` | stop speaking when the caller speaks |
@@ -274,10 +333,11 @@ also a flag, and the flag wins.
 
 The `dc-*` tools run in your own shell, not the bot's job, and read these
 from it. They also read the paths above (`DC_ROOT`, `DC_OUTBOX`, `DC_LOG`,
-and so on), to find the bot's root. With neither `DC_ROOT` nor
-`SESSIONPHONE_ROOT` set, they ask the package for the root `bot install`
-keeps, so they and the bot read one root. If that question fails, they use
-`~/.sessionphone`.
+and so on), to find the bot's root. With no `DC_AGENT`, or neither
+`DC_ROOT` nor `SESSIONPHONE_ROOT` set, they ask the package which bot
+`bot install` would pick and the root it keeps for it, so they and the bot
+read one name and one root. If that question fails, they use `claude` and
+`~/.sessionphone`, and say so.
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
@@ -285,7 +345,7 @@ keeps, so they and the bot read one root. If that question fails, they use
 | `DC_XDC_SUMMARY` | text | unset | `dc-xdc-update`: the short text shown beside the app's icon in the chat |
 | `DC_WEB_OUT` | path | `<root>/calllog.html` | `dc-log-web`: the page it writes |
 | `DC_WEB_LINES` | number | `120` | `dc-log-web`: how many log lines the page shows |
-| `DC_BOT` | text | `sessionphone.bridge.bot <agent>` | `dc-live`: the process it looks for |
+| `DC_BOT` | text | unset | deprecated and ignored. `dc-live` once searched every process's command line for it; it now reads the bot's pid file (`DC_PID_FILE`). When it is set, `dc-live` says on stderr that it is ignored |
 
 ## Read from the environment only
 
@@ -314,3 +374,4 @@ carry them.
 [the-dc-tools]: #the-dc--tools
 [read-from-the-environment-only]: #read-from-the-environment-only
 [bot-mail-signing]: bot-mail-signing.md
+[bots-name]: ../README.md#the-bots-name

@@ -21,10 +21,14 @@ a public chatmail relay, and the chat is end-to-end encrypted.
 - **Setup comes first, and it is small.** `setup`, `qr` and `link` need four
   packages, about 10 MB. uv uses a Python already on the Mac when it is 3.11
   to 3.14; only a Mac with none also fetches Python (about 25 MB).
-- **The media pack comes once, at the first `bot install`** (or `bot run`, or
-  `web`). The bot, calls and the web page need it: aiortc, av, numpy and their
-  kin, about 31 MB. One line says so before the fetch starts. If that is the
-  first command of all, the same fetch also brings setup's four packages and
+- **The media pack: under Session Kit it is already installed.** The bot,
+  calls and the web page need it: aiortc, av, numpy and their kin. The kit
+  installs sessionphone with the pack, so `bot install` fetches nothing. Never
+  ask the user about it. (Step 7 says how to tell it is Session Kit.)
+- **Standalone, the pack comes once, at the first `bot install`** (or
+  `bot run`, or `web`), about 31 MB. Run the command and let it fetch; do not
+  ask first. One line says so before the fetch starts. If that is the first
+  command of all, the same fetch also brings setup's four packages and
   Python.
 - **On a slow link that first `bot install` can take minutes**, longer than
   a Bash call's default two-minute timeout. Give that call a longer timeout.
@@ -54,23 +58,44 @@ a public chatmail relay, and the chat is end-to-end encrypted.
 
    The join is a handshake, so your side must be online. With nothing
    holding the account, their phone sits at "Establishing connection".
-4. **Show them the code.** In the terminal, which is enough when the
-   person is beside the screen:
+4. **Offer them the ways to see the code, as choices.** Ask which they
+   want before you show any, and offer them in this order:
 
-   ```bash
-   sessionphone invite --qr
-   ```
+   1. **The QR in a window, the best.** A PNG, opened on this screen:
 
-   Tell them: open Delta Chat, tap the QR icon ("Scan QR code"), and point
-   the camera at the screen. On a light-theme terminal add `--invert`. If
-   the terminal QR won't scan, write a PNG and show it:
-   `sessionphone invite --png ~/.sessionphone/invite.png`, then
-   `show-me` the path it prints on its last line. For a page you can send or
-   open in a browser:
+      ```bash
+      sessionphone invite --png ~/.sessionphone/invite.png && open ~/.sessionphone/invite.png
+      ```
 
-   ```bash
-   sessionphone qr > ~/.sessionphone/connect.html && open ~/.sessionphone/connect.html
-   ```
+      Or the connect page, in the browser. It carries the steps and the
+      link beside the code:
+
+      ```bash
+      sessionphone qr > ~/.sessionphone/connect.html && open ~/.sessionphone/connect.html
+      ```
+
+      `open` is macOS; on Linux use `xdg-open`. Either file can also be
+      sent to them.
+   2. **The link, second.** `sessionphone invite` prints it on one line.
+      Tapped on the phone, it opens in Delta Chat. It is harder from a
+      phone: the link has to reach the phone first, by mail, a message or
+      AirDrop.
+   3. **The QR in this terminal, the weakest.** `sessionphone invite --qr`
+      prints about 33 lines. Claude Code will likely fold them to
+      "+30 lines (ctrl+o to expand)", so they see no code until they press
+      Ctrl+O to expand it. It reads on a dark-theme terminal; on a light
+      theme add `--invert`.
+
+   Then tell them: open Delta Chat, tap the QR icon ("Scan QR code"), and
+   point the camera at the code. Name where the code is ("in the window
+   that opened"). Never say "scan the QR code above" unless you know it was
+   shown: a folded terminal QR shows them nothing.
+
+   **If their phone stays at "Establishing connection, please wait":** the
+   scan is a handshake, and a running process on your side must answer it
+   (`link` from step 3, or the bot). Check `sessionphone bot status`, then
+   run `sessionphone link` again (backgrounded, as in step 3) and have them
+   scan again.
 
 5. **Walk them through their phone:** `references/user-setup.md`. It
    takes two minutes: install Delta Chat, make a profile, scan.
@@ -111,8 +136,11 @@ a public chatmail relay, and the chat is end-to-end encrypted.
    - **Hearing it.** Delta text goes to `<agent>@<host>`. Only a Claude
      session started as `session start <agent>` (which runs `claude --agent
      <agent>`) hears that box; a plain `claude` gets no copy, and nothing
-     tells it so. Install's `hear:` line says so. Tell the user that line;
-     do not claim a plain session hears it.
+     tells it so. Install asks sessionmail whether this session hears it,
+     and its `hear:` line says so. If it says `this session will NOT hear`,
+     tell the user that line and its ways out; do not claim this session
+     hears it. `bot install --hear-here` lets this session hear it until the
+     session ends; only run it when the user asks.
    - `sessionphone bot install` runs the bot as this user's launchd job,
      now and at every login. `sessionphone bot status` should say
      `running: pid N`. If it doesn't, read its `last:` line, the log's last
@@ -137,20 +165,52 @@ a public chatmail relay, and the chat is end-to-end encrypted.
      means it could not tell: read the line's reason, fix what it names,
      then run `bot install` again (if the server was only slow to load its
      model, wait a few minutes first). Ears is not needed to hear them.
-   - **On `NO`, offer the STT the line names**, VoiceMode's mlx-audio on
-     `127.0.0.1:8890`. sessionphone does not install it. Tell them the cost
-     first: it needs VoiceMode, it runs as a background service at every
-     login, and its first request downloads the model the bot asks for
-     (`mlx-community/parakeet-tdt-0.6b-v3`), which is large. Then give them
-     VoiceMode's own command, `voicemode service install mlx-audio`. Run it
-     only on their explicit yes, given in this conversation; otherwise it is
-     theirs to run. Then run `sessionphone bot install` again and read its
-     `hearing:` line.
+     When `ears services weights` can say where the speech models stand,
+     the line says more: `downloading` with how far it has got means they
+     are still coming to this Mac and the first call waits for them, so
+     wait, then run `bot install` again; `not downloaded yet` means the
+     server's first request fetches them, and the first call waits for that.
+     On that first call the caller is not left in silence: the bot says the
+     voice model is downloading and plays the music file `DC_WAIT_MUSIC`
+     names, if one is there (any audio file the bot can decode; none ships),
+     until the call can hear. It stops at once when the greeting or any line
+     is spoken. `DC_FIRST_CALL_WAIT=off` turns it off.
+   - **On `NO` or `not confirmed`, first ask whether this is Session Kit.**
+     It is when `command -v sessionkit` prints a path. The kit's own
+     `ears services install` loads an mlx-audio server on `127.0.0.1:8890`;
+     a second mlx-audio job beside it leaves one of the two crash-looping.
+     - **Under the kit,** run `ears services status` (read-only) and read
+       its `speech` row. Never offer `voicemode service install mlx-audio`.
+       The `hearing:` line agrees: it finds the same `sessionkit` on PATH,
+       points at `ears services status`, and does not name VoiceMode's
+       command. `mlx-audio on :8890`: the server is up, and its first
+       request downloads the model, so hearing
+       reads `not confirmed` (or `NO`) for a minute or more. Wait, then run
+       `sessionphone bot install` again; if it still fails, its reason says
+       why. `none on :8890`: no server and no job. `ears services install`
+       loads the kit's; it is theirs to run. `none answering`: a job the
+       row names is loaded but down or still starting, and install will not
+       add a second. `:8890 held`: something holds the port but does not
+       answer as mlx-audio. For either, tell them who the row names, and
+       install nothing over it.
+       No `speech` row: this kit's ears loads no speech server, so offer
+       VoiceMode's, as below.
+     - **Standalone** (no `sessionkit`), on `NO`, offer the STT the line
+       names, VoiceMode's mlx-audio on `127.0.0.1:8890`. sessionphone does
+       not install it. Tell them the cost first: it needs VoiceMode, it
+       runs as a background service at every login, and its first request
+       downloads the model the bot asks for
+       (`mlx-community/parakeet-tdt-0.6b-v3`), which is large. Then give
+       them VoiceMode's own command, `voicemode service install mlx-audio`.
+       Run it only on their explicit yes, given in this conversation;
+       otherwise it is theirs to run. Then run `sessionphone bot install`
+       again and read its `hearing:` line.
 
 ## On a call
 
 - `dc-live` answers whether a call is live, and which one. `dc-live --id`
-  gives just the id.
+  gives just the id. Exit 2 means no bot is running for this root, and its
+  second stderr line says why: no `bot.pid` in the root, or a stale one.
 - `dc-say --call "$(dc-live --id)" CHAT_ID "text"` speaks into the call.
   If the call has ended, it refuses (exit 3) and sends nothing.
 - `dc-hangup CHAT_ID` ends it.
@@ -216,9 +276,11 @@ A voice note arrives as its transcript. The bot posts it to an
 OpenAI-compatible `/v1/audio/transcriptions` endpoint, and names a model
 on every request. A call uses the same endpoint for what the caller says.
 
-- `DC_STT_URL` is the endpoint. The default is VoiceMode's mlx-audio at
-  `mlx-audio+http://127.0.0.1:8890/v1/audio/transcriptions`, the server
-  the bot's voice uses too. `ears serve` (Apple speech, macOS 27) is
+- `DC_STT_URL` is the endpoint. The default is an mlx-audio server at
+  `mlx-audio+http://127.0.0.1:8890/v1/audio/transcriptions`: the kit's own
+  speech server under Session Kit, or VoiceMode's standalone (step 7 says
+  which to offer). It is the server the bot's voice uses too.
+  `ears serve` (Apple speech, macOS 27) is
   `http://127.0.0.1:2023/v1/audio/transcriptions`. Name its kind with a
   prefix, which is stripped before use, as the default does.
   Kinds: `mlx-audio+`, `whisper+` (whisper.cpp), `openai+`, `apple+`
@@ -292,6 +354,21 @@ yourself send: it is the owner's list. README.md has the whole contract.
 `dc-delete MSG_ID...` takes back your own message (the `msg M` your send
 printed; all ids in one chat). It only ASKS each member's app to delete it:
 it cannot unsend what was read, and any time limit is unmeasured.
+
+## The bot's picture and name
+
+```bash
+sessionphone avatar /path/to/face.png                       # this bot's picture (--clear removes it)
+DC_AGENT=<agent> sessionphone avatar /path/to/face.png      # another agent's bot, or claude's
+DC_NAME='Name' sessionphone bot install                     # this bot's name
+DC_AGENT=<agent> DC_NAME='Name' sessionphone bot install    # another agent's bot's name
+```
+
+`DC_AGENT` picks the bot, and with it the root that bot's install kept. With
+two bots recorded, name one even for `claude`. Without `DC_NAME` the name is
+the agent's, title-cased, unless the user set one (`setup --name`). The
+picture shows after the bot's next message.
+`references/profile.md` has the rest.
 
 ## Where things live
 

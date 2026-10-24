@@ -1,6 +1,6 @@
 [project]
 name = "sessionphone"
-version = "0.2.1"
+version = "0.3.0"
 description = "Ring your Claude Code session from your phone over Delta Chat"
 readme = "README.md"
 authors = [
@@ -71,6 +71,9 @@ dev = [
     # developers keep the whole stack: `uv sync`, `make test` and
     # bin/bridge-check get the media pack too
     "sessionphone[media]",
+    # let the QR test decode its own output (tests/test_qr_svg.py)
+    "zxing-cpp",
+    "pillow",
 ]
 
 [tool.ruff]
@@ -82,5 +85,5 @@ extend-exclude = ["src/sessionphone/bridge", "tests/bridge"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # tests/bridge/ are mostly script-style (asserts at module level); bin/bridge-check
-# runs them, and runs the pytest-style ones (test_callers.py) under pytest
+# runs them, and runs the pytest-style ones under pytest. `make check` runs it.
 addopts = "--ignore=tests/bridge"

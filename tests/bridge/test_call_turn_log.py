@@ -322,8 +322,7 @@ class _MouthSession:
     def __init__(self):
         self.pc, self.lines = object(), []
         self.replied = _Replies()
-        self.voice = types.SimpleNamespace(say=lambda pcm: None, cut=lambda: 0.0,
-                                           mix=lambda pcm: len(pcm) / 48000)
+        self.voice = calls.PipVoiceTrack()      # mouth lines and sounds, as on a call
         self.echo = types.SimpleNamespace(spoken=lambda *a, **k: None, cut=lambda *a, **k: "cut")
 
 
@@ -373,7 +372,7 @@ def test_the_bridges_own_speech_is_never_a_reply(rig, monkeypatch):
     # speak(); replied() is called only at the three reply sites above
     s = _session()
     turn(s)
-    s.voice = types.SimpleNamespace(say=lambda pcm: None)
+    s.voice = calls.PipVoiceTrack()
     s.echo = types.SimpleNamespace(spoken=lambda *a, **k: None)
     monkeypatch.setattr(calls, "tts_pcm48", lambda text, voice: b"\0\0" * 480)
     s.replied = lambda via: pytest.fail(f"speak() called replied({via})")

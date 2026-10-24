@@ -276,21 +276,21 @@ class TestVoicemodeEvents(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.dir, "voicemode_events_2030-01-03.jsonl")
+        self.path = os.path.join(self.dir, "voicemode_events_2030-06-09.jsonl")
         open(self.path, "w").close()          # the guard opens it EMPTY, as in
         self.heard_at = datetime.datetime.fromisoformat(  # a live call
-            "2030-01-03T10:00:14+00:00").timestamp()
+            "2030-06-09T10:00:14+00:00").timestamp()
 
     def _speak(self):
         """voicemode plays something WHILE the guard is already watching."""
         sid = "conv_1893664800700"
         rows = [
-            {"timestamp": "2030-01-03T10:00:00.700000+00:00",
+            {"timestamp": "2030-06-09T10:00:00.700000+00:00",
              "event_type": "TTS_START", "session_id": sid,
              "data": {"message": self.GREETING, "voice": "carol"}},
-            {"timestamp": "2030-01-03T10:00:04.200000+00:00",
+            {"timestamp": "2030-06-09T10:00:04.200000+00:00",
              "event_type": "TTS_FIRST_AUDIO", "session_id": sid, "data": {}},
-            {"timestamp": "2030-01-03T10:00:13.700000+00:00",
+            {"timestamp": "2030-06-09T10:00:13.700000+00:00",
              "event_type": "TTS_PLAYBACK_END", "session_id": sid,
              "data": {"metrics": {"bytes_received": 449280, "format": "pcm",
                                   "sample_rate_hz": 24000}}},

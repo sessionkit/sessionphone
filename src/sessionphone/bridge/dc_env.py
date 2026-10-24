@@ -8,8 +8,17 @@ its state in one private root.
 The root is DC_ROOT, else sessionphone.paths.root() (SESSIONPHONE_ROOT,
 else the root `bot install` keeps in phone.json, else ~/.sessionphone). It is mode 0700, and it holds the account, the
 outbox, the call dirs, the approved callers and the ear and mouth sockets.
-`sessionphone setup` makes it. bin/dc-env mirrors this file: change both
+`sessionphone setup` makes it. A named profile (DC_PROFILE) keeps all of
+those in its own home, <root>/<profile>/ (home()); the default profile's
+home is the root itself. bin/dc-env mirrors this file: change both
 or neither.
+
+The agent is picked as `bot install` picks it (agent_from): DC_AGENT, else
+this session's durable seat as sessionmail names it, else the one bot
+phone.json records, else "claude". AGENT and the values built from it
+(AGENT_NAME, ADDR, MAILTO, the greetings) are bound on first use, not at
+import, so importing this module never asks sessionmail; the bot's job
+always sets DC_AGENT, so the bot never asks either.
 """
 import os
 import pathlib
@@ -24,6 +33,7 @@ HOME = pathlib.Path.home()
 
 ALIAS = "PIP_CHAT_"   # the deprecated prefix: read, with one warning per name
 _warned = set()       # names already warned about in this process
+BAD = []   # settings that did not parse, said once in the bot's log (never a crash on import)
 
 
 def _alias(name, value):
@@ -51,9 +61,55 @@ def _get(e, name):
     return None
 
 
-# The agent: DC_AGENT, else the seat Claude Code was started as, else "claude".
-AGENT = (env("AGENT") or os.environ.get("CLAUDE_CODE_AGENT") or "claude").strip().lower()
-AGENT_NAME = env("AGENT_NAME") or AGENT.capitalize()
+def agent_from(environ=None):
+    """-> (the bot a process run with ENVIRON speaks for, where the name came
+    from in words), picked as `bot install` picks it (settings.bot_name,
+    asking sessionmail): DC_AGENT (or its deprecated alias), else this
+    session's durable seat, else the one bot phone.json records, else
+    "claude". A phone.json that cannot be used, or two bots in it and no
+    name, gives "claude", and BAD says why. bin/dc-env asks this same
+    function, so the dc-* tools and the bot pick one name."""
+    e = os.environ if environ is None else environ
+    raw = (_get(e, "AGENT") or "").strip().lower()
+    if raw:
+        return raw, "DC_AGENT in this shell"
+    try:
+        return settings.bot_name(e, verb=None, ask=True)
+    except settings.Bad as exc:
+        BAD.append(f"{exc} Using {settings.DEFAULT_AGENT} for now.")
+        return settings.DEFAULT_AGENT, f"the default ({settings.shown(settings.file_path())} cannot be used)"
+
+
+# Bound on first use (__getattr__), from os.environ then: AGENT and every value built from it.
+_BY_AGENT = ("AGENT", "AGENT_FROM", "AGENT_NAME", "ADDR", "MAILTO",
+             "GREETING", "GREETING_OUT", "GREETING_VOICEMAIL")
+for _n in _BY_AGENT:    # a reload binds them afresh
+    globals().pop(_n, None)
+
+
+def bind_agent():
+    """Bind AGENT (agent_from, on os.environ now) and every value built from
+    it. Done on first use; `bot run` does it again once it has set DC_AGENT."""
+    g = globals()
+    agent, came = agent_from()
+    name = env("AGENT_NAME") or agent.capitalize()
+    g.update(AGENT=agent, AGENT_FROM=came, AGENT_NAME=name,
+             ADDR=env("ADDR") or f"{agent}-chat@{HOST}",       # the bridge's own mail address
+             MAILTO=env("MAILTO") or f"{agent}@{HOST}",        # the agent's box: where text in lands
+             GREETING=env("GREETING") or f"{name} here. Go ahead.",
+             GREETING_OUT=env("GREETING_OUT") or f"Hi, {name} here, ringing you back.",
+             GREETING_VOICEMAIL=env("GREETING_VOICEMAIL") or (
+                 f"{name} can't pick up right now. Leave a message and it reaches "
+                 f"{name} as mail."))
+
+
+def __getattr__(name):
+    if name in _BY_AGENT:
+        bind_agent()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # sessionmail's own host settings (its host_of): both spellings, empty = unset.
 MAIL_HOST_VARS = ("SESSIONMAIL_HOST", "SESSION_MAIL_HOST")
 
@@ -99,13 +155,91 @@ def mail_host(environ=None, ask=True):
     return mail_host_from(environ, ask)[0]
 
 
+# ---- the host part of a derived address: the mail drop's rule for a bare From ----
+#
+# short_host, is_this_host and host_part mirror sessiontools'
+# src/sessiontools/operator.py functions of the same names, which follow the
+# rule the mail drop uses to qualify a bare From. sessionphone does not depend
+# on sessiontools, so the rule is copied here, and tests/test_host_part.py
+# holds this copy equal to that one, row by row. Only the mail-setting step
+# differs in its means: it asks the sessionmail the bot sends with (as
+# mail_host_from does) for the same mail.json `host`.
+#
+# This is NOT mail_host. mail_host neither strips nor lowercases, as
+# sessionmail's own host_of does not, and seatmail.id_host must stay
+# byte-equal to that, or `message send --message-id` refuses the ids. HOST,
+# mailto() and the ids stay on mail_host; host_part is the web seat's default
+# host (web/turns.named_seat).
+
+REVERSE_DNS_SUFFIX = ".arpa"   # a reverse-DNS name is never a mail host, whatever it sits under
+
+
+def short_host(environ=None, resolve_hostname=None, ask=True):
+    """This host's short name, lowercased, in the mail drop's order: the
+    variables (MAIL_HOST_VARS), sessionmail's mail.json `host`, the first label
+    of this machine's name. Each value is stripped, and an empty one counts as
+    unset. "" if there is none. ASK=False skips the mail.json step (nothing is
+    run); resolve_hostname stands in for socket.gethostname in tests."""
+    e = os.environ if environ is None else environ
+    resolve_hostname = socket.gethostname if resolve_hostname is None else resolve_hostname
+    for var in MAIL_HOST_VARS:
+        value = (e.get(var) or "").strip()
+        if value:
+            return value.lower()
+    found = ""
+    if ask:
+        from sessionphone.bridge import seatmail  # here, not at import: seatmail imports this module
+        found = settings.mail_text(settings.mail_file(seatmail.resolve_message(e)), MAIL_HOST_KEY) or ""
+    if not found:
+        found = (resolve_hostname() or "").strip().split(".")[0]
+    return found.lower()
+
+
+def is_this_host(domain, host):
+    """DOMAIN names this host: it is HOST, or a name under it (case-insensitive),
+    and it is not a reverse-DNS name."""
+    domain, host = domain.strip().lower(), host.strip().lower()
+    if not host or domain.endswith(REVERSE_DNS_SUFFIX):
+        return False
+    return domain == host or domain.startswith(host + ".")
+
+
+def host_part(environ=None, *, resolve_fqdn=None, resolve_hostname=None, ask=True):
+    """The host part of a derived local address: this machine's DNS name when
+    it names this host (a name under the short host, such as a tailnet name),
+    else the short host. A reverse-DNS name or an unrelated DNS name is never
+    used. None when there is no short host. The DNS name is looked up only once
+    a short host is found; resolve_fqdn stands in for socket.getfqdn in tests."""
+    resolve_fqdn = socket.getfqdn if resolve_fqdn is None else resolve_fqdn
+    host = short_host(environ, resolve_hostname, ask)
+    if not host:
+        return None
+    fqdn = (resolve_fqdn() or "").strip().lower()
+    return fqdn if is_this_host(fqdn, host) else host
+
+
+def host_part_problem(host):
+    """-> None, or what is wrong with HOST, host_part()'s answer, as the host of
+    a seat's mail: none, localhost, or a reverse-DNS name (SESSIONMAIL_HOST can
+    still name one). A short name has no dot by design and is accepted, as
+    host_problem accepts it."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return "is empty"
+    if host == "arpa" or host.endswith(REVERSE_DNS_SUFFIX):
+        return f"is {host!r}, a reverse-DNS name, not a mail domain"
+    if host == "localhost" or host.startswith("localhost."):
+        return f"is {host!r}, which names no machine"
+    return None
+
+
 # This machine's mail name. It's used only to mint Message-IDs and the default
 # mail addresses below. It's not the Delta Chat relay: that lives in the account.
 # At import, from the environment only (no sessionmail is asked): the bot
 # takes sessionmail's own file into account once, at start (take_mail_host).
 HOST = env("HOST") or mail_host(ask=False) or "localhost"
-ADDR = env("ADDR") or f"{AGENT}-chat@{HOST}"      # the bridge's own mail address
-MAILTO = env("MAILTO") or f"{AGENT}@{HOST}"       # the agent's box: where text in lands
+# ADDR (the bridge's own mail address) and MAILTO (the agent's box: where text
+# in lands) are built from AGENT and HOST on first use (bind_agent).
 
 
 def mailto(environ=None):
@@ -113,8 +247,9 @@ def mailto(environ=None):
     <agent>@<DC_HOST, else mail_host()>. MAILTO's answer, read from `environ`
     now (the plist's, at install), not frozen at import."""
     e = os.environ if environ is None else environ
-    agent = (_get(e, "AGENT") or e.get("CLAUDE_CODE_AGENT") or "claude").strip().lower()
-    return _get(e, "MAILTO") or f"{agent}@{_get(e, 'HOST') or mail_host(e) or 'localhost'}"
+    if _get(e, "MAILTO"):
+        return _get(e, "MAILTO")
+    return f"{agent_from(e)[0]}@{_get(e, 'HOST') or mail_host(e) or 'localhost'}"
 
 
 def _junk(host):
@@ -161,7 +296,7 @@ def host_problem(environ=None, host=None):
         what = f"is {host!r}, which names no machine"
     else:
         return None
-    agent = (get("AGENT") or e.get("CLAUDE_CODE_AGENT") or "claude").strip().lower()
+    agent = agent_from(e)[0]
     return (f"no DC_HOST is set and this machine's mail host {what}, so mail to the agent "
             f"would go to {agent}@{host or 'localhost'}, which nobody reads. Set "
             f"SESSIONMAIL_HOST (sessionmail's host for this machine) or DC_HOST to this "
@@ -171,8 +306,9 @@ def host_problem(environ=None, host=None):
 
 def fqdn_problem(environ, fqdn):
     """-> None, or why a host built from the DNS name FQDN is no mail domain,
-    when `environ` names no DC_HOST: the rule a caller that builds its host
-    from getfqdn() itself still judges by (_junk). A DC_HOST is trusted."""
+    when `environ` names no DC_HOST: the rule for a caller that builds its host
+    from getfqdn() itself (_junk). A DC_HOST is trusted. No default here is
+    built that way now: a derived default goes through host_part."""
     if _get(environ, "HOST"):
         return None
     what = _junk(fqdn)
@@ -187,41 +323,79 @@ def take_mail_host():
     order, sessionmail's mail.json included (mail_host_from). They are
     rebound only when that file gives the host, since without it the
     import-time answer already is the full one. -> where the host came from."""
-    global HOST, ADDR, MAILTO, HOST_PROBLEM
+    global HOST, HOST_PROBLEM
     host, where = mail_host_from()
     if where != FROM_MAIL_JSON:
         return where
     HOST = env("HOST") or host
-    ADDR = env("ADDR") or f"{AGENT}-chat@{HOST}"
-    MAILTO = env("MAILTO") or f"{AGENT}@{HOST}"
+    agent = globals().get("AGENT") or __getattr__("AGENT")     # the bound agent, else bind it now
+    globals().update(ADDR=env("ADDR") or f"{agent}-chat@{HOST}", MAILTO=env("MAILTO") or f"{agent}@{HOST}")
     HOST_PROBLEM = host_problem(host=host)
     return where
 
 
+# ---- a profile's home: where one Delta Chat account's state lives ----
+#
+# One root can hold two bots, each its own Delta Chat account: the default
+# profile (DC_PROFILE unset) and a named one (DC_PROFILE=public). Chat ids are
+# per account (chat 12 on one is another chat on the other), so everything a
+# bot keeps about its account lives in its HOME: the root itself for the
+# default profile, exactly as before, and <root>/<profile>/ for a named one.
+# That is the allow-list, the callers, the outbox, the seen ids, the acks, the
+# undelivered spool, the calls, the live call, the log, the sockets and the
+# accounts folder. An explicit DC_<NAME> still wins. ROOT_WIDE names the few
+# settings that are not about an account and stay at the root for every
+# profile: the wait music and the voice map.
+ROOT_WIDE = ("WAIT_MUSIC", "VOICES")
+
+
+def profile(environ=None):
+    """DC_PROFILE (or its deprecated alias) from `environ`, stripped; "" for the
+    default profile."""
+    e = os.environ if environ is None else environ
+    return (_get(e, "PROFILE") or "").strip()
+
+
+def root_of(environ=None):
+    """The root a bot run with `environ` keeps: DC_ROOT, else SESSIONPHONE_ROOT,
+    else paths.root() (which may refuse: settings.Bad)."""
+    e = os.environ if environ is None else environ
+    r = _get(e, "ROOT") or e.get("SESSIONPHONE_ROOT")
+    return pathlib.Path(r).expanduser() if r else paths.root()
+
+
+def home(environ=None, root=None):
+    """Where a bot run with `environ` keeps its account's state: <root>/<profile>
+    when DC_PROFILE is set, else the root itself, unchanged. ROOT, when given,
+    is the root already worked out (install's); else root_of(environ)."""
+    r = root_of(environ) if root is None else pathlib.Path(root)
+    p = profile(environ)
+    return r / p if p else r
+
+
 def callers_file(environ=None):
     """The approved-callers file a bot run with `environ` reads: DC_CALLERS_FILE,
-    else <DC_ROOT>/callers.txt, else <SESSIONPHONE_ROOT, else ~/.sessionphone>/callers.txt.
-    The same answer as path("CALLERS_FILE", "callers.txt"), for any environment
-    (the plist's, at install)."""
+    else <home>/callers.txt (home: <DC_ROOT, else SESSIONPHONE_ROOT, else
+    ~/.sessionphone>, plus /<DC_PROFILE> when one is set). The same answer as
+    path("CALLERS_FILE", "callers.txt"), for any environment (the plist's, at
+    install)."""
     e = os.environ if environ is None else environ
     v = _get(e, "CALLERS_FILE")
     if v:
         return pathlib.Path(v).expanduser()
-    r = _get(e, "ROOT") or e.get("SESSIONPHONE_ROOT")
-    return (pathlib.Path(r).expanduser() if r else paths.root()) / "callers.txt"
+    return home(e) / "callers.txt"
 
 
 def channels_file(environ=None):
-    """The allow-list a bot run with `environ` reads:
-    DC_CHANNELS_FILE, else <DC_ROOT>/channels.txt, else <SESSIONPHONE_ROOT, else
-    ~/.sessionphone>/channels.txt. path("CHANNELS_FILE", "channels.txt"), but read
-    from `environ` now (the plist's, at install), not from ROOT frozen at import."""
+    """The allow-list a bot run with `environ` reads: DC_CHANNELS_FILE, else
+    <home>/channels.txt (home as callers_file). path("CHANNELS_FILE",
+    "channels.txt"), but read from `environ` now (the plist's, at install), not
+    from the home frozen at import."""
     e = os.environ if environ is None else environ
     v = _get(e, "CHANNELS_FILE")
     if v:
         return pathlib.Path(v).expanduser()
-    r = _get(e, "ROOT") or e.get("SESSIONPHONE_ROOT")
-    return (pathlib.Path(r).expanduser() if r else paths.root()) / "channels.txt"
+    return home(e) / "channels.txt"
 
 
 def stt_url(environ=None):
@@ -294,9 +468,6 @@ def callers_ignored(environ=None):
     return f"{name} is set and IGNORED: approved callers come from {f} only; add each {how}."
 
 
-BAD = []   # settings that did not parse, said once in the bot's log (never a crash on import)
-
-
 def _root():
     """DC_ROOT, else paths.root(). At import this never raises: a settings
     file that cannot be used gives the default root, and its refusal goes
@@ -311,11 +482,17 @@ def _root():
 
 
 ROOT = _root()
+PROFILE = profile()     # "" = the default profile: its home is ROOT itself
+
+
+def home_dir():
+    """This bot's home, from ROOT and PROFILE as bound at import (home(), frozen
+    as ROOT is): ROOT for the default profile, ROOT/<PROFILE> for a named one."""
+    return ROOT / PROFILE if PROFILE else ROOT
 # The voice the bridge speaks in when nobody names one: a kokoro id (af_sky),
 # or a clone dir under ~/.voicemode/voices.
 VOICE = env("VOICE") or "af_sky"
-GREETING = env("GREETING") or f"{AGENT_NAME} here. Go ahead."
-GREETING_OUT = env("GREETING_OUT") or f"Hi, {AGENT_NAME} here, ringing you back."
+# GREETING and GREETING_OUT: built from AGENT_NAME on first use (bind_agent).
 SAY = env("SAY") or "dc-say"                      # the reply hint in bridged mail
 # How an incoming call from an approved caller is answered:
 #   auto - the bot answers at once and greets in the agent's voice. Cheap:
@@ -343,9 +520,7 @@ RING_WAIT = number("RING_WAIT", 25.0)
 # DC_NO_REPLY_S above 0 to turn it on.
 NO_REPLY_S = number("NO_REPLY_S", 0.0)
 HOLDING_LINE = env("HOLDING_LINE") or "I heard you, give me a moment."
-GREETING_VOICEMAIL = env("GREETING_VOICEMAIL") or (
-    f"{AGENT_NAME} can't pick up right now. Leave a message and it reaches "
-    f"{AGENT_NAME} as mail.")
+# GREETING_VOICEMAIL: built from AGENT_NAME on first use (bind_agent).
 # STT for voice notes, and for what a caller says: any OpenAI-compatible
 # /v1/audio/transcriptions. The default is VoiceMode's mlx-audio on :8890, the
 # server the bot's voice already uses. The bot requests Parakeet from it
@@ -368,17 +543,41 @@ XDC_FEEDS_MAX = max(0, int(number("XDC_FEEDS_MAX", 2)))     # feeds at once
 
 
 def path(name, *rel):
-    """DC_<name> (or its deprecated alias) as a path, else ROOT/<rel...>."""
+    """DC_<name> (or its deprecated alias) as a path, else home_dir()/<rel...>:
+    this bot's home, which is ROOT for the default profile. A ROOT_WIDE name
+    is ROOT/<rel...> for every profile."""
     v = env(name)
-    return pathlib.Path(v).expanduser() if v else ROOT.joinpath(*rel)
+    if v:
+        return pathlib.Path(v).expanduser()
+    return (ROOT if name in ROOT_WIDE else home_dir()).joinpath(*rel)
 
+
+# The bot's pid file (bridge/pidfile.py): the bot writes it once it holds the
+# account; dc-live reads it to know the bot runs. bin/dc-env's DC_PID_FILE is
+# this same path: change both or neither.
+PID_FILE = path("PID_FILE", "bot.pid")
+
+
+# The bot's Delta Chat display name (sessionphone/displayname.py). Unset, it is
+# the agent's name, title-cased, unless the account carries a name set by hand.
+# The bot reads it from ITS OWN environment, at its start.
+NAME = (env("NAME") or "").strip()
+
+
+# The first call's wait (bridge/firstcall.py): while the speech models are
+# still downloading, a call hears a line saying so, then the music file, if
+# there is one, until the call can hear. on/off, default on; off is no wait.
+FIRST_CALL_WAIT = (env("FIRST_CALL_WAIT") or "on").strip().lower() != "off"
+# Any audio file ffmpeg reads. Missing or unreadable: the line alone.
+WAIT_MUSIC = path("WAIT_MUSIC", "wait-music.opus")
 
 
 def say_cmd(profile=None):
     """dc-say as a reader can run it. A second profile's bot is named by its
     outbox, DC_OUTBOX=..., never `--profile`: an older dc-say has no --profile
-    and crashes on it with ValueError."""
-    profile = env("PROFILE", "") if profile is None else profile
+    and crashes on it with ValueError. dc-say finds that bot's list and live
+    call beside the outbox (bin/dc-env's dc_channels and dc_live)."""
+    profile = PROFILE if profile is None else profile
     return f"DC_OUTBOX={path('OUTBOX', 'outbox')} {SAY}" if profile else SAY
 
 
@@ -396,13 +595,18 @@ def reply_hint(chat_id, call=None, profile=None, channel=None):
 
 
 if __name__ == "__main__":
-    for k in ("AGENT", "AGENT_NAME", "HOST", "ADDR", "MAILTO", "ROOT", "VOICE", "GREETING",
+    bind_agent()
+    for k in ("AGENT", "AGENT_FROM", "AGENT_NAME", "HOST", "ADDR", "MAILTO", "ROOT", "PROFILE",
+              "VOICE", "GREETING",
               "ANSWER", "RING_WAIT", "NO_REPLY_S", "GREETING_VOICEMAIL", "STT_URL", "STUN_RTO",
-              "XDC_FEED_CHATS", "XDC_FEEDS_MAX"):
+              "XDC_FEED_CHATS", "XDC_FEEDS_MAX", "FIRST_CALL_WAIT", "WAIT_MUSIC", "NAME"):
         print(f"{k:12} {globals()[k]}")
+    print(f"{'HOME':12} {home_dir()}")
     if HOST_PROBLEM:
         print(f"{'REFUSED':12} {HOST_PROBLEM}")
     for k, rel in (("ACCOUNTS", ("accounts",)), ("OUTBOX", ("outbox",)), ("CALLS_DIR", ("calls",)),
                    ("LIVE", ("call-live.json",)), ("ACKS", ("acks",)), ("LOG", ("bot.log",)),
-                   ("CALLERS_FILE", ("callers.txt",)), ("UNDELIVERED", ("undelivered",))):
+                   ("CALLERS_FILE", ("callers.txt",)), ("CHANNELS_FILE", ("channels.txt",)),
+                   ("SEEN", ("bridged-ids.txt",)), ("UNDELIVERED", ("undelivered",)),
+                   ("PID_FILE", ("bot.pid",))):
         print(f"{k:12} {path(k, *rel)}")

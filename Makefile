@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 BUMP ?= patch
 # every tracked *.sh, and every tracked file whose FIRST line is a sh/bash shebang
 SHELLSCRIPTS := $(shell { git ls-files -z | xargs -0 awk 'FNR==1 && /^\#!\/(usr\/bin\/env )?(ba)?sh/ {print FILENAME}'; git ls-files '*.sh'; } | sort -u)
-.PHONY: help install test test-vision lint format check browser build release push publish
+.PHONY: help install test test-vision bridge lint format check browser build release push publish
 
 help:  ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -28,7 +28,13 @@ lint:  ## ruff check; shellcheck on every tracked shell script (see SHELLSCRIPTS
 format:  ## ruff format
 	@uv run ruff format .
 
-check: lint test  ## lint, then test
+# The bridge's tests are mostly script-style (asserts at module level, a sys.exit
+# at import), so pytest cannot collect tests/bridge (addopts --ignore). This runs
+# them, each file on its own; `check` runs it, so a red bridge test fails the gate.
+bridge:  ## bin/bridge-check: compile the bridge, import it bare, run every tests/bridge file
+	@bin/bridge-check
+
+check: lint test bridge  ## lint, test, then the bridge tests
 
 browser:  ## the web page in headless Chrome: scratch HTTPS localhost, virtual passkey, fake mic (tests/browser/run.sh)
 	@tests/browser/run.sh

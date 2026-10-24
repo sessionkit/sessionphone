@@ -5,7 +5,7 @@ A walk-through on a fresh Mac (F4, 2030-06-09): with `uv tool install ears` done
 installed (No module named 'ears'): calls work, with no turn previews".
 
 ears is a uv tool: its own venv under ~/.local/share/uv/tools/<dist> (the
-distribution is `sessionvoice` since 2030-06-08, not `ears`), its shim linked
+distribution is `sessionvoice` since 2030-06-09, not `ears`), its shim linked
 from ~/.local/bin. The bot runs the plugin venv's interpreter with the job's
 EnvironmentVariables and nothing else, so before fix-001 ears was in neither
 its PATH (service.BASE_PATH) nor its sys.path. fix-001 (rca-001): `bot install`

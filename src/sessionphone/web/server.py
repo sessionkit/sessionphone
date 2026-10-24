@@ -375,7 +375,7 @@ def run(webdir: Path, *, port: int, host: str, tls: tuple[Path, Path] | None,
             from sessionphone import seat as seats
             try:
                 box = seats.have_box(os.environ, os.environ, seat.to, what="the web call's turns",
-                                     again="`sessionphone web --legs` again")
+                                     again="`sessionphone web --legs` again", setting="--mail-to")
             except seats.NoBox as exc:
                 why = str(exc)
         if why:

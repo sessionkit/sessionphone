@@ -424,6 +424,36 @@ def _one_outbox_pass(monkeypatch, tmp_path, account=None):
         stop.set()
 
 
+# ---- the bot's pid file: written once it holds the account, never a stop -----
+
+def test_the_bot_writes_its_pid_file_once_it_holds_the_account(rig, monkeypatch, tmp_path, pid_file_in_tmp):
+    """bot.pid names this process, and its clean exit is booked to take it back."""
+    registered = []
+    monkeypatch.setattr(bot.atexit, "register", lambda *a: registered.append(a))
+    _one_outbox_pass(monkeypatch, tmp_path)
+    assert pid_file_in_tmp.read_text().split("\n")[0] == str(os.getpid())
+    assert registered == [(bot.pidfile.clear, pid_file_in_tmp, os.getpid())]
+    assert not any("bot.pid" in line for line in rig.logged)
+
+
+def test_a_pid_file_that_cannot_be_written_is_one_line_and_the_bot_runs_on(rig, monkeypatch, tmp_path):
+    """The write fails (its directory is gone): ONE line in the log, nothing
+    booked for the exit, and the bot goes on to its outbox loop."""
+    gone = tmp_path / "gone" / "bot.pid"
+    monkeypatch.setattr(bot, "PID_FILE", gone)
+    registered = []
+    monkeypatch.setattr(bot.atexit, "register", lambda *a: registered.append(a))
+    sent = []
+    rig.spool._send = lambda a, b: sent.append(b) or seatmail.Sent(True, sent="yes", args=a)
+    rig.spool.keep(seatmail.Sent(False, "x", kind="mta", args=["send", "a@b"]), "late mail")
+    rig.clock.now += spool.BACKOFF_S
+    _one_outbox_pass(monkeypatch, tmp_path)
+    said = [line for line in rig.logged if "bot.pid" in line]
+    assert len(said) == 1 and said[0].startswith(f"bot.pid NOT WRITTEN at {gone}: "), said
+    assert registered == [] and not gone.exists()
+    assert sent == ["late mail"]        # the outbox loop ran: the bot carried on
+
+
 # ---- do-008 (review F1): a pass stops at the first timeout or mta refusal ------
 
 def _three_due(rig):
@@ -532,9 +562,11 @@ def _scratch_root(tmp_path, waiting, dead):
 
 
 def _scratch_env(tmp_path, root):
+    """No bot.pid in a scratch root, so dc-live says the bot is not running (2).
+    It finds the bot by that file alone (tests/test_dc_live_pidfile.py), so a
+    concurrent run's processes can never make it see one here."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DC_", "PIP_CHAT_", "SESSIONPHONE_"))}
-    env.update(HOME=str(tmp_path / "home"), DC_ROOT=str(root), DC_AGENT="nobody-dc-live-test",
-               DC_BOT="sessionphone-no-such-bot-PHONE-106-do-003")
+    env.update(HOME=str(tmp_path / "home"), DC_ROOT=str(root), DC_AGENT="nobody-dc-live-test")
     return env
 
 

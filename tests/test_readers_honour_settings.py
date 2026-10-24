@@ -169,7 +169,7 @@ def remembered(phone_home, tmp_path):
     """A root phone.json records for its one bot, ada, with a log line in it."""
     root = tmp_path / "kept-root"
     root.mkdir(mode=0o700)
-    (root / "bot.log").write_text("2026-01-01 00:00:00 the line in the kept root\n")
+    (root / "bot.log").write_text("2030-06-09 00:00:00 the line in the kept root\n")
     _remember(root)
     return root
 
@@ -242,6 +242,9 @@ def rig(monkeypatch, tmp_path, launchd, given_seat):
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")
     monkeypatch.setattr(service, "named_python", lambda: "/venv/libexec/session-phone")
     monkeypatch.setattr(service, "ears_src", lambda: None)
+    # this machine is mac, so the To (ada@mac.example.net) is on this host,
+    # whatever host runs the suite: off it, the drop refuses the install
+    monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "mac.local")
     return tmp_path / "job.plist"
 
 

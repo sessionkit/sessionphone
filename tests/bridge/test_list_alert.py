@@ -109,6 +109,11 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "CALLS", False)
     monkeypatch.setattr(bot, "INVITE", None)
     monkeypatch.setattr(bot, "PROFILE", "")
+    # bot.py copies sys.argv[1] into DC_AGENT at import, and under pytest that is
+    # a pytest flag or path, so the box the bot checks at start would be named
+    # after however this run was invoked. Pin it to the bot the suite bound, so
+    # the box checked is the box the alert is addressed to.
+    monkeypatch.setenv("DC_AGENT", dc_env.AGENT)
     logged = []
     monkeypatch.setattr(bot, "log", logged.append)
 
@@ -118,10 +123,14 @@ def rig(tmp_path, monkeypatch):
     r.tmp, r.out, r.list, r.callers, r.logged = tmp_path, out, lst, callers, logged
     r.mails, r.delta, r.sendmail = [], [], []   # each send: True, False or an exception, in turn
     r.argv, r.ack = [], 0
+    r.calls = []                                # every `message` call but the probe, in order
 
     def fake_run(argv, input=None, **kw):
         if argv[1:] == seatmail.PROBE_ARGS:     # the start probe (PHONE-72 2b) sends nothing
             return Obj(returncode=2, stderr="", stdout=json.dumps({"sent": "no", "kind": "message-id"}))
+        r.calls.append(argv[1:])
+        if argv[1:2] == ["path"]:               # the box check at start (seat.have_box): the box is there
+            return Obj(returncode=0, stderr="", stdout=f"{tmp_path / 'boxes' / argv[2]}\n")
         assert argv[1:2] == ["send"] and "--json" in argv, argv
         r.argv.append(argv)
         heads = [argv[i + 1] for i, a in enumerate(argv) if a == "--header"]
@@ -187,6 +196,19 @@ def test_one_alert_for_n_refused_jobs_and_no_delta_send(rig):
     assert len(acks) == 6 and all(a["ok"] is False for a in acks)
     assert all("NO channels file" in a["detail"] for a in acks)
     assert rig.delta == []                  # the gate held: no Delta send at all
+
+
+def test_the_bot_checks_its_box_before_the_first_send(rig):
+    """The mail drop never makes a box, and refuses a send to one that is not
+    there, so the bot asks `message path` for its box at start, reads only,
+    and only then sends. The box asked is the one the alert is addressed to,
+    and a second start asks again."""
+    box = seatmail.local_part(dc_env.MAILTO)
+    rig.run([])
+    assert [c[:2] for c in rig.calls] == [["path", box], ["send", dc_env.MAILTO]]
+    rig.run([])                                   # a restart inside the floor: no new mail
+    assert [c[:2] for c in rig.calls[2:]] == [["path", box]]
+    assert len(_alerts(rig)) == 1
 
 
 def test_an_alert_goes_out_with_no_job_at_all(rig):

@@ -33,11 +33,45 @@ if [ -z "$IDONLY" ]; then
   fi
 fi
 # <<< undelivered
+# >>> bot-pid
 # A live file with no bot behind it is a lie, not a call. Say which.
-if ! pgrep -f "$DC_BOT" >/dev/null 2>&1; then
-  [ -n "$IDONLY" ] || echo "dc-live: the bot is NOT RUNNING for $DC_ROOT - there is no call, and nothing can start one." >&2
+# Only the bot knows its own pid: it writes DC_PID_FILE (<root>/bot.pid) once
+# it holds the account, four lines (bridge/pidfile.py): its pid, its start
+# time and its command line as `ps` gives them (TZ=UTC0, LC_ALL=C), and its
+# root. It is THIS root's bot only if that pid is alive, `ps` gives the same
+# start time and command line for it now, the command line names sessionphone,
+# and the root is this one. A dead pid, or one given to another process since,
+# is a stale file: not running. Argv is never searched, so a grep, a tail -f
+# or another agent's bot that carries this bot's name is no bot.
+# dc_bot_why: "" when the bot runs, else why not, in words.
+dc_bot_why() {
+  local f="$DC_PID_FILE" pid started cmd root here now
+  [ -e "$f" ] || { echo "no $f: no bot has started on this root, or the one running is older than its pid file (restart it)"; return; }
+  { read -r pid; read -r started; read -r cmd; read -r root; } < "$f" || true
+  case "$pid" in ''|*[!0-9]*|0*|1) echo "$f names no bot's pid (${pid:-nothing})"; return ;; esac
+  kill -0 "$pid" 2>/dev/null || { echo "$f is stale: pid $pid is not running"; return; }
+  now="$(TZ=UTC0 LC_ALL=C ps -ww -o lstart= -p "$pid" 2>/dev/null)" || now=""
+  read -r now <<<"$now" || true
+  [ -n "$started" ] && [ "$now" = "$started" ] || { echo "$f is stale: pid $pid is another process now (started ${now:-?}, not ${started:-?})"; return; }
+  now="$(TZ=UTC0 LC_ALL=C ps -ww -o command= -p "$pid" 2>/dev/null)" || now=""
+  read -r now <<<"$now" || true
+  [ -n "$cmd" ] && [ "$now" = "$cmd" ] || { echo "$f is stale: pid $pid runs another command now"; return; }
+  case "$cmd" in *sessionphone*) ;; *) echo "$f names pid $pid, which is no sessionphone bot ($cmd)"; return ;; esac
+  here="$(cd "$DC_ROOT" 2>/dev/null && pwd -P)" || here="$DC_ROOT"
+  [ "$root" = "$here" ] || { echo "$f is another root's: its bot runs on ${root:-?}, not $here"; return; }
+}
+if [ -n "${DC_BOT:-}" ] && [ -z "$IDONLY" ]; then
+  echo "dc-live: DC_BOT is set and IGNORED: the bot is found by its pid file, $DC_PID_FILE" >&2
+fi
+why="$(dc_bot_why)"
+if [ -n "$why" ]; then
+  if [ -z "$IDONLY" ]; then
+    echo "dc-live: the bot is NOT RUNNING for $DC_ROOT - there is no call, and nothing can start one." >&2
+    echo "dc-live: $why" >&2
+  fi
   exit 2
 fi
+# <<< bot-pid
 if [ ! -f "$DC_LIVE" ]; then
   [ -n "$IDONLY" ] || echo "no call is live"
   exit 1

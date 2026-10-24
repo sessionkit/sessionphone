@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from sessionphone import settings
 from sessionphone.bridge import bot, dc_env, echo, seatmail
 from sessionphone.bridge.echo import EchoGuard
 from sessionphone.bridge.seatmail import Sent
@@ -27,12 +28,15 @@ from sessionphone.web.turns import Seat, TurnFollower, seat_for, turn_mail
 
 N = 1918213200                       # a web call's id: ten digits, the second it began
 HOST = "example.net"              # DC_HOST: the Reply-To
+ARPA = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"   # the IPv6 loopback PTR
+SH = {"SESSIONMAIL_HOST": "example"}   # a short host HOST sits under: host_part keeps HOST, asks no mail.json
 IDS = "host"                           # seatmail.id_host(), sessionmail's own: the ids (PHONE-72 2b)
 SEAT = seat_for(f"alice@{HOST}", HOST, environ={})
 CALLER = "Ada"                       # who spoke: web/names.py's setting, handed down (PHONE-135)
 T0 = 1918213200.0                    # the call's clock, epoch seconds
 AEDT = datetime.timezone(datetime.timedelta(hours=11))
-DAY = "heard_2030-10-15.jsonl"
+DAY = "heard_2030-06-09.jsonl"
+NEXT_DAY = "heard_2030-12-08.jsonl"
 SPOKEN = "Shall I commit the changes and push the branch now?"
 # measured in the design review (design-001, build note 2)
 MIXED = SPOKEN + " No, wait until I have read the whole diff myself."     # 0.68: mailed, echo included
@@ -89,10 +93,9 @@ class Clock:
 
 @pytest.fixture
 def heard(tmp_path):
-    """A heard dir with yesterday's file and today's, each with lines older than the call."""
+    """A heard dir with today's file, holding lines older than the call."""
     d = tmp_path / "conversations"
     d.mkdir()
-    write(d, turn(700, "an old turn of an old call", n=N), day="heard_2030-10-14.jsonl")
     write(d, turn(740, "an older turn of this same N, before the call"), event(739, "listen-started"))
     return d
 
@@ -245,7 +248,7 @@ def test_t3_a_replay_or_a_re_read_mails_nothing_more(heard, fake_message, tmp_pa
     # a re-list: the same files, read again from where it was
     go(pump(f))
     # a second day's file appears, carrying a copy of the same line
-    write(heard, turn(741, "Hey Alice"), day="heard_2030-10-16.jsonl")
+    write(heard, turn(741, "Hey Alice"), day=NEXT_DAY)
     go(pump(f))
     assert len(fake_message.calls()) == 1
     # a second follower made now starts at the end: it never sees the turn
@@ -261,10 +264,21 @@ def test_start_at_the_end_reads_nothing_older_than_the_call(heard, fake_message)
     assert fake_message.calls() == [] and f.last_seq == 0
 
 
+def test_start_at_the_end_holds_for_both_of_two_day_files(tmp_path, fake_message):
+    """The follower reads the last two day files; a turn already in either, older than the call, is never mailed."""
+    d = tmp_path / "two-days"
+    d.mkdir()
+    write(d, turn(700, "an old turn of an old call", n=N), day=DAY)
+    write(d, turn(740, "an older turn of this same N, before the call"), day=NEXT_DAY)
+    f = follower(d)
+    go(pump(f))
+    assert fake_message.calls() == [] and f.last_seq == 0
+
+
 def test_midnight_a_new_day_file_is_read_from_its_start(heard, fake_message):
     f = follower(heard)
     write(heard, turn(741, "before midnight"))
-    write(heard, turn(742, "after midnight"), day="heard_2030-10-16.jsonl")
+    write(heard, turn(742, "after midnight"), day=NEXT_DAY)
     go(pump(f))
     assert [m["Message-ID"] for m in fake_message.mails()] == [
         f"<call-turn-web-{N}-741@{IDS}>", f"<call-turn-web-{N}-742@{IDS}>"]
@@ -655,9 +669,9 @@ def test_f1_a_refused_turn_stopped_in_the_back_off_is_still_logged(heard):
 # ---- T8: who the turns go to, and when --legs is refused (§4.5, §11 A1, A4, A8) -------------------
 
 def test_t8_no_seat_named_is_refused_even_with_claude_code_agent():
-    seat, why = turns.named_seat(None, environ={"CLAUDE_CODE_AGENT": "worker"}, fqdn=HOST)
+    seat, why = turns.named_seat(None, environ={"CLAUDE_CODE_AGENT": "worker", **SH}, fqdn=HOST)
     assert seat is None and "no seat is named" in why and "--mail-to" in why and "CLAUDE_CODE_AGENT" in why
-    assert turns.named_seat("  ", environ={}, fqdn=HOST)[0] is None          # blank is not a name
+    assert turns.named_seat("  ", environ=SH, fqdn=HOST)[0] is None          # blank is not a name
 
 
 @pytest.mark.parametrize("flag,environ,to", [
@@ -667,7 +681,7 @@ def test_t8_no_seat_named_is_refused_even_with_claude_code_agent():
     (None, {"PIP_CHAT_MAILTO": "old@example.net"}, "old@example.net"),     # the deprecated alias
 ])
 def test_t8_the_seat_is_mail_to_else_dc_mailto_else_dc_agent_at_host(flag, environ, to):
-    seat, why = turns.named_seat(flag, environ={"CLAUDE_CODE_AGENT": "worker", **environ}, fqdn=HOST)
+    seat, why = turns.named_seat(flag, environ={"CLAUDE_CODE_AGENT": "worker", **SH, **environ}, fqdn=HOST)
     assert why == "" and seat.to == to and seat.host == HOST
     assert "worker" not in seat.addr                                    # never the shell's agent (A8)
 
@@ -678,26 +692,90 @@ def test_t8_the_seat_is_mail_to_else_dc_mailto_else_dc_agent_at_host(flag, envir
 ])
 def test_t8_a_to_that_is_no_mail_address_is_refused(flag, environ):
     """build-002 review N3: a To with no box or no host goes to a local user, not the seat."""
-    seat, why = turns.named_seat(flag, environ=environ, fqdn=HOST)
+    seat, why = turns.named_seat(flag, environ={**SH, **environ}, fqdn=HOST)
     assert seat is None and "is not a mail address" in why and "BOX@HOST" in why
 
 
 def test_t8_the_from_follows_the_seat_not_the_shell():
-    seat, _ = turns.named_seat("alice+phone@example.net", environ={"CLAUDE_CODE_AGENT": "worker"}, fqdn=HOST)
+    seat, _ = turns.named_seat("alice+phone@example.net", environ={"CLAUDE_CODE_AGENT": "worker", **SH}, fqdn=HOST)
     assert (seat.addr, seat.name) == (f"alice-chat@{HOST}", "Alice")
-    seat, _ = turns.named_seat(None, environ={"DC_AGENT": "team", "DC_ADDR": "team-phone@example.net"}, fqdn=HOST)
+    seat, _ = turns.named_seat(None, environ={"DC_AGENT": "team", "DC_ADDR": "team-phone@example.net", **SH},
+                                fqdn=HOST)
     assert seat.addr == "team-phone@example.net"
 
 
-@pytest.mark.parametrize("fqdn", ["1.0.0.0.ip6.arpa", "localhost", "macbook", ""])
-def test_t8_a_junk_host_is_refused_even_with_mail_to_and_dc_addr(fqdn):
+@pytest.fixture
+def no_mail_json(monkeypatch):
+    """No SESSIONMAIL_HOST, and sessionmail's mail.json gives no `host`."""
+    monkeypatch.delenv("SESSIONMAIL_HOST", raising=False)
+    monkeypatch.delenv("SESSION_MAIL_HOST", raising=False)
+    monkeypatch.setattr(settings, "mail_text", lambda *a, **k: None)
+
+
+# What host_part still gives that is no mail host: none, localhost, or a .arpa name
+# a variable names. PHONE-98's refusal stays the last resort for exactly these.
+JUNK_PART = [   # (environ, hostname, getfqdn, what the refusal says of the host)
+    ({}, "", "x.example.net", "is empty"),                              # no short host at all
+    ({}, "localhost", "localhost", "'localhost', which names no machine"),
+    ({"SESSIONMAIL_HOST": "x.ip6.arpa"}, "stranger", ARPA, "'x.ip6.arpa', a reverse-DNS name"),
+]
+
+
+@pytest.mark.parametrize("environ,hostname,fqdn,said", JUNK_PART, ids=["none", "localhost", "arpa-variable"])
+def test_t8_a_junk_host_is_refused_even_with_mail_to_and_dc_addr(no_mail_json, environ, hostname, fqdn, said):
     """§11 A4: host_problem() passes any host when DC_ADDR and DC_MAILTO are both
-    named; the web turn still builds its Reply-To and Message-ID on its DNS name."""
+    named; the web turn still builds its Reply-To on host_part()'s answer."""
     full = {"DC_ADDR": "alice-chat@example.net", "DC_MAILTO": "alice@example.net"}
-    assert dc_env.host_problem(full, host=fqdn) is None                    # the bot's rule would pass it
-    for flag, environ in (("alice@example.net", {}), (None, full)):
-        seat, why = turns.named_seat(flag, environ=environ, fqdn=fqdn)
-        assert seat is None and "DC_HOST" in why and repr(fqdn) in why
+    assert dc_env.host_problem(full, host=hostname) is None               # the bot's rule would pass it
+    for flag, env in (("alice@example.net", environ), (None, {**full, **environ})):
+        seat, why = turns.named_seat(flag, environ=env, fqdn=fqdn, hostname=hostname)
+        assert seat is None and said in why and "DC_HOST=" in why and "SESSIONMAIL_HOST" in why
+        assert "Message-ID" not in why                    # the ids are seatmail.id_host()'s, not this host
+
+
+def test_t8_the_refusal_names_where_the_host_came_from(no_mail_json):
+    _, why = turns.named_seat("alice@example.net", environ={"SESSIONMAIL_HOST": "x.ip6.arpa"},
+                              fqdn=ARPA, hostname="stranger")
+    assert "(from SESSIONMAIL_HOST)" in why
+    _, why = turns.named_seat("alice@example.net", environ={}, fqdn="localhost", hostname="localhost")
+    assert "(from sessionmail's mail.json `host`, else this machine's name)" in why
+
+
+# PHONE-217: with no DC_HOST, the host is dc_env.host_part (sessiontools ST-217's rule),
+# never a raw getfqdn(). Each row is (hostname, getfqdn, the seat's host).
+HOST_PART = [
+    ("stranger.local", ARPA, "stranger"),                       # macOS 27: the loopback PTR -> the short host
+    ("stranger", "stranger.example-tail.ts.net", "stranger.example-tail.ts.net"),   # a tailnet name stays
+    ("stranger", "mac.example.net", "stranger"),                # CHANGED on purpose: an unrelated FQDN is not ours
+    ("Stranger", "Stranger.Example-Tail.ts.net", "stranger.example-tail.ts.net"),   # CHANGED on purpose: lowercased
+    ("macbook", "macbook", "macbook"),                          # a dotless short host is a mail host: no refusal
+    ("macbook", "", "macbook"),                                 # no DNS name at all
+]
+
+
+@pytest.mark.parametrize("hostname,fqdn,host", HOST_PART, ids=["arpa", "tailnet", "unrelated", "mixed-case",
+                                                               "dotless", "no-fqdn"])
+def test_t8_no_dc_host_defaults_through_host_part_not_getfqdn(no_mail_json, hostname, fqdn, host):
+    seat, why = turns.named_seat("ada@example.net", environ={}, fqdn=fqdn, hostname=hostname)
+    assert why == "" and seat.host == host and seat.addr == f"ada-chat@{host}"
+    seat, why = turns.named_seat(None, environ={"DC_AGENT": "ada"}, fqdn=fqdn, hostname=hostname)
+    assert why == "" and seat.to == f"ada@{host}"
+
+
+def test_t8_the_arpa_regression_through_the_socket_calls(no_mail_json, monkeypatch):
+    """The bug as found (findings/repro.md (a)): getfqdn() is the IPv6 loopback's PTR
+    name. --legs was refused, asking for DC_HOST by hand; now it takes the short host."""
+    monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: ARPA)
+    monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "stranger.local")
+    seat, why = turns.named_seat("ada@stranger")
+    assert why == "" and seat.host == "stranger"
+
+
+def test_t8_no_dns_lookup_when_dc_host_is_named(monkeypatch):
+    monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: pytest.fail("asked DNS with DC_HOST set"))
+    monkeypatch.setattr(dc_env.socket, "gethostname", lambda: pytest.fail("asked the hostname with DC_HOST set"))
+    seat, why = turns.named_seat("ada@example.net", environ={"DC_HOST": "example.net"})
+    assert why == "" and seat.host == "example.net"
 
 
 def test_t8_a_named_dc_host_is_trusted_and_used():
@@ -708,7 +786,7 @@ def test_t8_a_named_dc_host_is_trusted_and_used():
 
 
 def test_t8_the_start_lines_name_the_to_the_from_and_the_reply_to(tmp_path):
-    seat, _ = turns.named_seat("alice@example.net", environ={}, fqdn=HOST)
+    seat, _ = turns.named_seat("alice@example.net", environ=SH, fqdn=HOST)
     a, b = turns.start_lines(seat, tmp_path, environ={})       # the suite's carrier: an MTA
     assert a == ("turns: each finished turn of a web call mailed to alice@example.net (From seat alice-chat), "
                  f"Reply-To calls+web-<N>@{HOST} (M5, signed (carrier /usr/sbin/sendmail is an MTA, "
@@ -719,7 +797,7 @@ def test_t8_the_start_lines_name_the_to_the_from_and_the_reply_to(tmp_path):
 def test_t8_the_start_lines_name_the_mode_signing_rules_never_a_fixed_signed(tmp_path):
     """The web's turns are signed as seatmail.signing() rules, as the bot's mail
     is: on the drop with no signer they go unsigned, and the start says so and why."""
-    seat, _ = turns.named_seat("alice@example.net", environ={}, fqdn=HOST)
+    seat, _ = turns.named_seat("alice@example.net", environ=SH, fqdn=HOST)
     a, _ = turns.start_lines(seat, tmp_path, environ={"SESSIONMAIL_SENDMAIL": "drop"})
     assert a.endswith(", unsigned (carrier drop: this bot writes into the box itself, "
                       "from SESSIONMAIL_SENDMAIL))")
@@ -732,7 +810,7 @@ def test_t8_the_start_lines_name_the_mode_signing_rules_never_a_fixed_signed(tmp
 def test_t8_a_missing_heard_dir_is_marked_at_start_never_silent(tmp_path):
     """build-002 review N1: a heard dir that is not there means no turn reaches the
     seat, the DEMO's failure shape, so the start line says so."""
-    seat, _ = turns.named_seat("alice@example.net", environ={}, fqdn=HOST)
+    seat, _ = turns.named_seat("alice@example.net", environ=SH, fqdn=HOST)
     _, b = turns.start_lines(seat, tmp_path / "nope")
     assert b == (f"heard log: {tmp_path / 'nope'}  (missing: no turn reaches the seat until the ears "
                  "write here; check --heard-dir)")

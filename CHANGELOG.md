@@ -9,6 +9,336 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
+### A second profile on one root keeps its own files
+
+- A bot run with `DC_PROFILE` (such as `public`) on a root that another bot
+  also uses read the default profile's `channels.txt` and `callers.txt`, and
+  took jobs from the default profile's outbox. Chat ids belong to one
+  account, so an entry for chat 17 on the private list let in chat 17 on the
+  public account, which is another chat. The `dc-*` tools and
+  `sessionphone channels rejected --profile public` already looked under
+  `<root>/public/`; only the bot did not.
+- A named profile's home is now `<root>/<profile>/`, and everything it keeps
+  about its account lives there: the channels list, callers, outbox, seen
+  ids (`DC_SEEN`), acks, undelivered mail, calls (`DC_CALLS_DIR`), the live
+  call (`DC_LIVE`), the log, guests, sockets, the saved invite and name, the
+  picture's "none" marker, and with no `DC_ACCOUNTS`, the account itself. An
+  explicit `DC_<NAME>` still wins. The voice map and the wait music stay at
+  the root, shared. The default profile is unchanged: its home is the root,
+  and every path it reads is the same as before.
+- A named profile with no `callers.txt` of its own refuses every call, and
+  says so at start, naming the file.
+- The bot refuses to start (exit 2, one line) when a named profile's list or
+  callers file is the default profile's own, or when another bot already
+  runs on the same home (it holds `<home>/.bot.lock`, and the line names its
+  pid).
+- The bot refuses to start when its outbox holds jobs older than
+  `DC_OUTBOX_STALE_S` (default 3600 seconds): jobs queued while no bot read
+  that outbox. The line names how many, the oldest one's age, the path, and
+  how to drop them or send them. This holds for every bot, the default
+  profile too.
+- The rejection line in the bot's log names the profile and the list it read.
+- `bot install` compares bots by home, so two profiles on one root are no
+  longer rivals; two bots on one home still are.
+- `bin/dc-env` follows `DC_PROFILE` in the shell as the bot does. `dc-say
+  --call` checks the live call of the bot its job goes to, beside that
+  bot's outbox (as the channels pre-check finds its list), so the fallback
+  line in a profile's call mail keeps working now that the live call moves
+  with the profile. A TTS failure on a profile's
+  call now queues its text into that profile's outbox.
+- Before restarting a named-profile bot on this version, look in
+  `<root>/<profile>/outbox`: jobs a tool queued there were never taken
+  before, and the stale-job refusal stops the bot until a person decides.
+
+### Under the mail drop, an address off this host is refused at start
+
+- The mail drop delivers on this host only. With the bot's `DC_MAILTO`, or
+  the To of `sessionphone web --legs`, on another host, the bot and the web
+  call started anyway, and then every mail of the run was refused. They now
+  refuse at start with one line that names the address and what to do: set
+  `DC_MAILTO` (or `--mail-to`) to a box on this host, or use a carrier that
+  reaches it. Nothing is started. `bot install` and `account setup` refuse
+  the same address. On an MTA an address off this host starts as before.
+- "This host" is one rule everywhere: the start's box check and the Cc guard
+  now judge an address as the web seat's default host does, so a reverse-DNS
+  name (`….arpa`) is never this host, even one under the short host. A
+  tailnet name under the short host still is.
+
+### A call speaks one line at a time
+
+- On a live call, a guest's reply read aloud by the bot could land between
+  two parts of a sentence the mouth was speaking, and the other way round.
+  Two replies at once could also take turns sentence by sentence.
+- Now one line owns the call's voice until it ends: a mouth line from its
+  start to its end, or one whole reply from the bot. A line that arrives
+  while another is playing waits, then plays whole, in arrival order.
+- A barge-in, or the mouth's cut, drops the playing line and every line
+  waiting behind it. A reply that is cut no longer says its later sentences,
+  and a mouth line cut by a barge-in no longer plays the rest of its audio.
+  A mouth that stops before its line ends is still a cut, and a hang-up
+  ends every line, so no line is left holding the call.
+- The echo guard is told when a waiting line really starts to play, so a
+  reply that waited behind the mouth is not taken for the caller talking.
+- Sounds and the first-call wait music are unchanged.
+
+### A wheel install prints the same connect page as a checkout
+
+- `sessionphone qr` looked for the skill's `qr-page.html` relative to the
+  package, which works only from a checkout. A wheel install
+  (`pip`, `uv tool install`, a kit install) found nothing there and printed
+  a second page kept in the code, which had drifted from the first: shorter
+  steps and a different layout.
+- There is now one page, `src/sessionphone/pages/qr-page.html`. It ships as
+  package data and is read with `importlib.resources`, so a checkout, a
+  wheel and a kit install print the same bytes. The copy in the code and the
+  copy in the skill are gone. `qr --template` still takes your own page.
+- A test builds the wheel, installs it into a fresh venv, and checks that
+  the installed package prints the same page as the checkout.
+
+### `dc-live` finds the bot by its pid file, not by searching command lines
+
+- `dc-live` decided the bot was running with `pgrep -f "$DC_BOT"`, a regex
+  over every process's command line. That was wrong in five of six measured
+  cases. A `tail -f` of a file named after the bot, a grep, another agent
+  whose name starts with this one's, and a `.` matching any character all
+  counted as the bot. The foreground `sessionphone bot run` never counted,
+  so `dc-live` said the bot was NOT RUNNING while it ran, even mid-call. A
+  bot on another root counted too.
+- The bot now writes `<root>/bot.pid` (`DC_PID_FILE`) once it holds the
+  account: its pid, its start time and command line as `ps` gives them, and
+  its root. It removes the file at a clean exit. `dc-live` counts the bot as
+  running only when that pid is alive, `ps` still gives the same start time
+  and command line for it, the command line names sessionphone, and the
+  root is this one. A stale file (a dead pid, or one given to another
+  process) reads NOT running, and the second stderr line says why.
+- If the file cannot be written, the bot logs one line and runs on.
+- `DC_BOT` is deprecated and ignored. When it is set, `dc-live` says so on
+  stderr. `bin/dc-env` and `bridge/dc_env.py` name the same `DC_PID_FILE`.
+- **Restart the bot after upgrading.** A bot started before this version
+  writes no `bot.pid`, and `dc-live` reports it as not running until it is
+  restarted.
+
+### `web --legs` takes the mail drop's host, not a reverse-DNS name
+
+- With no `DC_HOST`, `sessionphone web --legs` built the seat's host from
+  this machine's DNS name. On macOS 27, a Mac with no forward record gets
+  the IPv6 loopback's reverse-DNS name (`….ip6.arpa`), and `--legs` refused
+  to start until `DC_HOST` was set by hand. The host is now the one the
+  mail drop gives a bare From: the DNS name when it is sessionmail's short
+  host or a name under it (a tailnet name), else the short host,
+  lowercased. An unrelated DNS name now gives the short host too.
+- `--legs` still refuses when that gives no host, `localhost`, or a
+  reverse-DNS name, and the refusal says where the host came from. The
+  bot's own host, its default addresses and its Message-IDs are unchanged.
+
+### The carrier's source is named truthfully, and a deaf session is warned first
+
+- The `seat:` and `mail:` lines of `bot install`, the bot's `agent mail:`
+  start line and the settings block's `SESSIONMAIL_SENDMAIL` row said the
+  carrier came from sessionmail's `mail.json` `sendmail` whenever it came
+  from a file, including the template sessionmail installs. On a fresh
+  install `mail.json` holds no such key, so the line named a source that
+  was not used. They now say `mail.json` only when that file sets the key,
+  and ``sessionmail's installed default, ~/.sessionkit/mail/settings/mail.template.json
+  `sendmail` `` when the template gave it.
+- When the installing session will NOT hear the bot's box, `bot install`
+  prints that `hear:` warning and its ways out first, ahead of `installed:`.
+  A line saying it does hear, and a Terminal's advice, stay under `box:`.
+
+### The bot's name follows its agent
+
+- The bot's Delta Chat name is now the agent's name, title-cased (`versa` ->
+  `Versa`), unless it was set by hand. A new setting, `DC_NAME`, gives it any
+  other name and always wins.
+- The bot sets the name at its start and logs one `name:` line, old -> new.
+  It then writes the saved invite again, so `invite` and `qr` show the new
+  name.
+- The agent's name goes only over a name nobody chose: an empty one, or the
+  name of the agent the bot is or replaced. `bot install --replace OLD`
+  leaves OLD's name in `name-replaced` under the root, and the bot's start
+  removes it. A bot that came online as `Claude` and is replaced by `versa`
+  is now `Versa`.
+- Any other name is kept as the user's. `bot install` prints one `name:`
+  line saying so, with the `DC_NAME=... sessionphone bot install` line that
+  changes it.
+
+### The skill says how to change a bot's picture and name
+
+- SKILL.md has a short section, "The bot's picture and name": the four
+  lines to run, for this bot and for another agent's (`DC_AGENT=<agent>`).
+  `references/profile.md` says how `DC_AGENT` picks the bot and its root,
+  and that with two bots recorded the command refuses until one is named.
+
+### A slot for a default bot picture
+
+- sessionphone can now ship a default picture for the bot,
+  `src/sessionphone/images/default-avatar.png` (or `.jpg`). None ships yet:
+  the slot is empty, and a test holds it empty.
+- When one ships, the bot sets it at its start, but only when the account
+  has no picture and the user has not run `sessionphone avatar --clear`. It
+  logs one `picture:` line. A picture already there is never replaced.
+- `sessionphone avatar --clear` now leaves a file, `avatar-none`, under the
+  root, so the default is not put back. `sessionphone avatar PATH` removes
+  it.
+- `bot install` prints one `picture:` line saying so when a default ships,
+  and none when nothing ships.
+
+### `make check` runs the bridge tests
+
+- `make check` now ends with `make bridge`, which runs `bin/bridge-check`:
+  the bridge compiles, imports in a bare environment, and every file in
+  `tests/bridge` passes. `make test` still does not collect `tests/bridge`
+  (most of its files are scripts), so before this a red bridge test was
+  seen only by someone who ran `bin/bridge-check` by hand.
+- The list-alert tests follow the bot's start: it asks `message path` for
+  its box before its first send. Their stand-in `message` answers that
+  check, and a new test pins the order.
+
+### The first call says the voice model is downloading, then plays music until it can hear
+
+- While the speech-to-text or text-to-speech models are still missing or
+  downloading (`ears services weights --json`), a call that connects hears
+  a line said by macOS `say`: "Please wait for the voice model to download,
+  about 2.9 GB. This only happens once." The size is left out when it is
+  not known. Then the music file `DC_WAIT_MUSIC` names
+  (`<root>/wait-music.opus` by default, any audio file the bot can decode)
+  plays, looped and turned down. With no file, the line repeats every 20 s
+  with the download's progress, and nothing plays in between.
+- The music stops at once and for good at the first of: the bot's own
+  speech-to-text answers a test clip (asked every 3 s), the greeting or any
+  other line is queued, the call ends, or 20 minutes pass. It is never in
+  the transcript, and a barge-in leaves it alone. The greeting is not
+  delayed. With the models in, or an `ears` that cannot say, a call is as
+  before. New setting `DC_FIRST_CALL_WAIT` (`on`/`off`, default `on`).
+  No audio ships in the package.
+
+### The hearing line says the speech models are downloading, with progress
+
+- When the speech server on `127.0.0.1:8890` gives `bot install` no
+  answer, the `hearing:` line asks `ears services weights --json`
+  (read-only, the filesystem only) where the speech models stand. While
+  they download it reads `downloading 412 MB of 2.9 GB` (or
+  `downloading, 412 MB so far` when the total is not known) and says the
+  first call waits for it, instead of a bare `not confirmed` after a
+  30-second timeout. When they are not downloaded yet it says so, about how
+  large they are, and that the first request fetches them. Under Session
+  Kit it points at `ears services status` to watch the download.
+- The first call waits only for the speech-to-text and text-to-speech
+  models: the voices pack missing alone is no wait. An `ears` without the
+  verb, one that fails, or one that answers in another schema leaves the
+  line as it was. New: `hearing.weights_state()`, the reader any part of
+  sessionphone can use to tell whether a first call will wait.
+
+### Install says whether this session will hear the bot, and names the bot after a seat that lasts
+
+- `sessionphone bot install` now asks sessionmail what reaches the session
+  it runs in (`message subscription list`, read only). With no `DC_AGENT`,
+  the bot is named after that session's seat when a later session can be
+  started as it (`session start ada` names it `ada`). A session id or a
+  `+` address never names it, so a plain `claude` session, or a seat a task
+  tool started (its `CLAUDE_CODE_AGENT` a role such as `worker`), gets the
+  bot the file records, else `claude`. Before, such a seat named the bot
+  after its role, a box nobody hears. `bot status` and `bot uninstall` pick
+  the bot the same way. When sessionmail gives no answer, `CLAUDE_CODE_AGENT`
+  is taken as before.
+- The `hear:` line is measured, never guessed. When this session will not
+  hear Delta messages or calls, the line says so first, names the box they
+  go to, and gives the ways out: `session start <agent>`, `DC_AGENT` or
+  `DC_MAILTO`, or `--hear-here`. It is a warning: the bot is installed and
+  the exit code is 0. It says the session hears the box only when
+  sessionmail says so; the old `this session is <agent>` line, which a task
+  seat got from its role alone, is gone. From a Terminal it gives the
+  advice and how to send Delta text to another box, and so does the bot's
+  `agent box:` line at every start.
+- New: `bot install --hear-here` lets this session hear the bot's box now,
+  by a session subscription (`message subscription add <agent>`). It ends
+  with the session, and install never does it unless asked.
+
+### One bot to a root, and every reader picks the bot as install does
+
+- `sessionphone bot install` refuses (exit 2, writing nothing) while
+  phone.json records another bot on the same root, one Delta Chat account,
+  and names it. Before, a renamed install left the old bot's job running on
+  that account, still mailing its own box, and said nothing. New: `bot
+  install --replace NAME` retires that bot (its launchd job booted out, its
+  plist removed, before the new job starts) and phone.json forgets it once
+  the new job is loaded.
+- `sessionphone bot run`, the `dc-*` tools (`bin/dc-env`) and the bot's
+  settings (`bridge/dc_env.py`) now pick the bot the way install does:
+  `DC_AGENT`, else this session's durable seat, else the one bot phone.json
+  records, else `claude`. Before, they took `CLAUDE_CODE_AGENT`, else
+  `claude`, so a foreground bot or a tool from a plain shell could act as
+  another bot than the one installed. With no name in your shell, `bot run`
+  prints a `bot:` line and each tool says which bot on stderr.
+
+### The skill no longer offers VoiceMode's speech server under Session Kit
+
+- On `hearing: NO` or `not confirmed`, the skill first asks whether this is
+  Session Kit (`command -v sessionkit` prints a path). Under the kit it runs
+  `ears services status` (read-only), reads its `speech` row, and never
+  offers `voicemode service install mlx-audio`: the kit's
+  `ears services install` already loads an mlx-audio server on
+  `127.0.0.1:8890`, and a second mlx-audio job leaves one of the two
+  crash-looping. A first-run model download can read `not confirmed` for a
+  minute or more: wait, then run `bot install` again. Standalone, the
+  VoiceMode offer is unchanged.
+- SKILL.md's `DC_STT_URL` default and the README's "What a voice call
+  needs" name the server on 8890 as the kit's own or VoiceMode's, not
+  VoiceMode's only.
+- The `hearing:` line that `bot install` ends with makes the same split.
+  When `sessionkit` is on the PATH `bot install` ran with, a `NO` at the
+  server on `127.0.0.1:8890` points at `ears services status` (read-only),
+  names `ears services install` for an empty port only, and never names
+  `voicemode service install mlx-audio`. Standalone, the line is unchanged.
+
+### The media pack text splits Session Kit from standalone
+
+- The skill says that under Session Kit the media pack is already installed
+  (the kit asks for `sessionphone[media]`), so `bot install` fetches nothing
+  and the agent never asks about it. Standalone, the pack still comes once
+  at the first `bot install`, and the agent runs the command without asking
+  first.
+- The README's "Other ways to install" no longer says the kit asks for a
+  bare `sessionphone`: the kit asks for `sessionphone[media]` 0.2.1 or
+  later.
+
+### The connect page's QR scans in dark mode and in any window size (PHONE-212)
+
+- `sessionphone qr`'s code is now dark on an explicit white fill, with the
+  full 4-module quiet zone (it was 2, and transparent). In dark mode the
+  page showed black on near-black.
+- The SVG carries a `viewBox` and no fixed size, so the page scales the
+  whole code to its box. Before, a box smaller than the drawing cropped it:
+  the built-in page (what a wheel install prints) cut off two finder
+  patterns, and the skill's page did the same in a phone-width window.
+- Both pages keep a white card behind the code in dark mode, give the
+  link a colour that reads on the dark background, and both say
+  what to do if the phone waits at "Establishing connection, please wait":
+  the bot must be running to answer the scan, so check
+  `sessionphone bot status`, then run `sessionphone link` and scan again.
+- The dev group now includes zxing-cpp and Pillow, so `make test` decodes
+  the generated QR with a real decoder instead of skipping that test.
+  They are for development only: the package's dependencies are unchanged.
+
+### The skill offers the ways to see the QR as choices (PHONE-212)
+
+- Setup's "show them the code" step now offers the ways as choices, in
+  this order: the QR in a window first (the PNG from `invite --png`, or
+  the `qr` page, opened with `open` on macOS or `xdg-open` on Linux), the
+  plain link second, and the terminal QR (`invite --qr`) last. Claude Code
+  will likely fold the terminal QR ("+30 lines (ctrl+o to expand)"), so
+  the person sees no code until Ctrl+O expands it.
+- The skill no longer opens the PNG with `show-me`, which has no image
+  view. It tells the agent never to say "scan the QR code above" unless
+  the code was shown.
+- The skill says what to do if the phone waits at "Establishing
+  connection, please wait": check `sessionphone bot status`, then run
+  `sessionphone link` and scan again.
+- The README's `invite` section says the same about the fold, and gives
+  the PNG's size as about 730 px a side.
+
 ## [0.2.1] - 2026-10-21
 
 ### Signing follows the mail carrier, and the mail drop needs no key (PHONE-203)

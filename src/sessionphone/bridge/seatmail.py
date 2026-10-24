@@ -278,8 +278,9 @@ def carrier_said(environ: Mapping[str, str] | None = None, probe=ASK) -> tuple[s
        no MTA)`, or `MTA <path> (SESSIONMAIL_SENDMAIL)`;
     2. what the sessionmail itself reads with it unset (PROBE, settings.mail_file's
        answer; asked of DC_MESSAGE, else `message` on PATH, when not given):
-       `drop (...)` or `MTA <path> (...)`, from its mail.json `sendmail` or its
-       own default; kind NOT_KNOWN when it could not read that file, and NOWHERE
+       `drop (...)` or `MTA <path> (...)`, from its mail.json `sendmail`, its
+       installed default (mail.template.json) or its own default
+       (settings.mail_from names which); kind NOT_KNOWN when it could not read that file, and NOWHERE
        when the file names no carrier (sessionmail refuses to send, both ways);
     3. with PROBE not given and no answer from it, sessionmail's own resolver
        (settings.mail_carrier, the answer signing() decides by; _said_of);
@@ -310,11 +311,12 @@ def carrier_said(environ: Mapping[str, str] | None = None, probe=ASK) -> tuple[s
         return NOT_KNOWN, (f"not known: sessionmail could not read {mail_json}, and sends "
                            "nothing until it can")
     if not (value == DROP or (isinstance(value, str) and value.startswith("/"))):
-        return NOWHERE, (f"nowhere: {mail_json} `{CARRIER_KEY}` is {json.dumps(value)}, which is "
+        filed_in = (settings.shown(settings.MAIL_TEMPLATE) if source == settings.TEMPLATE_SOURCE
+                    else mail_json)
+        return NOWHERE, (f"nowhere: {filed_in} `{CARRIER_KEY}` is {json.dumps(value)}, which is "
                          f"not a carrier (`{DROP}`, or the absolute path of an MTA), so "
                          "sessionmail refuses to send")
-    where = (f"sessionmail's {mail_json} `{CARRIER_KEY}`" if source in settings.FILE_SOURCES
-             else "sessionmail's default")
+    where = _from(source)
     return BY, (f"{DROP} ({where})" if value == DROP else f"MTA {value} ({where})")
 
 
@@ -335,14 +337,12 @@ WILL_USE = "the carrier this bot's own `message send` will use"
 
 
 def _from(source: object) -> str:
-    """Where sessionmail's resolver found the carrier, in words."""
+    """Where sessionmail's resolver found the carrier, in words: its mail.json
+    only when the key is set there (`host`); its installed template is its
+    default (settings.mail_from). One rule for the seat:, mail: and start lines."""
     if source == "variable":
         return CARRIER_VAR
-    if source in settings.FILE_SOURCES:
-        return f"sessionmail's {settings.shown(settings.MAIL_FILE)} `{CARRIER_KEY}`"
-    if source == "default":
-        return "sessionmail's default"
-    return f"sessionmail's {source}"
+    return settings.mail_from(CARRIER_KEY, source)
 
 
 def signing(environ: Mapping[str, str] | None = None, asked=ASK) -> tuple[str, str]:
@@ -577,11 +577,21 @@ def root_env(env: Mapping[str, str]) -> dict[str, str]:
 
 def on_host(address: str, environ: Mapping[str, str] | None = None) -> bool:
     """Is ADDRESS's domain this host, as sessionmail's drop judges it: its mail
-    host, or a name under it?"""
+    host, or a name under it, and never a reverse-DNS name? The one judgement
+    is dc_env.is_this_host; the domain's trailing dot is stripped first, so
+    `x.arpa.` is still a reverse-DNS name."""
     e = os.environ if environ is None else environ
-    domain = address.rpartition("@")[2].strip().lower().rstrip(".")
-    host = (dc_env.mail_host(e) or "").strip().lower()
-    return bool(host) and (domain == host or domain.startswith(host + "."))
+    domain = address.rpartition("@")[2].strip().rstrip(".")
+    return dc_env.is_this_host(domain, dc_env.mail_host(e) or "")
+
+
+def on_drop(environ: Mapping[str, str] | None = None) -> bool:
+    """Is the carrier this bot's own `message send` will use the mail drop, as
+    its sessionmail resolves it? The drop delivers on this host only. Any other
+    answer (an MTA, refused, unknown) is not the drop."""
+    e = os.environ if environ is None else environ
+    asked = settings.mail_carrier(resolve_message(e), e.get(CARRIER_VAR))
+    return (asked or {}).get("kind") == DROP
 
 
 def box_there(name: str, environ: Mapping[str, str] | None = None) -> bool:
@@ -633,8 +643,7 @@ def guard_cc(cc, environ: Mapping[str, str] | None = None) -> tuple[list[str], l
                 dropped.append((addr, f"sessionmail has no box `{name}` on this host"))
             continue
         if drop is None:
-            asked = settings.mail_carrier(resolve_message(e), e.get(CARRIER_VAR))
-            drop = (asked or {}).get("kind") == DROP
+            drop = on_drop(e)
         if drop:
             dropped.append((addr, "it is not on this host, and the mail drop delivers locally only"))
         else:

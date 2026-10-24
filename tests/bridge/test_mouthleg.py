@@ -13,9 +13,31 @@ from sessionphone.bridge import mouthleg
 import pytest  # noqa: E402,F401 - bin/bridge-check runs a file under pytest only if it imports it
 
 
+class Line:
+    """A line on the fake track, which has one writer: it always owns the track."""
+    def __init__(self, voice):
+        self.voice, self.was_cut = voice, False
+
+    def say(self, pcm, on_queue=None):
+        self.voice.say(pcm)
+        if on_queue is not None:
+            on_queue(0.0, len(pcm) / 48000)
+        return True
+
+    def end(self, on_over=None):
+        if on_over is not None:
+            on_over()
+
+    def cut(self):
+        return self.voice.cut()
+
+
 class Voice:
     def __init__(self):
         self.q, self.cuts = [], 0
+
+    def line(self, who=""):
+        return Line(self)
 
     def say(self, pcm):
         self.q.append(pcm)
@@ -35,7 +57,7 @@ class Echo:
     def __init__(self):
         self.clips, self.cuts = [], 0
 
-    def spoken(self, text, dur, at=None, source="bridge"):
+    def spoken(self, text, dur, at=None, source="bridge", start=None):
         self.clips.append((text, round(dur, 3), source))
 
     def cut(self, at=None):

@@ -11,7 +11,9 @@ install, with a line naming DC_HOST. Nothing here touches launchd or the real ro
 and the log are faked.
 """
 import os
+import pathlib
 import plistlib
+import re
 
 import pytest
 from click.testing import CliRunner
@@ -109,10 +111,31 @@ def test_id_host_and_mail_host_are_one_answer(monkeypatch):
 
 @pytest.mark.parametrize("fqdn", JUNK_FQDN)
 def test_a_dns_name_is_still_judged_where_it_is_used(fqdn):
-    """`sessionphone web --legs` builds its host from getfqdn() itself (fqdn_problem)."""
+    """fqdn_problem, the judge for a host built from getfqdn() itself, still refuses these."""
     assert "DC_HOST" in dc_env.fqdn_problem({}, fqdn)
     assert dc_env.fqdn_problem({"DC_HOST": "mac.example.net"}, fqdn) is None
     assert dc_env.fqdn_problem({}, "mac.example.net") is None
+
+
+BIN = pathlib.Path(__file__).resolve().parent.parent / "bin"
+
+
+def test_bin_has_no_host_rule_of_its_own_so_every_default_host_is_dc_env_s():
+    """AGENTS.md: bin/dc-env mirrors dc_env.py, change both or neither. PHONE-217 changed
+    dc_env's host rule (host_part) and no file in bin/: none derives a host. The one
+    DC_HOST in bin/ pins the channels pre-check (which uses no host), never the job."""
+    rule = re.compile(r"getfqdn|gethostname|\bhostname\b|uname|SESSIONMAIL_HOST|SESSION_MAIL_HOST|\.arpa",
+                      re.IGNORECASE)
+    files = [f for f in sorted(BIN.iterdir()) if f.is_file()]
+    assert any(f.name == "dc-env" for f in files)
+    for f in files:
+        text = f.read_text(errors="replace")
+        assert not rule.findall(text), f"bin/{f.name} derives a host of its own"
+        hosts = [line for line in text.splitlines() if "DC_HOST" in line and not line.lstrip().startswith("#")]
+        if f.name == "dc-env":
+            assert len(hosts) == 1 and 'DC_HOST="${DC_HOST:-localhost}"' in hosts[0] and "precheck" in text
+        else:
+            assert hosts == [], f"bin/{f.name} sets DC_HOST"
 
 
 def test_import_never_crashes_it_records_the_problem():

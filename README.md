@@ -74,11 +74,8 @@ macOS 14 or later, read from `uv.lock`.
   remove the pack from under a bot that runs from it. `uv sync` and
   `make test` keep the whole stack, because the `dev` group carries the
   pack.
-- **sessionkit:** the kit asks for a bare `sessionphone`. Once a
-  sessionphone release on PyPI carries the light core, a kit user's
-  `sessionphone bot install` refuses (exit 2) until the kit asks for
-  `sessionphone[media]`. That change is due in sessionkit, and it should ship with
-  that release.
+- **sessionkit:** the kit asks for `sessionphone[media]` (0.2.1 or later),
+  so a kit install already has the pack, and `bot install` fetches nothing.
 
 ## Usage
 
@@ -98,6 +95,44 @@ nothing, and people see the new face only when the bot's account next
 writes to them. Formats and exit codes:
 `skills/sessionphone/references/profile.md`.
 
+**A default picture.** sessionphone has a slot for a default picture,
+`src/sessionphone/images/default-avatar.png` (or `.jpg`), and none ships in
+it yet. When one ships, the bot sets it at its start, but only when the
+account has no picture and you have not run `sessionphone avatar --clear`.
+A picture you set is never replaced. `--clear` is remembered (a file
+`avatar-none` under the root), so the default does not come back, and
+`sessionphone avatar PATH` forgets it again. `bot install` says so in one
+`picture:` line, and the bot's log says what it did.
+
+### The bot's name
+
+The bot's Delta Chat name follows its agent: a bot for `versa` is named
+`Versa`. Set `DC_NAME` for another name:
+
+```bash
+DC_NAME='Ada Lovelace' sessionphone bot install
+```
+
+The bot sets the name at its start, the one time it holds the account, and
+logs one `name:` line, old -> new. It then writes the saved invite again,
+because the invite carries the name, so `sessionphone invite` and `qr` show
+the new one.
+
+**A name you set is kept.** Unset, `DC_NAME` gives the agent's name, but only
+over a name nobody chose: an empty one, or the name of the agent the bot is or
+of the bot it replaced. So `bot install --replace claude` on a bot that came
+online as `Claude` makes it `Versa`. Any other name, such as one
+`sessionphone setup --name` gave it, is yours: the bot keeps it, and
+`bot install`'s `name:` line says so, with the `DC_NAME=... sessionphone bot
+install` line that changes it. `DC_NAME` always wins.
+
+**What is kept, and where.** `bot install --replace OLD` writes the replaced
+agent's name to a file, `name-replaced`, under the root. The bot reads it at
+its start and removes it once the name is settled. Nothing older is
+remembered. `DC_NAME` is saved in `phone.json` like every `DC_*`.
+`DC_AGENT_NAME` is a different setting: the name the bot says in greetings
+and puts in its mail's From.
+
 ### The invite, as a QR on the terminal: `sessionphone invite`
 
 Someone who has only Delta Chat scans the agent's invite and is connected to
@@ -109,15 +144,19 @@ so it works while the bot runs.
   line, a 4-module quiet zone), a blank line, then the link. No colour
   codes, so it reads the same in a terminal and in a tool result. In Delta
   Chat, the person taps the QR icon ("Scan QR code") and points the camera
-  at the screen.
+  at the screen. It is about 33 lines, so Claude Code will likely fold it
+  ("+30 lines (ctrl+o to expand)") and the person sees no code until Ctrl+O
+  expands it. The skill offers the PNG or the `qr` page first, the link
+  second, and this terminal QR last.
 - **Polarity.** A dark module prints as a space, the terminal's background.
   That is the right way round on a dark-theme terminal. On a light theme the
   QR comes out inverted, so add `--invert` (dark modules as blocks). No
   plain-text print is right on both.
-- `--png FILE` writes the same QR as a PNG (12 px a module, about 700 px a
+- `--png FILE` writes the same QR as a PNG (12 px a module, about 730 px a
   side; overwritten if it exists) and prints its absolute path as the last
-  line, for `show-me`. Its directory must exist. `--qr --png FILE` prints the
-  QR, the blank line, the link, then the path.
+  line, to open in a viewer (`open` on macOS, `xdg-open` on Linux). Its
+  directory must exist. `--qr --png FILE` prints the QR, the blank line,
+  the link, then the path.
 - Exit 0 done; 1 `--invert` without `--qr`, or the PNG could not be written
   (one plain line); 2 not set up, or the root is not 0700. Nothing is written
   before the exit-2 checks.
@@ -221,10 +260,40 @@ and the fence is what keeps it from acting as instructions.
 ### The bot's seat
 
 The bot sends as its own sessionmail seat, never as a Claude session. The
-agent is `claude` unless `DC_AGENT` is set (or Claude Code was started as
-another agent: `CLAUDE_CODE_AGENT`), so the seat is `claude-chat` and Delta
-text goes to `claude@<host>`. `<host>` is sessionmail's own host for this
-machine: `SESSIONMAIL_HOST`, else the first part of the machine's name.
+agent is `claude` unless `DC_AGENT` is set, or the Claude session running
+`sessionphone bot install` was started as another agent, so the seat is
+`claude-chat` and Delta text goes to `claude@<host>`. `<host>` is
+sessionmail's own host for this machine: `SESSIONMAIL_HOST`, else the first
+part of the machine's name.
+
+**Which agent install picks**, when `DC_AGENT` is not set: it asks
+sessionmail what reaches the session it runs in (`message subscription
+list`, which only reads). When that session has a seat a later session can
+be started as (`session start ada` gives the seat `ada`), the bot is
+named after it. A plain `claude` session has only its session id, and a
+seat that a task tool starts has a `+` address (its `CLAUDE_CODE_AGENT` is a
+role, such as `worker`): neither names the bot, because neither is there in
+a new session. Then install takes the one bot it has recorded, else
+`claude`. Only when sessionmail gives no answer does install take
+`CLAUDE_CODE_AGENT` instead. `bot status`, `bot uninstall`, `bot run` and
+every `dc-*` tool pick the bot the same way, and say which they picked when
+your shell names none (`bot:     ada (...)`, or `dc-say: bot ada (...)` on
+stderr).
+
+**One bot to a root.** A root is one Delta Chat account, so two bots on it
+is a broken state: the old one keeps mailing its own box, and its calls and
+messages never reach the new one. When phone.json records another bot on
+the same root (its `SESSIONPHONE_ROOT`, `DC_ROOT` or `DC_ACCOUNTS`), as
+after a rename, install refuses (exit 2), writes nothing, and names it:
+
+```text
+sessionphone: ~/.sessionkit/phone/settings/phone.json records bot claude on the same root as bot ada (~/.sessionphone). ... To replace it: `sessionphone bot install --replace claude` ...
+```
+
+`--replace claude` retires that bot: its launchd job is booted out, its
+plist removed, and phone.json forgets it once the new job is loaded, each
+said in a `replaced bot claude` line. To keep both, give the new bot its own
+root (`SESSIONPHONE_ROOT=DIR sessionphone bot install`).
 
 **Whether it signs follows the carrier this bot's own `message send` will
 use.** [Bot mail signing][bot-mail-signing] has the rule and why.
@@ -240,6 +309,7 @@ use.** [Bot mail signing][bot-mail-signing] has the rule and why.
 - **Mail reaches your Claude only when** the agent's box exists (the bot
   makes it at install and at every start) and your Claude was started as
   the agent (`session start <agent>`, which runs `claude --agent <agent>`).
+  Install's `hear:` line says whether the session that ran it hears the box.
   See [Hearing Delta text in Claude](#hearing-delta-text-in-claude).
 
 To give the bot a key:
@@ -360,28 +430,54 @@ text somewhere else, set `DC_MAILTO`.
 Delta text lands in the agent's box, `claude@<host>`. Mail to that box
 reaches a session only through the pager's doorbell, and the doorbell rings
 only for a session started as that agent. `bot install` (and
-`sessionphone setup`) prints the one step:
+`sessionphone setup`) asks sessionmail what reaches the session it runs in
+(`message subscription list`) and says, on its `hear:` line, whether that
+session will hear the box. It never guesses from a variable's name.
+
+When the session will not hear it, the line says so first, and it is the
+first line `bot install` prints, ahead of `installed:`:
 
 ```text
-hear:      To hear Delta messages, start Claude with: session start <agent> (it runs `claude --agent <agent>`: only a session started as <agent> hears the box; a plain `claude` gets no copy of its mail, and nothing says so)
+hear:      this session will NOT hear Delta messages or calls: they go to box <agent>, and this session hears only its own session box. Ways out: start Claude with `session start <agent>` (only a session started as <agent> hears that box, today and in later sessions); or install again with DC_AGENT=NAME (the agent a session is started as) or DC_MAILTO=ADDR (a box a session hears); or `sessionphone bot install --hear-here`, which lets this session hear box <agent> until this session ends.
 ```
 
-The bot says it again at every start, on the `agent box:` line of
-`bot.log`, after the box it made or found.
+This is a warning, not a refusal: the bot is installed either way, and the
+exit code is 0. When the session does hear the box, the line says
+`this session hears box <agent> (its seat <agent>): Delta messages and calls
+reach it, while it runs`. From a shell that is not a Claude session (a
+Terminal), nothing can be measured, so the line gives the advice:
+
+```text
+hear:      To hear Delta messages, start Claude with: session start <agent> (it runs `claude --agent <agent>`: only a session started as <agent> hears the box; a plain `claude` gets no copy of its mail, and nothing says so). To send Delta text to another box, install again with DC_AGENT=NAME (the agent a session is started as) or DC_MAILTO=ADDR (a box a session hears).
+```
+
+The bot gives the same advice at every start, on the `agent box:` line of
+`bot.log`, after the box it made or found. It cannot know which session
+installed it.
 
 - `session start <agent>` needs an agent file, `~/.session/agents/<agent>.md`.
   The line adds *(no agent file "<agent>" yet: see the README)* when
   `session start --list-agents` does not list it. Session Kit's setup writes
   that file.
-- When the shell running install is already that agent, the line says
-  `this session is <agent>: Delta messages reach it` instead.
+- **`bot install --hear-here`** lets the session running install hear the
+  box now, by a session subscription (`message subscription add <agent>`).
+  It ends with that session: a new session does not hear the box unless it
+  is started with `session start <agent>`, or runs `--hear-here` again.
+  Install never does this unless asked. Its `hear-here:` line, before
+  `hear:`, says what it did, or why not. When it did not take, the session
+  still will not hear the box, so the warning leads and `hear-here:` follows it.
 - Two windows started as `session start <agent>` share one box, and both get
   each Delta message. The second launch needs `--allow-second-holder`;
   without it, it exits 3.
 - A Claude session started any other way (plain `claude`) does not hear
   `<agent>@<host>`: it gets no copy of the mail, and nothing tells it so.
-- When `DC_MAILTO` names a box on another host, install makes no box and
-  prints no `hear:` line: that box is its reader's to make.
+- When sessionmail cannot be asked (an older one without `message
+  subscription list`), the line gives the advice and says that nothing was
+  measured. It never says the session hears the box.
+- When `DC_MAILTO` names a box on another host and the carrier is an MTA,
+  install makes no box and prints no `hear:` line: that box is its reader's
+  to make. On the mail drop, which delivers on this host only, install
+  refuses instead (see the start-up refusals below).
 
 **The carrier is sessionmail's to pick, not sessionphone's.** The bot sends
 by sessionmail's `message send`, and its mail goes by the carrier this bot's
@@ -393,6 +489,14 @@ a key named `carrier` is not read. Whether postfix is installed does not
 decide it: a job with no `sendmail` setting uses the drop even on a Mac
 that has postfix. `bot install` carries `SESSIONMAIL_SENDMAIL` from the shell
 that runs it into the job, so the variable wins there.
+
+The `seat:` and `mail:` lines name where the carrier came from, as
+sessionmail used it: `SESSIONMAIL_SENDMAIL`; ``sessionmail's
+~/.sessionkit/mail/settings/mail.json `sendmail` `` only when that file sets
+the key; else `sessionmail's default`. On a fresh install `mail.json` holds no
+`sendmail` key, and the drop comes from the template sessionmail installs
+beside it, so the lines say ``sessionmail's installed default,
+~/.sessionkit/mail/settings/mail.template.json `sendmail` ``.
 
 `bot install` says what it carried on its `mail:` line, read back from the
 plist it wrote, for example `carried SESSIONMAIL_SENDMAIL=drop; the bot's mail
@@ -422,7 +526,12 @@ and says what to do:
   set, or `DC_SIGNER_PUB` is not a file;
 - no box: the agent's box is not there and `message setup --box <agent>`
   could not make it. The bot checks this at every start, before its first
-  send.
+  send;
+- a box off this host on the mail drop: `DC_MAILTO` names another host, and
+  the drop delivers on this host only, so every mail of the run would be
+  refused. The line names the address and what to do: set `DC_MAILTO` to a
+  box on this host, or use a carrier that reaches it (an MTA in
+  `SESSIONMAIL_SENDMAIL`). On an MTA the bot starts, and the MTA routes it.
 
 `bot install` runs the same check first, so it refuses a job that would
 refuse to start, and loads nothing. `sessionphone bot status` shows the last
@@ -501,7 +610,7 @@ The bot appends one JSON line per tap to `PATH` and mails nothing:
 **Line format v1.** These four keys are frozen, and come first:
 
 ```json
-{"ts": "2030-01-03T12:00:00+0000", "msg_id": 1001, "serial": 7, "payload": {"kind": "set"}, "chat_id": 12, "info": "set ears.listen"}
+{"ts": "2030-06-09T12:00:00+0000", "msg_id": 1001, "serial": 7, "payload": {"kind": "set"}, "chat_id": 12, "info": "set ears.listen"}
 ```
 
 | Key | Type | Meaning |
@@ -695,7 +804,7 @@ the same file, however it is spelled, the bot refuses `DC_XDC_RT_IN`: it says
 so at start, and counts and drops realtime data as if it were unset.
 
 ```json
-{"ts": "2030-01-03T12:00:00+0000", "msg_id": 1001, "seq": 1, "via": "realtime", "payload": {"choice": "left"}, "chat_id": 12}
+{"ts": "2030-06-09T12:00:00+0000", "msg_id": 1001, "seq": 1, "via": "realtime", "payload": {"choice": "left"}, "chat_id": 12}
 ```
 
 | Key | Type | Meaning |
@@ -778,7 +887,7 @@ One entry per line, `#` starts a comment:
 
 ```text
 # NAME    TARGET                    # note
-owner     owner@relay.example        # owner, joined 2030-01-03
+owner     owner@relay.example        # owner, joined 2030-06-09
 family    chat:42                    # the family group
 ```
 
@@ -882,8 +991,11 @@ channels are two lists: an approved caller whose chat is not listed hears the
 call but gets no in-call chat text.
 
 **The public profile gates inbound too.** A bot run `--profile public` reads
-its own list, `<DC_OUTBOX_PUBLIC's parent, else $DC_ROOT/public>/channels.txt`
-(chat ids belong to one account, so each profile has its own). A message,
+its own list, `<root>/public/channels.txt` (`DC_CHANNELS_FILE` overrides; chat
+ids belong to one account, so each profile has its own, and the bot refuses to
+start on the default profile's). Every per-account file of a named profile
+lives in its home, `<root>/<profile>/`: see "Two profiles on one root" in
+`docs/settings.md`. A message,
 contact request, reaction or webxdc tap from a chat that is not on it is
 **rejected**: it is not mailed to the agent or accepted, and one line goes in
 `rejected.jsonl` beside that list (who and why, never what they said; capped
@@ -895,6 +1007,7 @@ own `DC_CHANNELS_FILE` writes `rejected.jsonl` beside *that* file; the
 place. A rejected message is still marked seen, so when the bot's account
 sends read receipts, the stranger may see their message as **read** (the core
 sends none for a contact request it never accepted; not measured live). The
+bot's log line for each rejection names the profile and the list it read. The
 private profile's inbound is unchanged.
 Nothing the stranger sent is written to `bot.log`.
 
@@ -1131,9 +1244,9 @@ only in `bot.log`, as `REFUSED delete ...` or `REFUSED send to chat C: REASON
 
 `dc-log` shows the bot's log as a conversation, both ways (`-f` follows it).
 It reads `DC_LOG`, else `<root>/bot.log`. The root is `DC_ROOT`, else
-`SESSIONPHONE_ROOT`, else the root `bot install` keeps, else
-`~/.sessionphone`: the same contract every `dc-*` tool reads from
-`bin/dc-env`. Its first line names the file it read. If
+`SESSIONPHONE_ROOT`, else the root `bot install` keeps for the bot it
+would pick, else `~/.sessionphone`: the same contract every `dc-*` tool
+reads from `bin/dc-env`. Its first line names the file it read. If
 `DC_LOG` is unset and only the old default `<root>/bot/bot.log` exists, it
 reads that file and says so on stderr.
 
@@ -1401,6 +1514,56 @@ timer, so two quick turns get one holding line. A reply after the window
 still plays. Voicemail never gets the holding line, and neither does a turn
 whose mail failed. The holding line is never mailed.
 
+### The first call: a wait while the speech models download
+
+On a Mac where the speech models are not downloaded yet, the first call
+would be silent for about a minute while the speech server fetches them. So
+when a call connects, the bot asks `ears services weights --json` where the
+speech-to-text and text-to-speech models stand. While either is still
+missing or downloading, the caller hears:
+
+1. **A line**, said by macOS `say`, which needs no model: "Please wait for
+   the voice model to download, about 2.9 GB. This only happens once." The
+   size is what is still to fetch, and is left out when it is not known.
+2. **Then the music file**, `DC_WAIT_MUSIC` (`<root>/wait-music.opus` by
+   default), looped and turned down. It plays only while nothing is being
+   said, so it never plays under speech. It can be any audio file the bot
+   can decode. Without one, the line repeats every 20 s with
+   the download's progress instead ("Still downloading: 1.2 GB of 2.9 GB.").
+   Nothing plays in between.
+
+The music stops at once, and for good, at the first of: the bot's own
+speech-to-text answers a test clip (asked every 3 s), the greeting or any
+other line is spoken, the call ends, or 20 minutes pass. It is not a line:
+it is never in the transcript, and a barge-in leaves it alone. A recording
+of the call has it, because the caller heard it.
+
+The greeting is not delayed by the wait. With the models in, or with an
+`ears` that cannot say where they stand, a call is as before. With no `say`
+(not a Mac), there is no line, and the music plays if there is a file.
+`DC_FIRST_CALL_WAIT=off` turns the wait off. The bot logs each wait, its
+start and its end:
+
+```text
+CALL first-call wait: the models are <state> (about ... to fetch); the line, then the music
+CALL first-call wait: ended (...) after <n> s
+```
+
+`<state>` is `downloading` or `missing`. The end names what stopped it:
+`hearing answers`, `a line`, `the call ended` or `the 20 min cap`.
+
+sessionphone ships no music. To use a file of your own, convert it to
+small mono Opus with its tags and chapters stripped:
+
+```bash
+ffmpeg -i <your file> -map_metadata -1 -map_chapters -1 -ac 1 -ar 48000 \
+  -c:a libopus -b:a 32k ~/.sessionphone/wait-music.opus
+```
+
+Put it in the bot's root, or point `DC_WAIT_MUSIC` at it and run
+`sessionphone bot install` again. The bot decodes it once and reads it again
+when the file changes.
+
 ### A call that never connects
 
 ```text
@@ -1540,6 +1703,21 @@ Two limits, for now:
   signs call mails. They are spoken, announced as unverified. The mouth and
   `dc-say` are not affected.
 
+### One line at a time
+
+A call has one voice, and every line spoken into it takes its turn. A line
+is a mouth line (`mouth say --device call:<id>`, from its start to its end)
+or one whole reply from the bot: a guest's mail, a `dc-say`, the greeting,
+the holding line. The line that arrived first plays to its end. A line that
+arrives while another is playing waits behind it and then plays whole. Lines
+that wait play in the order they arrived. One speaker's sentence is never
+cut into another's.
+
+A barge-in, or the mouth's own cut, stops the line that is playing and drops
+every line waiting behind it, whoever's they are. A reply that is cut says
+no more of its sentences. A mouth that stops before its line ends is a cut.
+Sounds are not lines: they play over whatever is playing, at once.
+
 ## A browser tab as a call: `sessionphone web`
 
 `sessionphone web` serves one page and its WebSocket, so a browser tab
@@ -1611,6 +1789,13 @@ sessionphone web --legs --root ~/web-try --mail-to agent@mac.example   # a scrat
 `--legs` still needs a scratch `--root`, or `--demo` for the DEMO (see
 above): without one it exits 2 before any of this.
 
+- **HOST** is `$DC_HOST`, else the host part the mail drop gives a bare
+  From: this machine's DNS name when it is sessionmail's short host or a
+  name under it (a tailnet name such as `mac.example-tail.ts.net`), else the
+  short host itself, lowercased. The short host is `SESSIONMAIL_HOST`, else
+  the `host` in sessionmail's `mail.json`, else the first part of this
+  machine's name. A reverse-DNS name (`….ip6.arpa`) or an unrelated DNS
+  name is never used.
 - **To** is the seat: `--mail-to ADDR`, else `$DC_MAILTO`, else
   `$DC_AGENT@HOST`. There is no further fallback.
 - **Reply-To** is the call's box, `calls+web-<N>@HOST`. A plain reply is
@@ -1636,7 +1821,12 @@ above): without one it exits 2 before any of this.
   makes its agent's: the mail drop never makes a box, and a turn to a box
   that is not there is refused, so every turn of the call would be lost.
   `--legs` asks `message path` first, and runs `message setup --box` only
-  when there is no box (for `base+tag`, the box `base` counts).
+  when there is no box (for `base+tag`, the box `base` counts). A To off
+  this host has no box here: on an MTA the call starts, and the MTA routes
+  its turns; on the mail drop, which delivers on this host only, `--legs`
+  refuses at start with one line naming the To and what to do (set
+  `--mail-to` to a box on this host, or use a carrier that reaches it), and
+  exits 2 before anything is served.
 - **The start lines** name the To, the From, the Reply-To, whether the
   turns are signed and why (for example `unsigned (carrier drop: ...)`),
   the seat's box (`turns box:`) and the heard log. A heard dir that is not
@@ -1648,9 +1838,10 @@ above): without one it exits 2 before any of this.
     shell that started the server, not the seat.
   - **The To is not a mail address.** `--mail-to alice` would go to a local
     user.
-  - **No `DC_HOST` is set, and this machine's name is not a mail domain.**
-    That case refuses even with `--mail-to`, because the Reply-To is built
-    from it.
+  - **No `DC_HOST` is set, and HOST names no mail host:** there is none,
+    it is `localhost`, or it is a reverse-DNS name (`SESSIONMAIL_HOST` can
+    name one). That case refuses even with `--mail-to`, because the
+    Reply-To is built from it. A short host with no dot is accepted.
   - **No signer when the turns are signed, a key of another seat, or a
     `message` with no `--message-id`**, as for the bot.
   - **No box for the seat that `message setup --box` can make.** The
@@ -1814,12 +2005,24 @@ Every key, with its type and default:
   shell names no bot, which bot and where from), says whether the bot is
   running (with its pid) and where its log is, and exits 0 only when the
   bot is running.
+- **Is a bot running for this root?** `dc-live` asks the bot's own pid file,
+  `<root>/bot.pid` (`DC_PID_FILE`). The bot writes it once it holds the
+  account: its pid, its start time and command line as `ps` gives them, and
+  its root. `dc-live` counts the bot as running only when that pid is alive
+  and `ps` still gives the same start time and command line for it. A dead
+  pid, or one the system has since given to another process, is a stale
+  file: exit 2, and its second stderr line says why. It never searches other
+  processes' command lines, so a `tail -f` of the bot's log, a grep, or
+  another agent's bot is never taken for this one, and the foreground
+  `sessionphone bot run` counts. For a launchd bot, the pid `bot status`
+  reads from launchd and the pid in `bot.pid` are the same process. A bot
+  started before its version wrote `bot.pid` has none: restart it.
 
 ## Development
 
 ```bash
 make          # the targets
-make check    # ruff, shellcheck, pytest
+make check    # ruff, shellcheck, pytest, then the bridge tests (bin/bridge-check)
 make browser  # the web page in headless Chrome (see above)
 make install  # sessionphone on the PATH, editable, with the media pack
 ```
@@ -1871,10 +2074,13 @@ use fakes: no real account, relay, launchd job or speech server.
 **What a voice call needs.** A voice call is sessionphone plus a
 speech-to-text (STT) server at `DC_STT_URL`. The bot posts each chunk of the
 caller's speech, and each voice note, to that OpenAI-compatible
-`/v1/audio/transcriptions` endpoint. The default is VoiceMode's mlx-audio,
+`/v1/audio/transcriptions` endpoint. The default is an mlx-audio server,
 `mlx-audio+http://127.0.0.1:8890/v1/audio/transcriptions`, and the bot asks
 it for `mlx-community/parakeet-tdt-0.6b-v3` (`bridge/dc_env.py`,
-`bridge/stt.py`). sessionphone does not install that server. The bot speaks
+`bridge/stt.py`). sessionphone does not install that server. Under Session
+Kit it is the kit's own speech server, which `ears services install` loads:
+do not install VoiceMode's as well, since a second mlx-audio job leaves one
+of the two crash-looping. Standalone, VoiceMode's is the one offered. The bot speaks
 through Kokoro on the same mlx-audio server, in the voice `DC_VOICE` names
 (`af_sky` by default). When that server does not answer, it speaks with
 macOS `say` instead and logs that it did (`DC_TTS=auto`, the default;

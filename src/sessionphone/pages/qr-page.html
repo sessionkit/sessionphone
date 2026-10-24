@@ -7,13 +7,13 @@
 <style>
   body { font: 18px/1.5 -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1.5rem; color: #1a1a1a; background: #fff; }
   h1 { font-size: 1.6rem; margin-bottom: .25rem; }
-  .qr { display: block; width: min(80vw, 22rem); height: auto; margin: 1.5rem auto; }
-  .qr svg { width: 100%; height: auto; }
+  .qr { display: block; width: min(80vw, 22rem); height: auto; margin: 1.5rem auto; background: #fff; }
+  .qr svg { display: block; width: 100%; height: auto; }
   ol { padding-left: 1.4rem; }
   li { margin: .5rem 0; }
   code { font-size: .9em; background: #f3f3f3; padding: .1em .35em; border-radius: 4px; }
   .link { word-break: break-all; font-size: .8rem; color: #555; margin-top: 2rem; }
-  @media (prefers-color-scheme: dark) { body { color: #eee; background: #111; } code { background: #222; } .link { color: #999; } }
+  @media (prefers-color-scheme: dark) { body { color: #eee; background: #111; } code { background: #222; } .link { color: #999; } a { color: #8ab4f8; } }
 </style>
 </head>
 <body>
@@ -26,6 +26,10 @@
   <li>Tap the <strong>QR icon</strong> (top right) and point it at this page.</li>
   <li>Wait a moment: {{AGENT_NAME}} says when you are linked, then it can ring you.</li>
 </ol>
+<p class="hint">The scan is a handshake: the bot must be running to answer it.
+If your phone stays at <strong>"Establishing connection, please wait"</strong>, check
+<code>sessionphone bot status</code> on the computer, then run
+<code>sessionphone link</code> and scan again.</p>
 <p class="link">Or open this link on the phone: <a href="{{INVITE}}">{{INVITE}}</a></p>
 </body>
 </html>

@@ -11,20 +11,22 @@ What it does:
          with the chat id in the subject so a reply knows where to go.
   taps - a tap in a webxdc app is mailed the same way, or, with DC_XDC_IN
          set, appended to that JSON-lines file and not mailed (see XDC_IN).
-  out  - it watches $DC_ROOT/outbox/ for *.json files of the form
+  out  - it watches its outbox (<home>/outbox/: the root, or <root>/<profile>/
+         for a named profile) for *.json files of the form
          {"chat_id": N, "text": "..."} and sends each one, then removes it.
          That is the only way out: the accounts dir is locked by whichever
          process holds it, so nothing else may open the account.
 """
 # subprocess: no call here (every mail goes by seatmail's `message send`), but the test
 # rigs stub bot.subprocess.run, which is the shared module's run: keep the name.
-import json, os, pathlib, shlex, subprocess, sys, threading, time, traceback, typing  # noqa: F401
+import atexit, json, os, pathlib, shlex, subprocess, sys, threading, time, traceback, typing  # noqa: F401
 from deltachat_rpc_client import Rpc, DeltaChat, EventType
 from deltachat_rpc_client.const import ViewType   # Voice for a voice-message file job
 # The agent may be NAMED IN ARGV - the launchd job passes it:
 #   python -m sessionphone.bridge.bot AGENT
-# so `pgrep -f` (dc-live's liveness check) can tell two bots on one machine
-# apart. DC_AGENT in the environment still wins; this only fills it in.
+# so `ps` tells two bots on one machine apart. dc-live never reads argv: it
+# asks the bot's own bot.pid (bridge/pidfile.py). DC_AGENT in the environment
+# still wins; this only fills it in.
 # It runs BEFORE every sessionphone import: dc_env freezes AGENT, ADDR and
 # MAILTO at import, and `account` imports dc_env, so a fill below it would
 # never reach dc_env and an argv-only bot would mail as `claude`.
@@ -44,11 +46,14 @@ from sessionphone.procname import named_python   # runs as libexec/session-phone
 from sessionphone import channels       # where the bot may send
 from sessionphone import seat           # the agent's box, made before the first send
 from sessionphone import jobs           # the job keys this bot reads, stamped for the tools
+from sessionphone import avatar         # the default picture, set at start when the account has none
+from sessionphone import displayname    # the name follows the agent, set at start
 from sessionphone import voicemsg       # may a file go out as a voice message
 from sessionphone import imgtext        # the text on a posted image, fenced UNTRUSTED
 from sessionphone import media          # is the media pack here; calls refuse plainly without it
 from sessionphone.bridge import ack     # every job's yes or no; light, unlike calls
 from sessionphone.bridge import listalert   # a list that refuses every send mails the owner
+from sessionphone.bridge import pidfile     # bot.pid: how dc-live knows this bot runs
 from sessionphone.bridge import retract     # dc-delete: delete for everyone
 from sessionphone.bridge import seatmail   # agent-bound mail, signed by the bot's own seat
 from sessionphone.bridge import spool      # a mail that fails is kept and retried, not lost
@@ -56,9 +61,11 @@ from sessionphone.bridge import stt     # voice note -> text; names its model
 
 HOME = pathlib.Path.home()
 from sessionphone.bridge import dc_env                  # >>> identity: who this bridge is
-# One file can run two profiles, each under its own launchd job with these
-# set: its own accounts dir (the lock), its own outbox (chat ids are per
-# account: chat 12 here is not chat 12 there) and its own log and seen-file.
+# One file can run two profiles, each under its own launchd job. A named
+# profile (DC_PROFILE) keeps every per-account file in its own home,
+# <root>/<profile>/ (dc_env.home): its accounts dir (the lock), its outbox
+# (chat ids are per account: chat 12 here is not chat 12 there), its list,
+# callers, log and seen-file. The default profile's home is the root itself.
 ACCOUNTS = dc_env.path("ACCOUNTS", "accounts")
 XDC_SEEN: dict = {}   # webxdc msg id -> highest status-update serial mailed
 XDC_SENT: dict = {}   # webxdc msg id -> payloads WE pushed, awaiting their echo
@@ -71,7 +78,7 @@ XDC_RT_ADVERTISED: dict = {}   # webxdc msg id -> when this process last adverti
 #       is mailed. The line keeps the shape of the bridge this was ported from
 #       (its bot.py:236-250), because readers already parse it, e.g. a
 #       settings app's apply.py and a desk's answer.py:
-#         {"ts": "2030-01-03T12:00:00+0000", "msg_id": 1001, "serial": 7,
+#         {"ts": "2030-06-09T12:00:00+0000", "msg_id": 1001, "serial": 7,
 #          "payload": {...the app's payload, untouched...}}
 #       Those readers call payload.get(...), so a payload that is not a JSON
 #       object would break them: filter with DC_XDC_MATCH to keep them safe.
@@ -421,8 +428,9 @@ def xdc_is_echo(mid: int, payload) -> bool:
 OUTBOX = dc_env.path("OUTBOX", "outbox")
 LOG = dc_env.path("LOG", "bot.log")
 SEEN = dc_env.path("SEEN", "bridged-ids.txt")
+PID_FILE = dc_env.PID_FILE   # bot.pid: dc-live's answer to "is the bot running?"
 INVITE = dc_env.env("INVITE")          # write the live invite link here
-PROFILE = dc_env.env("PROFILE", "")    # "" = the bot's own account
+PROFILE = dc_env.PROFILE    # "" = the default profile, whose home is the root
 # A public relay means STRANGERS can write. A contact request is NOT accepted
 # by default: it is mailed in as a flagged notice, never answered, and waits
 # for the user's word. The person who joins by the bot's invite link is
@@ -479,6 +487,107 @@ def check_root():
     if mode & 0o077:
         return f"{root} is mode {mode:04o}; it holds the account keys and must be 0700 - `chmod 700 {root}`"
     return None
+
+
+# >>> profile-home: one bot per home; a profile never reads the default's files;
+# an old backlog is never sent on a restart without a person's word.
+OUTBOX_STALE_S = dc_env.number("OUTBOX_STALE_S", 3600.0)
+LOCK_NAME = ".bot.lock"
+_HOME_LOCK = None   # the lock file's fd, held open (and so locked) for the life of the process
+_HOME_LOCKED = None  # the home it locks: this process may start again on it (a test's second start)
+
+
+def _same_file(a, b) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def check_profile_files():
+    """A NAMED profile whose allow-list or callers file is the default
+    profile's (<root>/channels.txt, <root>/callers.txt), say through a
+    DC_CHANNELS_FILE that points there, would gate one account on the other's
+    chat ids. -> None, or the reason it refuses."""
+    if not PROFILE:
+        return None
+    for what, name, rel, var in (("allow-list", "CHANNELS_FILE", "channels.txt", "DC_CHANNELS_FILE"),
+                                 ("callers file", "CALLERS_FILE", "callers.txt", "DC_CALLERS_FILE")):
+        mine, theirs = dc_env.path(name, rel), dc_env.ROOT / rel
+        if _same_file(mine, theirs):
+            return (f"profile {PROFILE}'s {what} is {mine}, the default profile's own. Chat ids are "
+                    f"per account, so an entry for one account would open a chat on the other. "
+                    f"Unset {var} (this profile then reads {dc_env.home_dir() / rel}) or point it at "
+                    f"a file of this profile's own.")
+    return None
+
+
+def take_home_lock(home=None):
+    """Lock <home>/.bot.lock for the life of this process: two live bots on one
+    home would share one account's list, callers and outbox. -> None, or the
+    reason it refuses, naming the holder's pid. The lock is the kernel's
+    (flock): a bot that dies leaves no stale lock behind. This process
+    already holding this home's lock is no second bot."""
+    import fcntl
+    global _HOME_LOCK, _HOME_LOCKED
+    home = pathlib.Path(dc_env.home_dir() if home is None else home)
+    if _HOME_LOCK is not None and _HOME_LOCKED == home:
+        return None
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = home / LOCK_NAME
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = os.pread(fd, 32, 0).decode("ascii", "replace").strip() or "unknown"
+        finally:
+            os.close(fd)
+        return (f"another bot (pid {holder}) already runs on {home}: it holds {lock}. Two bots on one "
+                f"home share one account's list, callers and outbox. Stop that one first "
+                f"(`sessionphone bot status` names its job), or give this bot a home of its own: "
+                f"DC_PROFILE=NAME, or another DC_ROOT.")
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+    if _HOME_LOCK is not None:       # another home locked earlier in this process: let it go
+        os.close(_HOME_LOCK)
+    _HOME_LOCK, _HOME_LOCKED = fd, home
+    return None
+
+
+def _age(seconds: float) -> str:
+    s = int(seconds)
+    if s >= 86400:
+        return f"{s // 86400}d {s % 86400 // 3600}h"
+    if s >= 3600:
+        return f"{s // 3600}h {s % 3600 // 60}m"
+    return f"{s // 60}m {s % 60}s"
+
+
+def check_stale_outbox(outbox=None, bound=None, now=None):
+    """Jobs older than DC_OUTBOX_STALE_S (3600 s) in the outbox at start were
+    queued while no bot read it: a restart would send them all, late, and
+    perhaps never meant for this account. Fail closed: a person decides.
+    -> None, or the one line it refuses with: the count, the oldest's age,
+    the path, and how to drop or keep them."""
+    outbox = pathlib.Path(OUTBOX if outbox is None else outbox)
+    bound = OUTBOX_STALE_S if bound is None else bound
+    now = time.time() if now is None else now
+    ages = []
+    for f in outbox.glob("*.json"):
+        if f.name.startswith("."):
+            continue
+        try:
+            ages.append(now - f.stat().st_mtime)
+        except OSError:       # taken or removed meanwhile: not a backlog
+            continue
+    stale = [a for a in ages if a > bound]
+    if not stale:
+        return None
+    q = shlex.quote(str(outbox))
+    return (f"{len(stale)} job{'s' if len(stale) != 1 else ''} in {outbox} {'are' if len(stale) != 1 else 'is'} "
+            f"older than {bound:g}s (DC_OUTBOX_STALE_S), the oldest {_age(max(stale))}: queued while no bot "
+            f"read this outbox, and a start would send them all, late. A person decides: to drop them, "
+            f"`rm {q}/*.json`; to send them, `touch {q}/*.json` (or raise DC_OUTBOX_STALE_S), then start "
+            f"the bot again.")
+# <<< profile-home
 
 
 def check_stt():
@@ -788,7 +897,8 @@ def reject_inbound(list_path, chat_id, kind, address, name, reason):
     loudly; the event is still not passed on."""
     rec = channels.rejection(PROFILE, chat_id, kind, address, name, reason)
     where = channels.rejected_path(list_path)
-    log(f"REJECTED inbound {kind} from chat {chat_id} <{rec['name'] or '?'} {rec['address'] or '?'}>: "
+    log(f"REJECTED inbound {kind} from chat {chat_id} (profile {PROFILE}, list {list_path}) "
+        f"<{rec['name'] or '?'} {rec['address'] or '?'}>: "
         f"{rec['reason']}; not passed to the agent")
     try:
         channels.record_rejected(where, rec, cap=REJECTED_CAP)
@@ -1533,6 +1643,19 @@ def main():
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {why}\n")
         sys.exit(2)
     # <<< junk-host
+    # >>> profile-home: the default profile's files, a second bot on this
+    # home, or an old backlog: refuse, naming the path and the fix
+    why = check_profile_files() or take_home_lock() or check_stale_outbox()
+    if why:
+        why = f"REFUSED to start: {why}"
+        print(f"sessionphone bot: {why}", file=sys.stderr)
+        try:
+            with LOG.open("a", encoding="utf-8") as fh:
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {why}\n")
+        except OSError:
+            pass        # stderr has it: launchd keeps that too
+        sys.exit(2)
+    # <<< profile-home
     # the box BEFORE the first send: the mail drop never makes one, and a send
     # to a box that is not there is refused (rc=3), every mail of the run
     try:
@@ -1569,12 +1692,34 @@ def main():
                   file=sys.stderr)
             sys.exit(2)
         account = found[0]
+        # >>> bot-pid: this process holds the account now (a second bot is
+        # refused by its lock before here), so it says so in its root, and
+        # takes it back at a clean exit. A failure is one line; the bot runs on.
+        if pidfile.write(PID_FILE, dc_env.ROOT, log):
+            atexit.register(pidfile.clear, PID_FILE, os.getpid())
+        # <<< bot-pid
         account.start_io()
         # the address as setup reads it: the first transport, else the legacy
         # "addr" key, which core 2.62 sets only through the deprecated
         # configure(), never through setup's init_transports (else the log
-        # read "online as None"). The name is the displayname `setup --name` gave it.
+        # read "online as None"). The name is the displayname, settled just below.
         addr = address(account) or "(no address)"
+        # the shipped default picture, when one ships and the account has none
+        # (and `sessionphone avatar --clear` was not run): only the holder can read it
+        try:
+            said = avatar.at_start(account, dc_env.home_dir())   # this profile's home: its own marker
+        except Exception as e:      # a picture never stops the bot
+            said = f"picture: default not set: {e}"
+        if said:
+            log(said)
+        # the name follows the agent (DC_NAME, else the agent's, title-cased) unless
+        # it was set by hand; the saved invite carries it, so it is written again
+        try:
+            said = displayname.at_start(account, dc_env.home_dir(), dc_env.AGENT, dc_env.NAME)   # its own invite
+        except Exception as e:      # a name never stops the bot
+            said = f"name: not changed: {e}"
+        if said:
+            log(said)
         display = account.get_config("displayname")
         log(f"online as {f'{display} <{addr}>' if display else addr} - listening"
             + (f" (profile {PROFILE}, requests {'accepted' if ACCEPT_REQUESTS else 'HELD'}, "

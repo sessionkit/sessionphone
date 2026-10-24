@@ -74,6 +74,13 @@ if a[:2] == ["setup", "--box"]:
     out("setup")
 if a[:1] == ["path"]:
     out("path")
+if a[:2] == ["subscription", "list"]:
+    # after a `subscription add` this session hears the box: sub_list_after, when given
+    out("sub_list_after" if (d / "subscribed").exists() and "sub_list_after" in ans else "sub_list")
+if a[:2] == ["subscription", "add"]:
+    if ans["sub_add"][0] == 0:
+        (d / "subscribed").write_text(" ".join(a))
+    out("sub_add")
 if a[:1] == ["send"]:
     sys.stdin.read()
     pub, sock = os.environ.get("CLAUDE_SESSION_PUB", ""), os.environ.get("CLAUDE_SESSION_AGENT_SOCK", "")
@@ -112,6 +119,10 @@ class Fake:
             "setup": [4, "box: claude DONE\nnotmuch hook BLOCKED\n", ""],
             "init": [0, "seat-init: claude-chat minted, and NOT blessed\n", ""],
             "path": [0, f"{root}/mail/agents/claude\n", ""],
+            # a Terminal: no session, no seat (conftest stubs the ask unless a test restores it)
+            "sub_list": [2, "", ("message subscription list: no session id and no seat in the "
+                                 "environment (looked for CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID)\n")],
+            "sub_add": [0, "row: claude -> 11111111-2222-3333-4444-555555555555\n", ""],
         }
         self._write()
 
@@ -719,7 +730,7 @@ def test_t13_setup_makes_the_box_too(rig, monkeypatch):
     assert r.exit_code == 0, r.output
     assert ["setup", "--box", "claude"] in rig.argvs()
     assert "box:     Delta text goes to claude@stranger, box " in r.output
-    assert f"hear:    {HEAR_CLAUDE}" in r.output
+    assert f"hear:    {HEAR_CLAUDE}{UNASKED}" in r.output
     rig.answer("path", 2, "", "no such box\n")
     r = CliRunner().invoke(cli, ["setup", "--name", "Claude"])
     assert r.exit_code == 2 and "no box `claude` for Delta text" in r.output
@@ -731,20 +742,28 @@ def test_t13_setup_makes_the_box_too(rig, monkeypatch):
 # a session started as the agent (`claude --agent NAME`): the words say so.
 HEAR_CLAUDE = ("To hear Delta messages, start Claude with: session start claude "
                "(it runs `claude --agent claude`: only a session started as claude hears the box; "
-               "a plain `claude` gets no copy of its mail, and nothing says so)")
+               "a plain `claude` gets no copy of its mail, and nothing says so). To send Delta "
+               "text to another box, install again with DC_AGENT=NAME (the agent a session is "
+               "started as) or DC_MAILTO=ADDR (a box a session hears).")
+# conftest's sessionmail gives no answer, so the hear line says nothing was measured
+UNASKED = (" Whether this session hears it was not measured: `message subscription list` "
+           "gave no answer (not asked in the tests).")
+TERMINAL = seat.Reach(answered=True)       # no session, no seat: a Terminal
 
 
 def test_t14_the_hear_line_is_exact(rig, monkeypatch):
     monkeypatch.setattr(seat, "_list_agents", lambda shell: {"claude", "worker"})
-    assert seat.hear_line("claude", {}) == HEAR_CLAUDE
-    assert seat.hear_line("claude", {"CLAUDE_CODE_AGENT": "worker"}) == HEAR_CLAUDE
-    assert seat.hear_line("claude", {"CLAUDE_CODE_AGENT": "Claude"}) == \
-        "this session is claude: Delta messages reach it"
+    assert seat.hear_line("claude", {}, TERMINAL) == HEAR_CLAUDE
+    assert seat.hear_line("claude", {"CLAUDE_CODE_AGENT": "worker"}, TERMINAL) == HEAR_CLAUDE
+    # CLAUDE_CODE_AGENT is never taken as proof: only sessionmail's answer is
+    unasked = seat.Reach(answered=False, said="not asked in the tests")
+    assert seat.hear_line("claude", {"CLAUDE_CODE_AGENT": "Claude"}, unasked) == HEAR_CLAUDE + UNASKED
 
 
 def test_t14_no_agent_file_appends_the_precondition(monkeypatch):
     monkeypatch.setattr(seat, "_list_agents", lambda shell: {"worker"})
-    assert seat.hear_line("claude", {}) == f'{HEAR_CLAUDE} (no agent file "claude" yet: see the README)'
+    assert seat.hear_line("claude", {}, TERMINAL) == \
+        f'{HEAR_CLAUDE} (no agent file "claude" yet: see the README)'
     monkeypatch.setattr(seat, "_list_agents", lambda shell: None)      # no `session` at all
     assert seat.hear_line("claude", {}).endswith('(no agent file "claude" yet: see the README)')
 
@@ -752,7 +771,7 @@ def test_t14_no_agent_file_appends_the_precondition(monkeypatch):
 def test_t14_install_prints_the_hear_line_after_mail(rig, monkeypatch):
     monkeypatch.setattr(seat, "_list_agents", lambda shell: {"claude"})
     lines = _install().output.splitlines()
-    hear = lines.index(f"hear:      {HEAR_CLAUDE}")
+    hear = lines.index(f"hear:      {HEAR_CLAUDE}{UNASKED}")
     assert lines.index(next(ln for ln in lines if ln.startswith("mail:"))) < hear
 
 

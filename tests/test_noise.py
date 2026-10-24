@@ -1,6 +1,6 @@
 """PHONE-158: the one rule both call legs mail by, `no_real_word(text)`.
 
-Measured on call:78561 (Thu 2030-06-13): ".", "Music.", "Um", "Uh." were
+Measured on call:78561 (Sun 2030-06-09): ".", "Music.", "Um", "Uh." were
 each mailed and each woke the seat. A turn mails only if it has at least one word.
 A one-word ANSWER is a real word and still mails.
 """

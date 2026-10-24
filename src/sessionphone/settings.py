@@ -31,10 +31,18 @@ shell sets is still carried into the job for that run. mail_file() asks the
 installed sessionmail whether it reads ``mail.json``, so install can say,
 for each one, whether it is kept and how to keep it.
 
-Install is not the only reader. ``bot status``, ``bot uninstall`` and
-paths.root() take the bot and the root the same way (bot_name, kept): this
-shell, then the file, then the default. A reader refuses nothing a file
-locks: only install, which writes, enforces a lock.
+Install is not the only reader. ``bot status``, ``bot uninstall``, ``bot
+run``, paths.root(), bridge/dc_env.py and bin/dc-env take the bot and the
+root the same way (bot_name, kept): this shell, then the file, then the
+default. Each asks sessionmail for this session's seat, as install does
+(shell_name's ASK), once per process; paths.root() asks only when the file
+records a bot, since with none the name changes nothing it reads. A reader
+refuses nothing a file locks: only install, which writes, enforces a lock.
+
+One root is one Delta Chat account. Install refuses a second bot recorded
+on the same root (rivals, Rival), naming it, unless it is told to replace
+it (``--replace NAME``): then the old bot's job is retired and phone.json
+forgets it.
 """
 from __future__ import annotations
 
@@ -45,7 +53,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from sessionphone import paths
+from sessionphone import paths, reach
 
 TOOL = "phone"
 FILE = paths.kit_settings(TOOL, f"{TOOL}.json")
@@ -64,6 +72,9 @@ MUST_EXIST = ("DC_SIGNER_SOCK", "DC_SIGNER_PUB")
 # sessionmail's mail-route variables and the mail.json key that holds each.
 # SESSIONMAIL_HOME has no key: it is read from the environment only.
 MAIL_FILE = paths.kit_settings("mail", "mail.json")
+# sessionmail's INSTALLED template, the layer under mail.json (source "template"):
+# sessionmail's default, written at its install, never the user's own file.
+MAIL_TEMPLATE = paths.kit_settings("mail", "mail.template.json")
 MAIL_KEYS = {"SESSIONMAIL_SENDMAIL": "sendmail", "SESSIONMAIL_ROOT": "root",
              "SESSIONMAIL_HOST": "host", "SESSIONMAIL_RELAY_DOMAIN": "postfix.relay_domain"}
 MAIL_HOME = "SESSIONMAIL_HOME"
@@ -106,6 +117,7 @@ print(json.dumps({"kind": c.kind, "path": c.path, "source": c.source, "why": c.w
 """
 CARRIER_KINDS = ("drop", "mta", "refused")
 FILE_SOURCES = ("template", "host")
+TEMPLATE_SOURCE, HOST_SOURCE = FILE_SOURCES
 # sessionmail could not read its own file: it names no value, and refuses to pick a carrier.
 UNREADABLE = "unreadable"
 
@@ -115,6 +127,12 @@ class Bad(Exception):
     it: unreadable, not the shape above, a locked key changed, a saved signer
     path gone, two bots and no name. Exit code 2, naming the file; nothing
     is written."""
+
+
+class Rival(Bad):
+    """Another bot phone.json records keeps the same root (one Delta Chat
+    account), and this install was not told to replace it. Exit code 2,
+    naming it and the ways past it; nothing is written."""
 
 
 class NotSaved(RuntimeError):
@@ -238,6 +256,7 @@ class Resolved:
     saved: bool | None = None       # phone.json written (True), unchanged (False), not yet (None)
     keyed: dict[str, str] = field(default_factory=dict)    # the signer `--registry` gave: saved
     not_saved: bool = False         # the write was tried and failed (NotSaved)
+    replace: dict[str, str] = field(default_factory=dict)  # bot -> its root: retired, then forgotten
 
     @property
     def root(self) -> pathlib.Path:
@@ -245,25 +264,52 @@ class Resolved:
 
 
 NAME_VARS = ("DC_AGENT", "CLAUDE_CODE_AGENT")
+SEAT_FROM = "this session's seat (`message subscription list`)"
 
 
-def shell_name(shell: Mapping[str, str]) -> tuple[str, str] | None:
-    """The bot this shell names (DC_AGENT, then CLAUDE_CODE_AGENT), with
-    where it came from; None when it names none."""
-    for var in NAME_VARS:
-        raw = (shell.get(var) or "").strip().lower()
-        if raw:
-            return raw, f"{var} in this shell"
+def named_by_shell(came: str) -> bool:
+    """Did the shell's own variables (DC_AGENT, CLAUDE_CODE_AGENT) name the
+    bot, by bot_name's CAME? Then it is what was asked for; else (the seat,
+    the file, the default) a reader says which it picked."""
+    return came.endswith(" in this shell")
+
+
+def task_seat(shell: Mapping[str, str]) -> bool:
+    """Is this shell a task seat, whose EMAIL is a plus address
+    (`project+task.role...@host`)? Its CLAUDE_CODE_AGENT is then a role
+    (worker, foreman), not a box anyone hears."""
+    return "+" in (shell.get("EMAIL") or "").partition("@")[0]
+
+
+def shell_name(shell: Mapping[str, str], ask: bool = False) -> tuple[str, str] | None:
+    """The bot this shell names, with where it came from; None when it names
+    none. DC_AGENT first. With ASK (install, `bot status`, `bot uninstall`),
+    sessionmail is then asked what reaches this session (reach.asked): its
+    seat names the bot when it is DURABLE, one a later session can be
+    started as (`session start NAME`); a plus address or a session id names
+    none. Else, and when sessionmail gives no answer, CLAUDE_CODE_AGENT,
+    unless this is a task seat (task_seat: it holds a role, not a box)."""
+    raw = (shell.get("DC_AGENT") or "").strip().lower()
+    if raw:
+        return raw, "DC_AGENT in this shell"
+    if ask:
+        r = reach.asked(shell)
+        if r.answered:
+            return (r.durable, SEAT_FROM) if r.durable else None
+    raw = (shell.get("CLAUDE_CODE_AGENT") or "").strip().lower()
+    if raw and not task_seat(shell):
+        return raw, "CLAUDE_CODE_AGENT in this shell"
     return None
 
 
 def pick_name(shell: Mapping[str, str], recorded: list[str],
-              verb: str | None = INSTALL_VERB) -> tuple[str, str]:
-    """Which bot: DC_AGENT, then CLAUDE_CODE_AGENT (this shell), then the one
-    bot the file records, then "claude". Two or more recorded and no name
+              verb: str | None = INSTALL_VERB, ask: bool = False) -> tuple[str, str]:
+    """Which bot: DC_AGENT, then this session's durable seat (shell_name),
+    then the one bot the file records, then "claude". Two or more recorded and no name
     from this shell is refused: guessing would act on the wrong bot. The
-    refusal names VERB (`sessionphone VERB`) as the run to repeat."""
-    named = shell_name(shell)
+    refusal names VERB (`sessionphone VERB`) as the run to repeat. ASK:
+    shell_name asks sessionmail for this session's seat."""
+    named = shell_name(shell, ask)
     if named:
         return named
     if len(recorded) == 1:
@@ -277,13 +323,14 @@ def pick_name(shell: Mapping[str, str], recorded: list[str],
 
 
 def bot_name(shell: Mapping[str, str] | None = None,
-             verb: str | None = INSTALL_VERB) -> tuple[str, str]:
+             verb: str | None = INSTALL_VERB, ask: bool = False) -> tuple[str, str]:
     """Which bot a reader acts on, as install picks it (pick_name), with
     where the name came from. A name this shell gives is taken before any
     file is read, so a broken phone.json never stops `DC_AGENT=NAME ...`.
-    Raises Bad for a file that cannot be used, or two bots and no name."""
+    Raises Bad for a file that cannot be used, or two bots and no name.
+    ASK, as shell_name: `bot status` and `bot uninstall` ask, as install does."""
     shell = os.environ if shell is None else shell
-    return shell_name(shell) or pick_name(shell, names(layers(verb)), verb)
+    return shell_name(shell, ask) or pick_name(shell, names(layers(verb)), verb, ask)
 
 
 def merged(found: list[tuple[pathlib.Path, dict]], name: str
@@ -309,8 +356,8 @@ def merged(found: list[tuple[pathlib.Path, dict]], name: str
 
 def kept(key: str, shell: Mapping[str, str] | None = None,
          verb: str | None = None) -> tuple[str | None, pathlib.Path | None]:
-    """What the file keeps for KEY, for the bot this shell names, else the
-    one bot the file records (bot_name): -> (value, the file that set it),
+    """What the file keeps for KEY, for the bot install would pick
+    (bot_name, asking sessionmail as install does): -> (value, the file that set it),
     or (None, None) when no file keeps it. The FILE step of a reader's
     order; the reader takes this shell's value first. Writes nothing and
     refuses no lock (install alone enforces one). Raises Bad as bot_name."""
@@ -318,10 +365,83 @@ def kept(key: str, shell: Mapping[str, str] | None = None,
     if not savable(key):
         return None, None
     found = layers(verb)
-    name, _from = shell_name(shell) or pick_name(shell, names(found), verb)
+    recorded = names(found)
+    if not recorded:            # no bot recorded: no name finds a value, so ask nothing
+        return None, None
+    name, _from = pick_name(shell, recorded, verb, ask=True)
     values, origin, _locked = merged(found, name)
     v = values.get(key)
     return (v, origin[key]) if v else (None, None)
+
+
+def place(values: Mapping[str, str]) -> tuple[str, str]:
+    """(the home, the account folder) of a bot whose job carries VALUES, as
+    dc_env reads them there: DC_ROOT, else SESSIONPHONE_ROOT, else the
+    default, plus /<DC_PROFILE> when a profile is named (dc_env.home);
+    DC_ACCOUNTS, else <home>/accounts. Two profiles on one root are two
+    homes, so two accounts. Real paths: two spellings of one folder are one
+    folder."""
+    root = os.path.expanduser(values.get("DC_ROOT") or values.get(ROOT_KEY) or paths.DEFAULT_ROOT)
+    profile = (values.get("DC_PROFILE") or "").strip()
+    home = os.path.join(root, profile) if profile else root
+    accounts = values.get("DC_ACCOUNTS") or os.path.join(home, "accounts")
+    return (os.path.realpath(home),
+            os.path.realpath(os.path.expanduser(accounts)))
+
+
+def rivals(found: list[tuple[pathlib.Path, dict]], name: str,
+           given: Mapping[str, str]) -> dict[str, str]:
+    """Every OTHER bot the layers record on bot NAME's home or account folder
+    (place), GIVEN being what NAME's job will carry: one home (a root, or a
+    profile under it) is one Delta Chat account, and two bots on it is a broken state, the old one still
+    mailing its own box. -> {bot: the root it shares, shown}, by name."""
+    root, accounts = place(given)
+    out = {}
+    for other in names(found):
+        if other == name:
+            continue
+        theirs = place(merged(found, other)[0])
+        if theirs[0] == root or theirs[1] == accounts:
+            out[other] = shown(theirs[0] if theirs[0] == root else theirs[1])
+    return out
+
+
+def _replacing(found: list[tuple[pathlib.Path, dict]], name: str, given: Mapping[str, str],
+               replace: tuple[str, ...]) -> dict[str, str]:
+    """The bots this install retires: each one --replace names, when it is a
+    rival (rivals) phone.json alone records, unlocked. -> {bot: root}. Raises
+    Bad for a --replace that cannot be done, and Rival for a rival left
+    unnamed, naming it and the ways past it. Writes nothing."""
+    main = file_path()
+    near = rivals(found, name, given)
+    for other in replace:
+        if other == name:
+            raise Bad(f"--replace {other}: that is the bot this install is: nothing was written.")
+        if other not in near:
+            raise Bad(f"--replace {other}: {shown(main)} records no other bot {other} on this bot's "
+                      f"root ({shown(place(given)[0])}): nothing was written.")
+        for p, data in found:
+            keys, every = _locks(data, other)
+            if keys or every:
+                raise Bad(f"--replace {other}: {shown(p)} locks it: nothing was written.")
+            if p != main and other in data.get(BOTS, {}):
+                raise Bad(f"--replace {other}: it is recorded in {shown(p)}, which install does not "
+                          "write. Remove it there: nothing was written.")
+    left = [o for o in near if o not in replace]
+    if left:
+        them = ", ".join(left)
+        bots_ = "bot" if len(left) == 1 else "bots"
+        flags = " ".join(f"--replace {o}" for o in left)
+        keep = (f"install it instead (`DC_AGENT={left[0]} sessionphone bot install`), or "
+                if len(left) == 1 else "")
+        raise Rival(f"{shown(main)} records {bots_} {them} on the same root as bot {name} "
+                    f"({near[left[0]]}). One root is one Delta Chat account, and two bots on it "
+                    f"is a broken state: the old one keeps mailing its own box ({them}), so its "
+                    f"calls and messages never reach {name}. Nothing was written. To replace "
+                    f"it: `sessionphone bot install {flags}` (its launchd job is booted out, its "
+                    f"plist removed, and {shown(main)} forgets it). To keep it, {keep}give bot "
+                    f"{name} its own root (`SESSIONPHONE_ROOT=DIR sessionphone bot install`).")
+    return {o: near[o] for o in replace}
 
 
 def _agent_instead(values: dict[str, str], origin: dict[str, pathlib.Path],
@@ -351,11 +471,14 @@ def _agent_instead(values: dict[str, str], origin: dict[str, pathlib.Path],
 
 def resolve(shell: Mapping[str, str], name: str | None = None,
             forget: tuple[str, ...] | list[str] = (),
-            runs_agent: Callable[[Mapping[str, str]], bool] | None = None) -> Resolved:
+            runs_agent: Callable[[Mapping[str, str]], bool] | None = None,
+            replace: tuple[str, ...] | list[str] = ()) -> Resolved:
     """This shell over the file, for one bot. Writes nothing. Raises Bad,
     naming the file, for a file that cannot be used, two bots and no name, a
-    locked key this shell changes, a --forget that cannot be done, or a
-    saved signer path that is gone. RUNS_AGENT, asked only for that last
+    locked key this shell changes, a --forget that cannot be done, a
+    saved signer path that is gone, or a --replace that cannot be done; and
+    Rival for another bot recorded on this bot's root that REPLACE does not
+    name (_replacing). RUNS_AGENT, asked only for that last
     refusal, with the values the job would carry: True when the installed
     sessionmail can run the seat's agent itself, so the refusal also names
     the --forget that lets install do so."""
@@ -363,7 +486,7 @@ def resolve(shell: Mapping[str, str], name: str | None = None,
     if name:
         name, name_from = name.strip().lower(), "given"
     else:
-        name, name_from = pick_name(shell, names(found))
+        name, name_from = pick_name(shell, names(found), ask=True)
     values, origin, locked = merged(found, name)
     ignored = {k: origin[k] for k in sorted(values) if not savable(k)}
     for k in ignored:
@@ -405,11 +528,13 @@ def resolve(shell: Mapping[str, str], name: str | None = None,
                       + _agent_instead(values, origin, locked, forgot, shell_gives, runs_agent))
     given = dict(values)
     given.update(shell_gives)
+    replace = tuple(dict.fromkeys(n.strip().lower() for n in replace if n.strip()))
+    replacing = _replacing(found, name, given, replace)
     where = {k: str(origin[k]) for k in values}
     where.update({k: "shell" for k in shell_gives})
     return Resolved(name=name, name_from=name_from, given=given, origin=where, file=values,
                     file_origin=origin, locked=locked, forget=forget, forgot=forgot,
-                    ignored=ignored)
+                    ignored=ignored, replace=replacing)
 
 
 def to_save(r: Resolved) -> dict[str, str]:
@@ -426,8 +551,9 @@ def to_save(r: Resolved) -> dict[str, str]:
 
 
 def save(r: Resolved) -> bool:
-    """Write this shell's values for bot r.name into phone.json, and drop
-    each --forget key, keeping everything else in the file. Atomic, 0600, in
+    """Write this shell's values for bot r.name into phone.json, drop
+    each --forget key, and forget each bot --replace retired (r.replace),
+    keeping everything else in the file. Atomic, 0600, in
     a directory made 0700. -> whether the file changed. Raises NotSaved."""
     p = file_path()
     try:
@@ -439,9 +565,12 @@ def save(r: Resolved) -> bool:
         new.update(to_save(r))
         for k in r.forget:
             new.pop(k, None)
-        if r.name in data.get(BOTS, {}) and new == bot:
+        gone = [o for o in r.replace if o in data.get(BOTS, {})]
+        if r.name in data.get(BOTS, {}) and new == bot and not gone:
             r.saved = False
             return False
+        for o in gone:
+            del data[BOTS][o]
         data.setdefault(BOTS, {})[r.name] = dict(sorted(new.items()))
         _mkdirs(p.parent)
         tmp = p.with_name(p.name + ".part")
@@ -605,6 +734,20 @@ def mail_text(probe: dict | None, key: str) -> str | None:
     return filed[0].strip() or None
 
 
+def mail_from(key: str, source: object) -> str:
+    """Where sessionmail's settings gave KEY, in words, by SOURCE: its mail.json
+    (`host`) only when the key is set THERE; its installed template (`template`)
+    is sessionmail's default, never the user's mail.json; `default` is the
+    key's own default. Any other source is named as it is."""
+    if source == HOST_SOURCE:
+        return f"sessionmail's {shown(MAIL_FILE)} `{key}`"
+    if source == TEMPLATE_SOURCE:
+        return f"sessionmail's installed default, {shown(MAIL_TEMPLATE)} `{key}`"
+    if source == "default":
+        return "sessionmail's default"
+    return f"sessionmail's {source}"
+
+
 def mail_note(var: str, value: str | None, probe: dict | None) -> str | None:
     """What the settings block says of one mail-route variable: VALUE is
     what the job carries (this shell's), None when it carries none. None
@@ -619,16 +762,19 @@ def mail_note(var: str, value: str | None, probe: dict | None) -> str | None:
     if value is None:
         if not in_file:
             return None
-        return f"sessionmail's {shown(MAIL_FILE)} `{key}` (not carried: the bot's `message` reads it)"
+        return f"{mail_from(key, filed[1])} (not carried: the bot's `message` reads it)"
     want = _mail_value(var, value)
     write = f'write "{key}": {json.dumps(shown(want))} in {shown(MAIL_FILE)}'
     if probe is None:
         return (f"this shell (NOT kept: this sessionmail reads it from the environment only; "
                 f"to keep it, upgrade sessionmail, then {write})")
     if in_file and os.path.expanduser(str(filed[0])) == os.path.expanduser(want):
-        return f"this shell (not saved here: sessionmail's {shown(MAIL_FILE)} `{key}` holds it too)"
+        return f"this shell (not saved here: {mail_from(key, filed[1])} holds it too)"
+    # "it" is mail.json, the file the advice writes: a template value is not in it
     has = ("it could not be read" if filed is not None and filed[1] == UNREADABLE else
-           f"it holds {json.dumps(filed[0])}" if in_file else "it has no such key")
+           f"it holds {json.dumps(filed[0])}" if in_file and filed[1] == HOST_SOURCE else
+           f"it has no such key; {mail_from(key, filed[1])} is {json.dumps(filed[0])}" if in_file else
+           "it has no such key")
     return f"this shell (NOT kept: sessionmail reads it from its own file; to keep it, {write}; {has})"
 
 
@@ -702,4 +848,7 @@ def block(r: Resolved, probe: dict | None) -> list[str]:
             out.append(f"  forget {k}: {shown(main)} did not hold it")
     for k, p in r.ignored.items():
         out.append(f"  ignored {k} in {shown(p)}: install does not keep it, so the job does not carry it")
+    for o, root in r.replace.items():
+        done = "removed from" if r.saved else "NOT removed from" if r.not_saved else "still in"
+        out.append(f"  replaced bot {o} (it kept the same root, {root}): {done} {shown(main)}")
     return out

@@ -37,8 +37,20 @@ EOF before D is a cut: a mouth that died must not leave words queued.
 Pacing is the mouth's job (it writes in real time, a little ahead of the
 track), so a cut drops a fraction of a second, not the rest of the line.
 
+ONE LINE AT A TIME. A line is one line on the call's voice track
+(PipVoiceTrack.line), from its header to its D, and the bot's replies are
+lines too (one per reply). The line that arrived first owns the track until
+it ends; a line that arrives while another is speaking waits behind it, its
+A frames buffered, and plays whole when its turn comes. It is never spliced
+into the other, and the other is never spliced into it. Waiting costs the
+mouth nothing: every frame is still read at once, and D is answered at once.
+
 A cut empties the call's whole outgoing queue (PipVoiceTrack.cut), the bot's
-own lines included: one voice track, one queue. Barge-in does the same.
+own lines included, and the lines waiting behind it: one voice track, one
+queue. Barge-in does the same. A C, an EOF before D, an error or the call
+ending is a cut while the line is still live (speaking or waiting). A line
+already cut (a barge-in mid-line) drops the rest of its frames, cuts nothing
+more, and ends "cut" at its D.
 """
 import asyncio
 import json
@@ -53,7 +65,7 @@ import numpy as np
 from sessionphone.bridge import dc_env
 
 PROFILE = dc_env.env("PROFILE", "")
-SOCK = dc_env.path("MOUTH_SOCK", *([PROFILE] if PROFILE else []), "call-mouth.sock")
+SOCK = dc_env.path("MOUTH_SOCK", "call-mouth.sock")   # under the profile's home: <ROOT>/<PROFILE>/ for a named one
 RATE = 48000                       # what the call's voice track holds (OUT_RATE)
 HEADER_TIMEOUT_S = 5.0
 FRAME_MAX = RATE * 2 * 5           # 5 s of audio in one frame is a broken writer
@@ -111,7 +123,10 @@ async def serve_one(manager, reader, writer, log=print):
     s = None
     ended, detail = "eof", None
     queued = 0                     # samples handed to the track
-    unechoed = 0                   # samples not yet told to the echo guard
+    unechoed = 0                   # samples on the track, not yet told to the echo guard
+    echo_from = None               # when those samples start to play
+    lost = 0                       # samples dropped: the line was already cut
+    line = None
     dropped_s, where = 0.0, None
     text, who, call, t0 = "", dc_env.AGENT_NAME, None, time.time()
     try:
@@ -150,10 +165,25 @@ async def serve_one(manager, reader, writer, log=print):
         if hdr.get("sound"):     # before `s` is set: the finally below must not cut or transcribe it
             ended, _ = await _sound(cand, call, hdr, reader, writer, log)
             return
-        s = cand
         text = str(hdr.get("text") or "")
         who = str(hdr.get("who") or dc_env.AGENT_NAME)
         who = who.capitalize() if who.islower() else who   # the mouth sends the agent name in lowercase
+        line = cand.voice.line(who)   # its place in the call's lines: arrival order
+        s = cand
+
+        def on_queue(start_at, secs):   # A frames reach the track: now, or at this line's turn
+            nonlocal unechoed, echo_from
+            if not unechoed:
+                echo_from = start_at
+            unechoed += round(secs * RATE)
+            if unechoed >= ECHO_EVERY_S * RATE:
+                flush_echo()
+
+        def flush_echo():
+            nonlocal unechoed
+            if unechoed:
+                s.echo.spoken(text, unechoed / RATE, source="mouth", start=echo_from)
+                unechoed = 0
         _reply(writer, {"ok": True, "call": call})
         replied = getattr(s, "replied", None)   # a reply line arrived (never a sound)
         if replied is not None:
@@ -173,12 +203,9 @@ async def serve_one(manager, reader, writer, log=print):
                 if n % 2:
                     raise ValueError("odd PCM length")
                 pcm = np.frombuffer(payload, dtype="<i2").astype(np.int16)
-                s.voice.say(pcm)
                 queued += len(pcm)
-                unechoed += len(pcm)
-                if unechoed >= ECHO_EVERY_S * RATE:
-                    s.echo.spoken(text, unechoed / RATE, source="mouth")
-                    unechoed = 0
+                if not line.say(pcm, on_queue):
+                    lost += len(pcm)       # cut mid-line (a barge-in): the rest is not said
             elif kind == b"D":
                 ended = "done"
                 break
@@ -194,14 +221,24 @@ async def serve_one(manager, reader, writer, log=print):
         log("mouth leg failed:\n" + traceback.format_exc())
     finally:
         if s is not None:
-            if unechoed:
-                s.echo.spoken(text, unechoed / RATE, source="mouth")
-            if ended != "done":
-                dropped_s = s.voice.cut()
-                try:
-                    where = str(s.echo.cut())
-                except Exception:  # noqa: BLE001
-                    where = None
+            if line.was_cut:               # a barge-in cut it mid-line
+                if ended == "done":
+                    ended = "cut"
+                # The echo guard was cut with the track. Telling it now would
+                # open an echo window over audio the cut already dropped.
+                unechoed = 0
+            if ended == "done":
+                line.end(flush_echo)       # what is queued plays out; the next line follows it
+            else:
+                flush_echo()               # what reached the track, before the cut trims it
+                cut_s = line.cut()         # None: already cut, and the next line is not ours to cut
+                if cut_s is not None:
+                    dropped_s = cut_s
+                    try:
+                        where = str(s.echo.cut())
+                    except Exception:  # noqa: BLE001
+                        where = None
+            dropped_s += lost / RATE
             s.lines.append((t0, who, text if ended == "done" else f"{text} [cut]"))
             log(f"MOUTH line {ended} in call {call}: {queued / RATE:.1f}s queued, "
                 f"{dropped_s:.1f}s dropped" + (f" ({detail})" if detail else ""))

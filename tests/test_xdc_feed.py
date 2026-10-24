@@ -29,7 +29,7 @@ from sessionphone.bridge import ack, bot, dc_env, xdc_feed, xdc_rt
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "dc-xdc-realtime"
 SKILL = ROOT / "skills" / "sessionphone" / "SKILL.md"
-DAY = "2030-10-18"
+DAY = "2030-12-08"
 
 
 # --- fakes -------------------------------------------------------------------
@@ -322,10 +322,10 @@ def test_one_send_in_flight_per_feed_so_the_sender_queue_never_grows(tmp_path):
 
 def test_midnight_rollover_reads_the_new_day_file_from_its_start(tmp_path):
     d, feed, m = tmp_path / "heard", make(tmp_path), Msg()
-    heard(d, turn("yesterday"), day="2030-10-17")
+    heard(d, turn("yesterday"), day="2030-06-09")
     feed.bind(844, 42, m)
-    heard(d, turn("before midnight"), day="2030-10-17")
-    heard(d, turn("after midnight"), day="2030-10-18")
+    heard(d, turn("before midnight"), day="2030-06-09")
+    heard(d, turn("after midnight"), day="2030-12-08")
     pump(feed)
     assert m.data() == [{"final": "before midnight"}, {"final": "after midnight"}]
 

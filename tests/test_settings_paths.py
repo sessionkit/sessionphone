@@ -22,7 +22,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from sessionphone import paths
+from sessionphone import paths, settings
 from sessionphone.bridge import calls, recording
 
 # what `bot install` remembers: settings.FILE as shipped (conftest moves it per test)
@@ -66,7 +66,7 @@ ALLOWED = {
     "src/sessionphone/bridge/recording.py:145",  # LEGACY_EARS_CONF: stat-ed for the warning only
     "tests/test_stranded_ears_conf.py:23",       # OLD: the HOME=tmp test of the warning
     "tests/test_settings_paths.py:61",           # SUPERSEDED: this gate's own pattern
-    "docs/configuration.md:230",                 # the "Upgrading from 0.1.0" note
+    "docs/configuration.md:232",                 # the "Upgrading from 0.1.0" note
 }
 
 # Never shipped, or not ours: version control, caches, virtualenvs, builds.
@@ -148,7 +148,7 @@ KIT_PATH = re.compile(r"~/\.sessionkit/[^\s`'\")]+")
 def test_every_kit_path_in_the_docs_is_one_the_code_builds():
     """Docs cannot import, so each names a kit path in exactly the form the
     code builds: a layout change in the code fails here until the docs follow."""
-    built = {recording.EARS_CONF_DEFAULT, calls.MAIL_CONF, PHONE_CONF}
+    built = {recording.EARS_CONF_DEFAULT, calls.MAIL_CONF, PHONE_CONF, settings.MAIL_TEMPLATE}
     docs = [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
     seen, odd = set(), []
     for p in docs:

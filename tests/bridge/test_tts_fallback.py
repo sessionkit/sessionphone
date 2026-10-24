@@ -1,6 +1,6 @@
 """A TTS failure's fallback job must never be voiced back into the call.
 
-In a live demo (Thu 2030-06-13): TTS refused
+In a live demo (Sun 2030-06-09): TTS refused
 (curl rc=7), the fallback posted "(unspoken, TTS failed) ..." to the outbox,
 the outbox loop spoke it into the live call, and each further failure
 nested one more marker. The job now carries `no_speak`, and the outbox
@@ -18,6 +18,7 @@ def _session():
     s = object.__new__(calls.CallSession)
     s.chat_id = 12
     s.lines = []
+    s.voice = calls.PipVoiceTrack()
     return s
 
 
