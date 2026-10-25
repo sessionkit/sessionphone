@@ -37,7 +37,7 @@ media = [
     "numpy>=2",
     # `sessionphone web`: one asyncio server for the page and its
     # WebSocket; the passkey checks verify with cryptography directly (no CBOR)
-    "websockets>=16,<17",
+    "websockets>=16,<18",
     "cryptography>=42",
 ]
 
