@@ -5,6 +5,7 @@ import json
 import os
 import types
 
+import _keyfakes
 import pytest
 
 from sessionphone import channels
@@ -17,7 +18,10 @@ class FakeContact:
         self.address = address
 
     def get_snapshot(self):
-        return types.SimpleNamespace(address=self.address)
+        return types.SimpleNamespace(address=self.address, is_key_contact=True)
+
+    def make_vcard(self):       # the owner holds K1, anyone else K2
+        return _keyfakes.vcard(self.address, _keyfakes.K1 if self.address.lower() == OWNER else _keyfakes.K2)
 
 
 class FakeChat:
@@ -76,7 +80,8 @@ def account():
 @pytest.fixture
 def listed(tmp_path):
     p = tmp_path / "channels.txt"
-    p.write_text(f"# NAME TARGET # note\nowner  {OWNER}  # owner\nfamily chat:42  # the family group\n")
+    p.write_text(f"# NAME TARGET # note\nowner  {OWNER}  key:{_keyfakes.FPR_K1}  # owner\n"
+                 "family chat:42  # the family group\n")
     p.chmod(0o600)
     return p
 
@@ -296,10 +301,10 @@ def test_resolve_an_unknown_name_is_refused_naming_the_path(listed) -> None:
 
 def test_add_creates_the_file_0600(tmp_path, account) -> None:
     p = tmp_path / "channels.txt"
-    e = channels.add("owner", OWNER.upper(), "owner, joined today", p)
-    assert e == channels.Entry("owner", OWNER, "owner, joined today")
+    e = channels.add("owner", OWNER.upper(), "owner, joined today", p, key=_keyfakes.FPR_K1)
+    assert e == channels.Entry("owner", OWNER, "owner, joined today", _keyfakes.FPR_K1)
     assert p.stat().st_mode & 0o777 == 0o600
-    assert p.read_text() == f"owner  {OWNER}  # owner, joined today\n"
+    assert p.read_text() == f"{channels.MARKER}\nowner  {OWNER}  key:{_keyfakes.FPR_K1}  # owner, joined today\n"
     assert channels.check(account, 12, p)
 
 

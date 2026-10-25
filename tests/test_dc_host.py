@@ -56,17 +56,19 @@ def test_an_empty_dc_host_counts_as_unset():
     assert "DC_HOST" in dc_env.host_problem({"DC_HOST": ""}, host="")
 
 
-def test_host_is_moot_when_both_addresses_are_named():
-    """HOST then only mints Message-IDs: no address is built from it."""
-    both = {"DC_ADDR": "ada-chat@mac.example.net", "DC_MAILTO": "ada@mac.example.net"}
-    assert dc_env.host_problem(both, host="localhost") is None
-    for one in ("DC_ADDR", "DC_MAILTO"):   # one address still built from the junk host
-        assert "DC_HOST" in dc_env.host_problem({one: both[one]}, host="localhost")
+def test_host_is_moot_when_dc_addr_is_named():
+    """ADDR is the only address built on HOST: MAILTO's default is bare (PHONE-248).
+    With DC_ADDR named, no address is built from the junk host."""
+    addr = {"DC_ADDR": "ada-chat@mac.example.net"}
+    assert dc_env.host_problem(addr, host="localhost") is None
+    assert dc_env.host_problem({**addr, "DC_MAILTO": "ada@mac.example.net"}, host="localhost") is None
+    # DC_MAILTO alone: ADDR is still built from the junk host
+    assert "DC_HOST" in dc_env.host_problem({"DC_MAILTO": "ada@mac.example.net"}, host="localhost")
 
 
 def test_the_reason_names_the_junk_address_and_the_fix():
     why = dc_env.host_problem({"DC_AGENT": "ada"}, host="localhost")
-    assert "ada@localhost" in why
+    assert "ada-chat@localhost" in why and "ada@localhost" not in why
     assert "DC_HOST=" in why and "sessionphone bot install" in why
 
 
@@ -82,8 +84,8 @@ def test_the_default_is_sessionmail_s_short_host_not_getfqdn(monkeypatch):
     for k in dc_env.MAIL_HOST_VARS:
         monkeypatch.delenv(k, raising=False)
     assert dc_env.mail_host() == "stranger"
-    assert dc_env.mailto({}) == "claude@stranger"
-    assert dc_env.mailto({"DC_AGENT": "Ada"}) == "ada@stranger"
+    assert dc_env.mailto({}) == "claude"                 # the To is bare (PHONE-248): no host at all
+    assert dc_env.mailto({"DC_AGENT": "Ada"}) == "ada"
     assert dc_env.host_problem({}) is None
 
 
@@ -93,12 +95,14 @@ def test_sessionmail_host_is_honoured_both_spellings(monkeypatch):
     assert dc_env.mail_host({"SESSION_MAIL_HOST": "mac2"}) == "mac2"
     assert dc_env.mail_host({"SESSIONMAIL_HOST": "", "SESSION_MAIL_HOST": "mac2"}) == "mac2"
     assert dc_env.mail_host({"SESSIONMAIL_HOST": ""}) == "stranger"     # empty is unset
-    assert dc_env.mailto({"SESSIONMAIL_HOST": "mac"}) == "claude@mac"
+    assert dc_env.mailto({"SESSIONMAIL_HOST": "mac"}) == "claude"     # the host never reaches the To
 
 
-def test_dc_host_and_dc_mailto_still_win(monkeypatch):
+def test_dc_host_does_not_reach_the_default_to_and_dc_mailto_wins(monkeypatch):
+    """PHONE-248: a DC_HOST builds ADDR and the web Reply-To, never MAILTO's default,
+    which stays bare; a DC_MAILTO is kept as given."""
     monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "stranger")
-    assert dc_env.mailto({"DC_HOST": "mac.example.net"}) == "claude@mac.example.net"
+    assert dc_env.mailto({"DC_HOST": "mac.example.net"}) == "claude"
     assert dc_env.mailto({"DC_MAILTO": "box@elsewhere.example", "DC_HOST": "x"}) == "box@elsewhere.example"
 
 
@@ -210,7 +214,7 @@ def test_install_refuses_a_junk_host_and_leaves_the_old_job_alone(rig, monkeypat
 
 def test_install_passes_on_a_reverse_dns_fqdn_with_no_dc_host(rig, monkeypatch, tmp_path, given_seat):
     """A fresh Mac whose DNS name is a reverse-DNS name installs: the default To is
-    <agent>@<sessionmail's short host>, which the box step then proves."""
+    the bare agent (PHONE-248), whose box the box step then proves."""
     given_seat("ada-chat")
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: ARPA)
     monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "stranger.local")
@@ -218,7 +222,7 @@ def test_install_passes_on_a_reverse_dns_fqdn_with_no_dc_host(rig, monkeypatch, 
     monkeypatch.delenv("SESSION_MAIL_HOST", raising=False)
     boxes = []
     service.install("ada", seated=lambda made, box: boxes.append(box))
-    assert boxes[0].mailto == "ada@stranger" and boxes[0].path
+    assert boxes[0].mailto == "ada" and boxes[0].path
     assert ("bootstrap",) in [c[:1] for c in rig]
 
 

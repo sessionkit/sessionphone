@@ -13,6 +13,7 @@ import json
 import os
 import stat
 
+import _keyfakes
 import pytest
 
 from sessionphone import channels
@@ -21,7 +22,7 @@ from sessionphone.bridge import bot
 OWNER = "alice@relay.example"
 STRANGER = "bob@relay.example"
 SECRET = "the vault code is 4471"      # message text: must never be stored or logged
-LIST = f"family  chat:12   # the family group\nowner   {OWNER}   # owner\n"
+LIST = f"family  chat:12   # the family group\nowner   {OWNER}  key:{_keyfakes.FPR_K1}   # owner\n"
 
 
 class Done(Exception):
@@ -38,7 +39,10 @@ class FakeContact:
         self.addr, self.name = addr, name
 
     def get_snapshot(self):
-        return Obj(address=self.addr, display_name=self.name, name="")
+        return Obj(address=self.addr, display_name=self.name, name="", is_key_contact=True)
+
+    def make_vcard(self):           # the owner holds K1, anyone else K2
+        return _keyfakes.vcard(self.addr, _keyfakes.K1 if self.addr == OWNER else _keyfakes.K2)
 
 
 class FakeChat:

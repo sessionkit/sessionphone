@@ -10,7 +10,9 @@ reads:
     kind saying, agent == DC_AGENT       -> {"lines": [{"who": "agent", "name": DC_AGENT_NAME, "text": TEXT}]}
 
 Call lines (``source: call``), other agents' sayings and noise turns are not
-fed. Text is flattened and cut to 4000 characters.
+fed. Text is flattened and cut to 4000 characters. That cut is display only:
+the app shows a live line to the owner, and no agent reads this feed. The
+heard log it reads keeps every word.
 
 A binding is made by an outbox job (``webxdc_realtime_feed``), which the bot
 validates and gates first. Only a chat listed in ``DC_XDC_FEED_CHATS`` may be
@@ -74,7 +76,7 @@ FEEDS = ("heard",)          # what a feed can carry; one kind today
 POLL_S = 0.1                # how often the heard files are read
 RATE = 10.0                 # sends per second per feed, at most
 QMAX = 100                  # pending payloads per feed (a partial chunk counts as one)
-MAX_TEXT = 4000             # characters per text, and per joined partial (turns.py's bound)
+MAX_TEXT = 4000             # display only: characters per text, and per joined partial
 STRIKES = 3                 # consecutive failed sends that drop a binding
 ADVERTISE_BACK_S = 60.0     # at most one advertise-back per msg per this
 DROP_LOG_S = 10.0           # a full queue is logged at most this often per feed
@@ -96,7 +98,8 @@ def chats(raw: str | None) -> frozenset[int]:
 
 
 def cut(text, n: int = MAX_TEXT) -> str:
-    """One line, at most N characters (the heard text may hold line breaks)."""
+    """One line, at most N characters (the heard text may hold line breaks).
+    Display only: what the app shows, never what an agent acts on."""
     return " ".join(str(text or "").split())[:n]
 
 

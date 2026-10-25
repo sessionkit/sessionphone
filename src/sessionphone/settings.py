@@ -49,6 +49,8 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
+import shutil
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -60,7 +62,15 @@ FILE = paths.kit_settings(TOOL, f"{TOOL}.json")
 DROPINS = f"{TOOL}.d"
 LOCKED = "_locked"
 BOTS = "bots"
+# The bot's name when nothing names one: the harness vendor's word, asked of
+# sessiontools (`session agent default`, the vendor row the default seat is
+# named by; sessiontools >= 0.3.1). DEFAULT_AGENT is the fallback when that
+# cannot be asked: no `session`, a sessiontools without the verb (0.3.0), a
+# non-zero exit, no single word, or no answer in VENDOR_TIMEOUT_S.
 DEFAULT_AGENT = "claude"
+VENDOR_ARGS = ("agent", "default")
+VENDOR_TIMEOUT_S = 5.0
+VENDOR_WORD = re.compile(r"[a-z0-9][a-z0-9_-]*")
 ROOT_KEY = "SESSIONPHONE_ROOT"
 # Kept besides DC_*: the ONE list that widens what install remembers.
 SAVED = (ROOT_KEY,)
@@ -305,7 +315,8 @@ def shell_name(shell: Mapping[str, str], ask: bool = False) -> tuple[str, str] |
 def pick_name(shell: Mapping[str, str], recorded: list[str],
               verb: str | None = INSTALL_VERB, ask: bool = False) -> tuple[str, str]:
     """Which bot: DC_AGENT, then this session's durable seat (shell_name),
-    then the one bot the file records, then "claude". Two or more recorded and no name
+    then the one bot the file records, then the harness vendor's word
+    (default_agent: `session agent default`, else "claude"). Two or more recorded and no name
     from this shell is refused: guessing would act on the wrong bot. The
     refusal names VERB (`sessionphone VERB`) as the run to repeat. ASK:
     shell_name asks sessionmail for this session's seat."""
@@ -319,7 +330,52 @@ def pick_name(shell: Mapping[str, str], recorded: list[str],
                f"set DC_AGENT (`export DC_AGENT={recorded[0]}`), then run it again")
         raise Bad(f"{shown(file_path())} records {len(recorded)} bots ({', '.join(recorded)}) and "
                   f"this shell names none: nothing was written. Name one: {how}.")
-    return DEFAULT_AGENT, "the default"
+    return default_agent(shell), "the default"
+
+
+# default_agent's answers, by the realpath of the `session` asked: a process
+# asks each sessiontools once (agent_from is called by several dc_env helpers).
+# forget_default_agent() empties it.
+_VENDOR_ASKED: dict[str, str | None] = {}
+
+
+def forget_default_agent() -> None:
+    """Forget every answer default_agent has kept: the next call asks again."""
+    _VENDOR_ASKED.clear()
+
+
+def default_agent(shell: Mapping[str, str] | None = None) -> str:
+    """The bot's name when nothing names one: the harness vendor's word, as
+    `session agent default` prints it (the `session` on SHELL's PATH, run
+    with SHELL), so the bot and the default seat are named alike. Any
+    failure gives DEFAULT_AGENT: no `session`, a non-zero exit (a
+    sessiontools without the verb), output that is not one word, a timeout.
+    Decided by the exit and the output, never by an error's text. Read
+    only. Asked once per `session` (its realpath) for the life of the
+    process. pick_name and dc_env.agent_from both ask it, so the bot and
+    the dc-* tools pick one name."""
+    shell = os.environ if shell is None else shell
+    exe = shutil.which("session", path=shell.get("PATH", os.defpath))
+    if not exe:
+        return DEFAULT_AGENT
+    where = os.path.realpath(exe)
+    if where not in _VENDOR_ASKED:
+        _VENDOR_ASKED[where] = _ask_default_agent(exe, shell)
+    return _VENDOR_ASKED[where] or DEFAULT_AGENT
+
+
+def _ask_default_agent(exe: str, shell: Mapping[str, str]) -> str | None:
+    """default_agent's question, asked now (no cache): the one word
+    `session agent default` prints, lowered, or None for any other answer."""
+    try:
+        r = subprocess.run([exe, *VENDOR_ARGS], env=dict(shell), stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=VENDOR_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    word = (r.stdout or "").strip().lower()
+    return word if VENDOR_WORD.fullmatch(word) else None
 
 
 def bot_name(shell: Mapping[str, str] | None = None,

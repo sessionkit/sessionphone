@@ -3,10 +3,11 @@
 #
 # The agent is the bot `sessionphone bot install` would pick: DC_AGENT, then
 # this session's durable seat (asked of sessionmail), then the one bot
-# ~/.sessionkit/phone/settings/phone.json records, then "claude". With no
-# DC_AGENT in this shell, each tool says on stderr which bot it picked. The
-# root comes from DC_ROOT, then SESSIONPHONE_ROOT, then the root install keeps
-# in phone.json for that bot, then ~/.sessionphone. Both are asked of the
+# ~/.sessionkit/phone/settings/phone.json records, then the harness vendor's
+# word (`session agent default`, else "claude"). With no DC_AGENT in this
+# shell, each tool says on stderr which bot it picked. The root comes from
+# DC_ROOT, then SESSIONPHONE_ROOT, then the root install keeps in phone.json
+# for that bot, then ~/.sessionphone. Both are asked of the
 # package's own Python (dc_env.py), so the tools and the bot pick one name and
 # one root. If that question cannot be answered: claude, and ~/.sessionphone.
 # Every path a tool touches derives from the root unless its own DC_X is set:

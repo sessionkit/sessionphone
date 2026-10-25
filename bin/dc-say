@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# dc-say [--profile public] [--html FILE] [--voice NAME] [--who NAME] [--call ID] CHAT "text"
-#   - say something in a Delta Chat chat; a live call in that chat hears it.
+# dc-say [--profile public] [--html FILE] [--voice NAME] [--who NAME] [--call ID | --text-only] CHAT "text"
+#   - say something in a Delta Chat chat; a live call in that chat hears it,
+#     unless you pass --text-only.
 # CHAT is a chat number or a channel NAME from the owner's allow-list
 #   (channels.txt: `owner`, `family`). A chat that is not listed is REFUSED,
 #   exit 3, the list's path on stderr, and nothing is sent - even with
@@ -17,6 +18,17 @@
 #   either, so a line never lands in the chat after the hang-up.
 #   Without --call the old behaviour stands: a chat message, spoken if a call
 #   happens to be live. Use --call for anything you are SAYING to someone.
+# --text-only: post to the chat and NEVER speak it into a call, live or not.
+#   Use it for anything addressed to the chat and not to the person on the
+#   call: a report, a log, a status. Without it a plain dc-say is read aloud
+#   into a live call (case 162: an agent's report was spoken into the owner's
+#   call). The job carries "no_speak": true; the ack says "NOT spoken (chat
+#   only)". It contradicts --call (say this INTO the call): both is a usage
+#   error, exit 1, nothing queued.
+# The ack says what happened to the speech: "spoken into the call" only once
+#   it was rendered and handed to the call; "NOT spoken: <reason>" when TTS
+#   failed; "queued to speak" when it was still rendering (a later failure is
+#   mailed to the agent). See README, "What a dc-say ack says about the call".
 # Drops a job for the running bot, which holds the account lock. One tool for
 # every agent.
 # Exit: 0 sent, the bot's ack says so (--call: 4 also when the bot gives no
@@ -27,7 +39,7 @@ set -euo pipefail
 # shellcheck source=dc-env
 . "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
 dc_help "${1:-}"
-HTML=""; VOICE=""; WHO=""; CALL=""; PROFILE=""
+HTML=""; VOICE=""; WHO=""; CALL=""; PROFILE=""; TEXT_ONLY=""
 while true; do
   case "${1:-}" in
     --profile) [ $# -ge 2 ] || { echo "dc-say: --profile needs a NAME" >&2; exit 1; }; PROFILE="$2"; shift 2 ;;
@@ -41,10 +53,12 @@ while true; do
       [ $# -ge 2 ] || { echo "dc-say: --call needs a CALL ID (see dc-live)" >&2; exit 1; }
       CALL="$2"; shift 2
       case "$CALL" in ''|*[!0-9]*) echo "dc-say: --call takes a number, got '$CALL'" >&2; exit 1 ;; esac ;;
+    --text-only) TEXT_ONLY=1; shift ;;
     *) break ;;
   esac
 done
-[ $# -ge 2 ] || { echo "usage: dc-say [--profile public] [--html FILE] [--voice N] [--who N] [--call ID] CHAT TEXT...  (CHAT: a chat number or a channel name)" >&2; exit 1; }
+[ $# -ge 2 ] || { echo "usage: dc-say [--profile public] [--html FILE] [--voice N] [--who N] [--call ID | --text-only] CHAT TEXT...  (CHAT: a chat number or a channel name; --text-only: chat only, never spoken into a call)" >&2; exit 1; }
+[ -z "$TEXT_ONLY" ] || [ -z "$CALL" ] || { echo "dc-say: --text-only and --call contradict: --call says this INTO the call, --text-only never speaks. Nothing was queued." >&2; exit 1; }
 CHAT="$1"; shift
 OUT="$(dc_outbox "$PROFILE")" || exit 2
 # refuse-only, before anything is queued; sets DC_DEST
@@ -77,14 +91,15 @@ fi
 # a bot from before the allow-list crashed on `dc-say NAME`), and only then
 # write it. A refusal exits 3, "restart the bot", and nothing is queued.
 JSON=$(python3 -c 'import json,sys
-dest,h,voice,who,call,ack = sys.argv[1:7]
-job=json.loads(dest); job["text"]=" ".join(sys.argv[7:])
+dest,h,voice,who,call,ack,text_only = sys.argv[1:8]
+job=json.loads(dest); job["text"]=" ".join(sys.argv[8:])
 if h: job["html"]=open(h,encoding="utf-8").read()
 if voice: job["voice"]=voice
 if who: job["who"]=who
 if call: job["call_id"]=int(call)
 if ack: job["ack"]=ack
-print(json.dumps(job))' "$DC_DEST" "$HTML" "$VOICE" "$WHO" "$CALL" "$ACK" "$@")
+if text_only: job["no_speak"]=True
+print(json.dumps(job))' "$DC_DEST" "$HTML" "$VOICE" "$WHO" "$CALL" "$ACK" "$TEXT_ONLY" "$@")
 dc_shape "$OUT" "$JSON" || exit $?
 JOB=$(python3 -c 'import os,sys,time
 d,job = sys.argv[1:3]

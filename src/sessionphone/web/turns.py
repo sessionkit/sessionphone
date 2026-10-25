@@ -64,8 +64,16 @@ def one_line(text, n=400):
     bot's heard feed (bridge/xdc_feed.py) reads heard_dir() and heard_files()
     here on a chat-only bot, which never imports calls.py and the media pack
     it loads."""
-    from sessionphone.bridge.calls import one_line as flat
-    return flat(text, n)
+    from sessionphone.bridge.calls import one_line as cut
+    return cut(text, n)
+
+
+def flat(text):
+    """calls.flat, imported when first used (see one_line): heard words on one
+    line, never cut. A turn's text goes through this, never one_line, which is
+    for log lines only."""
+    from sessionphone.bridge.calls import flat as whole
+    return whole(text)
 
 
 # ---- where the heard log is, as ears-mail resolves it ------------------------
@@ -112,10 +120,12 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
                fqdn: str | None = None, hostname: str | None = None) -> tuple[Seat | None, str]:
     """-> (the Seat, '') for `sessionphone web --legs`, or (None, why it must refuse).
 
-    The To is --mail-to, else DC_MAILTO, else <DC_AGENT>@<HOST>, with NO further
-    fallback: dc_env.MAILTO's last one, CLAUDE_CODE_AGENT else `claude`, names
-    the shell that started the server, not the seat a Delta turn wakes, and an
-    address nobody reads is worse than no start.
+    The To is --mail-to, else DC_MAILTO, else the bare <DC_AGENT>, with NO
+    further fallback: dc_env.MAILTO's last one, CLAUDE_CODE_AGENT else `claude`,
+    names the shell that started the server, not the seat a Delta turn wakes,
+    and an address nobody reads is worse than no start. A bare To (`alice`) is
+    the box on this host: sessionmail adds the host, on both carriers;
+    `box@host` is kept as given. A blank one, `x@` or `@y` is refused.
 
     The host is DC_HOST, else dc_env.host_part(): the rule the mail drop uses to
     qualify a bare From. That is this machine's DNS name when it is the short
@@ -133,15 +143,15 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
     host = named or derived or "localhost"
     to = (mail_to or "").strip() or dc_env._get(e, "MAILTO")
     if not to and dc_env._get(e, "AGENT"):
-        to = f"{dc_env._get(e, 'AGENT').strip().lower()}@{host}"
+        to = dc_env.default_mailto(dc_env._get(e, "AGENT").strip().lower())
     if not to:
         return None, ("--legs mails each finished turn of a web call to the seat, and no seat is named: "
-                      "give --mail-to ADDR, or set DC_MAILTO or DC_AGENT (CLAUDE_CODE_AGENT is not taken: "
+                      "give --mail-to BOX, or set DC_MAILTO or DC_AGENT (CLAUDE_CODE_AGENT is not taken: "
                       "it names the shell that started this server, not the seat)")
-    box, _, domain = to.partition("@")
-    if not box.strip() or not domain.strip():   # `--mail-to alice` would go to a local user, not the seat
+    box, at, domain = to.partition("@")
+    if not box.strip() or (at and not domain.strip()):   # a bare box is this host's; `x@` and `@y` are not boxes
         return None, (f"--legs mails each finished turn of a web call to the seat, and {to!r} is not a mail "
-                      "address: name the seat's box as BOX@HOST (--mail-to, or DC_MAILTO)")
+                      "address: name the seat's box, BOX or BOX@HOST (--mail-to, or DC_MAILTO)")
     what = None if named else dc_env.host_part_problem(derived)
     if what:
         where = next((var for var in dc_env.MAIL_HOST_VARS if (e.get(var) or "").strip()),
@@ -185,7 +195,7 @@ def thread_id(n: int, host: str) -> str:
 def subject_for(n: int, caller: str, text: str) -> str:
     """bot.mail_in's Subject, the room `web` and N where the chat id would be:
     flattened, ASCII, cleaned, then cut to 69."""
-    tail = f"{caller}: {text[:44]}"
+    tail = f"{caller}: {text[:44]}"     # display only: the body carries the whole turn
     tail = " ".join(tail.split()).encode("ascii", "replace").decode("ascii")
     return clean_subject(f"[web {n}] {tail}")[:69]
 
@@ -218,7 +228,7 @@ def turn_mail(n: int, seq: int, text: str, seat: Seat, caller: str) -> TurnMail:
     -Profile, Cc) and Supersedes (a web call mails no previews). To the seat,
     no Priority: what wakes it. Reply-To the call's box: a plain reply is
     spoken into the call."""
-    text = one_line(text, 4000).strip()
+    text = flat(text)           # the whole turn: never cut
     body = (
         f"(on the call) {text}\n\n---\n"
         f"call: web (call {n})\nfrom: {caller}\n\n"
@@ -385,7 +395,7 @@ class TurnFollower:
                          "lines (the ears' counter restarted?). No turn at or below the mark is mailed: "
                          "later turns of this call may reach the heard log only")
             return
-        text = one_line(str(rec["text"]), 4000).strip()
+        text = flat(str(rec["text"]))   # whole: the echo check and the mail see every word
         if no_real_word(text):           # '.', 'Music.', 'Um' never wake the seat
             self.last_seq = seq
             self.log(f"NOISE {self.device} seq {seq}: no real word | dropped: {one_line(text)}")

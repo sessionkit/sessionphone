@@ -14,6 +14,7 @@ import pathlib
 import types
 
 import numpy as np
+import _keyfakes
 import pytest
 
 from sessionphone.bridge import calls
@@ -22,7 +23,7 @@ OWNER = "erin@relay.example"
 STRANGER = "bob@relay.example"
 # 12 is a listed group; 20 is the owner's 1:1 (listed by address); 13 is a
 # stranger's 1:1, which nothing lists.
-LIST = f"family  chat:12   # the family group\nowner   {OWNER}   # owner\n"
+LIST = f"family  chat:12   # the family group\nowner   {OWNER}  key:{_keyfakes.FPR_K1}   # owner\n"
 
 SAID = "We have done it four times, in the care packs for Ben and Ada."
 REAL = "Git bundle create and send the file into the chat."
@@ -38,7 +39,10 @@ class FakeContact:
         self.addr = addr
 
     def get_snapshot(self):
-        return Obj(address=self.addr)
+        return Obj(address=self.addr, is_key_contact=True)
+
+    def make_vcard(self):           # the owner holds K1, anyone else K2
+        return _keyfakes.vcard(self.addr, _keyfakes.K1 if self.addr == OWNER else _keyfakes.K2)
 
 
 class FakeChat:
@@ -136,7 +140,7 @@ def test_an_address_entry_never_passes_a_group(rig) -> None:
 def _session(account, chat_id, root):
     s = object.__new__(calls.CallSession)
     s.pc, s.root_id, s.chat_id, s.account = object(), root, chat_id, account
-    s.speak = lambda text, voice, who: ("speak", who, text)
+    s.speak = lambda text, voice, who, floor=False: ("speak", who, text)
     return s
 
 

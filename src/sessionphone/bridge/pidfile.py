@@ -28,10 +28,15 @@ on (dc-live then says it is not running, which the line explains).
 
 For a launchd bot the pid here is the one `sessionphone bot status` reads from
 launchd: the job runs the bot module itself, no wrapper between.
+
+`started` is dc-live's rule in Python: `bot install` and `bot uninstall` ask it
+whether the bot behind a call-live.json still runs, and since when.
 """
+import calendar
 import os
 import pathlib
 import subprocess
+import time
 
 # ps reads the same in every environment: the start time in UTC, in C's words
 PS_ENV = {"TZ": "UTC0", "LC_ALL": "C"}
@@ -104,3 +109,46 @@ def clear(path, pid=None):
         return True
     except OSError:
         return False
+
+
+# >>> live-call-guard
+def started(path, root, run=None):
+    """dc-live's rule (bin/dc-live, dc_bot_why), in Python: -> (start, why).
+    START is the bot's start time, seconds since the epoch, when the file at
+    PATH names ROOT's running bot: that pid is alive, `ps` gives the same
+    start time and command line for it NOW, the command line names
+    sessionphone, and the root line is ROOT (realpath). Then WHY is "".
+    Otherwise START is None and WHY says why not, in words. Never raises."""
+    try:
+        lines = pathlib.Path(path).read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return None, f"no {path}: no bot has started on this root"
+    pid, lstart, cmd, where = (lines + ["", "", "", ""])[:4]
+    pid = pid.strip()
+    if not pid.isdigit() or pid.startswith("0") or pid == "1":
+        return None, f"{path} names no bot's pid ({pid or 'nothing'})"
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return None, f"{path} is stale: pid {pid} is not running"
+    try:
+        now = ps(pid, "lstart", run)
+    except (OSError, subprocess.SubprocessError):
+        now = ""
+    if not lstart or now != lstart:
+        return None, f"{path} is stale: pid {pid} is another process now (started {now or '?'}, not {lstart or '?'})"
+    try:
+        now = ps(pid, "command", run)
+    except (OSError, subprocess.SubprocessError):
+        now = ""
+    if not cmd or now != cmd:
+        return None, f"{path} is stale: pid {pid} runs another command now"
+    if NAME not in cmd:
+        return None, f"{path} names pid {pid}, which is no sessionphone bot ({cmd})"
+    if where != os.path.realpath(root):
+        return None, f"{path} is another root's: its bot runs on {where or '?'}, not {os.path.realpath(root)}"
+    try:   # ps's lstart in C's words and UTC (PS_ENV); a day under 10 is space-padded
+        return float(calendar.timegm(time.strptime(" ".join(lstart.split()), "%a %b %d %H:%M:%S %Y"))), ""
+    except ValueError:
+        return None, f"{path}: its start time {lstart!r} cannot be read"
+# <<< live-call-guard

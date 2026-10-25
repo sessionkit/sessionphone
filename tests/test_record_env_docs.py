@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import _changelog  # CHANGELOG.md plus the pending fragments in changelog.d/
+
 from sessionphone import service
 from sessionphone.bridge import recording
 
@@ -35,7 +37,7 @@ STARTS_BLOCK = re.compile(r"^\s*(?:[-*+] |\d+\. |\|)")
 
 
 def _docs() -> list[Path]:
-    files = [ROOT / "README.md", ROOT / "CHANGELOG.md"]
+    files = [ROOT / "README.md", *_changelog.paths()]
     files += sorted((ROOT / "docs").rglob("*.md"))
     files += sorted((ROOT / "skills").rglob("*.md"))
     return [f for f in files if f.is_file()]
@@ -140,6 +142,8 @@ def test_the_docs_are_scanned():
     docs = _docs()
     names = {f.relative_to(ROOT).as_posix() for f in docs}
     assert {"README.md", "CHANGELOG.md", "docs/configuration.md", "docs/settings.md"} <= names
+    # and every pending fragment, which reaches CHANGELOG.md only at the release
+    assert {f.relative_to(ROOT).as_posix() for f in _changelog.fragments()} <= names
     for f in ("README.md", "CHANGELOG.md", "docs/configuration.md", "docs/settings.md"):
         hits = [b for _, b in blocks((ROOT / f).read_text(encoding="utf-8")) if EARS.search(b)]
         assert hits, f

@@ -5,6 +5,7 @@ design/agent-contract.md §2.3, §3, §11; PHONE-72's design.md §2, §4. Fakes 
 a fake `message` (conftest fake_message) that records its argv and environment,
 no real sendmail, message, seat key or bot.
 """
+import json
 import os
 import pathlib
 import re
@@ -187,24 +188,45 @@ def test_a_mail_on_a_bot_minted_id_goes_by_message_send_signed(fake_message, mon
     assert env["SESSIONMAIL_FROM_NAME"] == "Ada's Delta Chat bridge"
 
 
-@pytest.mark.parametrize("reply", [
-    (2, {"sent": "no", "kind": "identity", "message": "cannot be signed"}),
-    (3, {"sent": "unknown", "kind": "mta", "message": "sendmail exited 75"}),
-    (2, {"sent": "no", "kind": "message-id", "message": "use the bare host"}),
+@pytest.mark.parametrize("reply, kept", [
+    ((2, {"sent": "no", "kind": "identity", "message": "cannot be signed"}), (1, 0)),
+    ((3, {"sent": "unknown", "kind": "mta", "message": "sendmail exited 75"}), (1, 0)),
+    ((2, {"sent": "no", "kind": "message-id", "message": "use the bare host"}), (0, 1)),
 ])
-def test_an_m5_refusal_is_never_spooled(fake_message, monkeypatch, undelivered_in_tmp, reply):
-    """sessionmail has no duplicate check: a retried M5 could land twice under one id.
-    So a refused M5 is logged and dropped, never kept, whatever its kind."""
+def test_an_m5_refusal_is_spooled(fake_message, monkeypatch, undelivered_in_tmp, reply, kept):
+    """PHONE-249: a refused M5 is kept like any other mail (waiting if its kind
+    heals, dead/ if not), with its own --message-id, so the spool's retry can
+    check the box for it first (spool.Spool._not_there)."""
     logged = []
     monkeypatch.setattr(bot, "log", logged.append)
     fake_message.answer(reply)
     why = []
     assert bot.mail_in("Team", 12, "call", "x", msgid="call-turn-12-1@host", refusal=why) is False
-    assert not [p for p in undelivered_in_tmp.rglob("*") if p.is_file()]
+    assert bot.SPOOL.counts() == kept
+    (rec,) = [p for p in undelivered_in_tmp.rglob("*.json")]
+    args = json.loads(rec.read_text())["args"]
+    assert args[args.index("--message-id") + 1] == "call-turn-12-1@host"
+    first = logged[0]
+    assert first.startswith(f"BRIDGE MAIL FAILED rc={reply[0]} kind={reply[1]['kind']}")
+    assert ", kept at " in first and why == [first[len("BRIDGE MAIL FAILED "):first.index(", kept at ")]]
+    assert not [ln for ln in logged if "not kept" in ln]
+
+
+def test_a_refused_call_preview_is_not_spooled(fake_message, monkeypatch, undelivered_in_tmp):
+    """A preview (X-Call-Preview) is superseded by the turn, which carries the
+    whole text: a refused one is logged, not kept (PHONE-249 foreman ruling 1)."""
+    logged = []
+    monkeypatch.setattr(bot, "log", logged.append)
+    fake_message.answer((2, {"sent": "no", "kind": "identity", "message": "cannot be signed"}))
+    why = []
+    assert bot.mail_in("Team", 12, "call", "partial", msgid="call-preview-12-1-1@host",
+                       in_reply_to="call-12-1@host", headers={"X-Call-Preview": "1.1"},
+                       refusal=why) is False
     assert bot.SPOOL.counts() == (0, 0)
+    assert not [p for p in undelivered_in_tmp.rglob("*") if p.is_file()]
     (line,) = logged
-    assert line.startswith(f"BRIDGE MAIL FAILED rc={reply[0]} kind={reply[1]['kind']}")
-    assert line.endswith("; a call mail, not kept") and why == [line[len("BRIDGE MAIL FAILED "):-len("; a call mail, not kept")]]
+    assert line.endswith("; a call preview, not kept: the turn carries the whole text")
+    assert why and line.startswith(f"BRIDGE MAIL FAILED {why[0]}; ")
 
 
 def test_an_m1_refusal_is_still_spooled(fake_message, undelivered_in_tmp):
@@ -215,10 +237,12 @@ def test_an_m1_refusal_is_still_spooled(fake_message, undelivered_in_tmp):
 
 
 def test_the_delta_call_path_makes_one_try(fake_message):
-    """A world kind that the web path would retry: the Delta path tries ONCE (design §2(b))."""
+    """A world kind that the web path would retry: the Delta path tries ONCE (design §2(b)),
+    and the refused turn waits in the spool (PHONE-249)."""
     fake_message.answer(*[(3, {"sent": "no", "kind": "mta", "message": "no MTA"})] * 3)
     assert bot.mail_in("Team", 12, "call", "x", msgid="call-turn-12-1@host", in_reply_to="call-12-1@host") is False
-    assert len(fake_message.calls()) == 1 and bot.SPOOL.counts() == (0, 0)   # nothing left to retry it
+    # one try here; the spool keeps it for its own retries (PHONE-249)
+    assert len(fake_message.calls()) == 1 and bot.SPOOL.counts() == (1, 0)
 
 
 def _src_grep(pattern, root=REPO):
@@ -279,8 +303,14 @@ def test_every_message_send_in_src_is_seatmails():
     """One sender: nothing in src runs `message send` but seatmail (send_args and the
     probe). calls.py runs `message verify` twice, which sends nothing: the signature
     check (PHONE-155) and `verify --trust --require-blessing`, the registry rung
-    (PHONE-156)."""
+    (PHONE-156). settings.py runs `session agent default` once, which asks
+    sessiontools the vendor's word and sends nothing (PHONE-247)."""
+    from sessionphone import settings
     runs = [line for line in _src_grep(r"subprocess\.run\(\[exe") if "seatmail.py" not in line]
+    vendor = [line for line in runs if line.startswith("src/sessionphone/settings.py:")]
+    assert len(vendor) == 1 and "[exe, *VENDOR_ARGS]" in vendor[0], vendor
+    assert settings.VENDOR_ARGS == ("agent", "default")
+    runs = [line for line in runs if line not in vendor]
     assert [line.split(":")[0] for line in runs] == ["src/sessionphone/bridge/calls.py"] * 2
     assert all('[exe, "verify",' in line for line in runs), runs
 

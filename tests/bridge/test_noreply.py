@@ -243,7 +243,9 @@ def test_a_refused_send_arms_nothing(rig):
         await s._mail_turn("hello")
         await asyncio.sleep(SETTLE)
     run(go())
-    assert rig.spoken == [] and s.noreply_task is None
+    # no watchdog and no holding line: the caller hears the undelivered line instead (PHONE-249 D5)
+    assert rig.spoken == [(calls.UNDELIVERED_LINE, "bridge")] and s.noreply_task is None
+    assert calls.HOLDING_LINE not in [t for t, _ in rig.spoken]
 
 
 def test_a_turn_cancelled_mid_send_still_gets_its_watchdog(rig):

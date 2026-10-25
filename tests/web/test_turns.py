@@ -677,23 +677,26 @@ def test_t8_no_seat_named_is_refused_even_with_claude_code_agent():
 @pytest.mark.parametrize("flag,environ,to", [
     ("alice@example.net", {"DC_MAILTO": "carol@example.net", "DC_AGENT": "team"}, "alice@example.net"),
     (None, {"DC_MAILTO": "carol@example.net", "DC_AGENT": "team"}, "carol@example.net"),
-    (None, {"DC_AGENT": "Team"}, f"team@{HOST}"),
+    (None, {"DC_AGENT": "Team"}, "team"),                                # bare: no host baked in (PHONE-248)
     (None, {"PIP_CHAT_MAILTO": "old@example.net"}, "old@example.net"),     # the deprecated alias
+    ("alice", {"DC_MAILTO": "carol@example.net"}, "alice"),                # a bare --mail-to is kept
+    (None, {"DC_MAILTO": "alice"}, "alice"),                              # a bare DC_MAILTO is kept
 ])
-def test_t8_the_seat_is_mail_to_else_dc_mailto_else_dc_agent_at_host(flag, environ, to):
+def test_t8_the_seat_is_mail_to_else_dc_mailto_else_bare_dc_agent(flag, environ, to):
     seat, why = turns.named_seat(flag, environ={"CLAUDE_CODE_AGENT": "worker", **SH, **environ}, fqdn=HOST)
     assert why == "" and seat.to == to and seat.host == HOST
     assert "worker" not in seat.addr                                    # never the shell's agent (A8)
 
 
 @pytest.mark.parametrize("flag,environ", [
-    ("alice", {}), ("alice@", {}), ("@example.net", {}), (" @ ", {}),
-    (None, {"DC_MAILTO": "alice"}),
+    ("alice@", {}), ("@example.net", {}), (" @ ", {}), ("@", {}),
+    (None, {"DC_MAILTO": "alice@"}),
 ])
 def test_t8_a_to_that_is_no_mail_address_is_refused(flag, environ):
-    """build-002 review N3: a To with no box or no host goes to a local user, not the seat."""
+    """A To with no box, or an `@` and no host, names no box: refused. A bare box
+    (`alice`) is kept: it is the box on this host (PHONE-248)."""
     seat, why = turns.named_seat(flag, environ={**SH, **environ}, fqdn=HOST)
-    assert seat is None and "is not a mail address" in why and "BOX@HOST" in why
+    assert seat is None and "is not a mail address" in why and "BOX or BOX@HOST" in why
 
 
 def test_t8_the_from_follows_the_seat_not_the_shell():
@@ -759,7 +762,7 @@ def test_t8_no_dc_host_defaults_through_host_part_not_getfqdn(no_mail_json, host
     seat, why = turns.named_seat("ada@example.net", environ={}, fqdn=fqdn, hostname=hostname)
     assert why == "" and seat.host == host and seat.addr == f"ada-chat@{host}"
     seat, why = turns.named_seat(None, environ={"DC_AGENT": "ada"}, fqdn=fqdn, hostname=hostname)
-    assert why == "" and seat.to == f"ada@{host}"
+    assert why == "" and seat.to == "ada" and seat.host == host     # the To is bare (PHONE-248); the host is not in it
 
 
 def test_t8_the_arpa_regression_through_the_socket_calls(no_mail_json, monkeypatch):
@@ -782,7 +785,7 @@ def test_t8_a_named_dc_host_is_trusted_and_used():
     seat, why = turns.named_seat("alice@example.net", environ={"DC_HOST": "localhost"}, fqdn="1.0.ip6.arpa")
     assert why == "" and seat.host == "localhost"
     seat, why = turns.named_seat(None, environ={"DC_HOST": "example.net", "DC_AGENT": "alice"}, fqdn="")
-    assert why == "" and seat.to == "alice@example.net" and seat.host == "example.net"
+    assert why == "" and seat.to == "alice" and seat.host == "example.net"     # DC_HOST: Reply-To, never the To
 
 
 def test_t8_the_start_lines_name_the_to_the_from_and_the_reply_to(tmp_path):
@@ -814,3 +817,34 @@ def test_t8_a_missing_heard_dir_is_marked_at_start_never_silent(tmp_path):
     _, b = turns.start_lines(seat, tmp_path / "nope")
     assert b == (f"heard log: {tmp_path / 'nope'}  (missing: no turn reaches the seat until the ears "
                  "write here; check --heard-dir)")
+
+
+# ---- a long turn reaches the seat whole -------------------------------------------------
+
+LONG_WORDS = [f"w{i:04d}" for i in range(2500)]
+LONG = " ".join(LONG_WORDS)                      # 14,999 characters: a turn of minutes
+
+
+def test_a_long_web_turn_reaches_the_seat_whole(heard, fake_message):
+    """Every heard word is mailed, in order, once: in the turn mail, or in
+    continuation mail threaded under it. A split is marked; a plain '...' never
+    stands for words that were not sent."""
+    import re
+    f = follower(heard)
+    write(heard, turn(741, LONG))
+    go(pump(f))
+    mails = fake_message.mails()
+    turn_id = f"<call-turn-web-{N}-741@{IDS}>"
+    ids, parts = {turn_id}, []
+    for m in mails:
+        if m["Message-ID"] == turn_id or m["In-Reply-To"] in ids:
+            ids.add(m["Message-ID"])
+            parts.append(m.get_content().split("\n\n---\n", 1)[0])
+    assert parts, "no turn mail"
+    got = re.findall(r"\bw\d{4}\b", " ".join(parts))
+    assert got == LONG_WORDS, (f"{len(got)} of {len(LONG_WORDS)} words reached the seat, in "
+                               f"{len(parts)} mail(s); the last ends {parts[-1][-40:]!r}")
+    for p in parts:
+        assert not p.rstrip().endswith("..."), f"a plain '...' stands for words not sent: {p[-40:]!r}"
+    for p in parts[:-1]:
+        assert "[continued" in p, f"a split that is not marked: {p[-80:]!r}"

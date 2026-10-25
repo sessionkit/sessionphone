@@ -97,21 +97,6 @@ def root_from() -> tuple[pathlib.Path, str]:
     return pathlib.Path(DEFAULT_ROOT).expanduser(), "the default"
 
 
-def accounts_dir() -> pathlib.Path:
-    """The rpc-server's accounts directory: the keys, in a plain SQLite file."""
-    return root() / "accounts"
-
-
-def invite_path() -> pathlib.Path:
-    """The invite link `setup` saved: what a phone scans to reach this agent."""
-    return root() / "invite.txt"
-
-
-def callers_path() -> pathlib.Path:
-    """The approved callers: one address per line, `#` starts a comment."""
-    return root() / "callers.txt"
-
-
 def ensure_private(create: bool = False, at: pathlib.Path | None = None) -> None:
     """The root holds the relay password and the keys: 0700, or refuse.
 

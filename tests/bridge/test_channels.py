@@ -10,13 +10,14 @@ import os
 import threading
 import time
 
+import _keyfakes
 import pytest
 
 from sessionphone.bridge import bot, calls
 
 OWNER = "alice@relay.example"
 STRANGER = "bob@relay.example"
-LIST = f"family  chat:12   # the family group\nowner   {OWNER}   # owner\n"
+LIST = f"family  chat:12   # the family group\nowner   {OWNER}  key:{_keyfakes.FPR_K1}   # owner\n"
 
 
 class Done(Exception):
@@ -45,7 +46,10 @@ class FakeContact:
         self.account, self.addr, self.name, self.chat_id = account, addr, name, chat_id
 
     def get_snapshot(self):
-        return Obj(address=self.addr, display_name=self.name, name="")
+        return Obj(address=self.addr, display_name=self.name, name="", is_key_contact=True)
+
+    def make_vcard(self):           # the owner holds K1, anyone else K2
+        return _keyfakes.vcard(self.addr, _keyfakes.K1 if self.addr == OWNER else _keyfakes.K2)
 
     def create_chat(self):          # opens the 1:1; sends nothing
         return self.account.get_chat_by_id(self.chat_id)
@@ -115,8 +119,9 @@ class FakeAccount:
     def get_config(self, key):
         return "carol@test"
 
-    def get_contacts(self):
-        return list(self.contacts.values())
+    def get_contacts(self, query=None):
+        q = (query or "").lower()
+        return [c for c in self.contacts.values() if q in c.addr.lower()]
 
     def get_contact_by_addr(self, addr):
         return self.contacts.get(addr)
@@ -345,9 +350,9 @@ def test_a_name_with_no_list_is_refused(rig) -> None:
 
 
 def test_a_listed_address_this_profile_never_met_is_refused(rig) -> None:
-    rig.write(LIST + "ghost  ghost@example.org\n")
+    rig.write(LIST + f"ghost  ghost@example.org  key:{_keyfakes.FPR_V4}\n")
     (ack,) = rig.run({"chat": "ghost", "text": "hi"})
-    assert ack["ok"] is False and "not a contact of this profile" in ack["detail"]
+    assert ack["ok"] is False and "no contact of this profile holds" in ack["detail"]
     assert rig.account.sent == []
 
 
@@ -379,7 +384,8 @@ def test_an_edit_takes_effect_at_the_next_job_and_is_logged(rig) -> None:
     acks = rig.run({"chat_id": 12, "text": "one"}, {"chat_id": 12, "text": "two"})
     assert [a["ok"] for a in acks] == [True, False]
     assert rig.account.sent == [("text", 12)]
-    assert f"channels: {rig.path} changed: added carol (chat:7); removed family (chat:12)" in rig.logs
+    assert (f"channels: {rig.path} changed: added carol (chat:7); removed family (chat:12); "
+            f"key of owner {_keyfakes.FPR_K1} -> unpinned") in rig.logs
 
 
 def test_changes_are_logged_once_by_name(rig) -> None:

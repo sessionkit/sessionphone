@@ -145,6 +145,13 @@ def _drive_turns(mp, out):
     rc.code = 3                                         # the MTA refuses (message send --json)
     rc.out = '{"sent": "no", "kind": "mta", "message": "no MTA at /usr/sbin/sendmail", "notices": []}'
     t.turn(t._session(), "refused")
+    live = t._session()                                 # on a live call the caller is told (PHONE-249 D5)
+    live.pc, live.closed = object(), None
+
+    async def _said(*a, **k):
+        return {"n": 1, "failed": 0, "error": None, "cut": False}
+    live.speak = _said
+    t.turn(live, "refused on a live call")
     rc.code, rc.out = 0, ""
 
     def boom(*a, **k):
@@ -264,6 +271,45 @@ def _drive_heard(mp, out):
     heard_sink._reset_for_tests()
 
 
+def _drive_ring(mp, out):
+    """PHONE-240: rings through the REAL handle_events: its CALL EVENT line,
+    video off and on, then a ring ignored for want of the media pack; then
+    the answered call's session to its first line, CALL INCOMING, and no
+    further (no ring wait, no media)."""
+    class Stop(Exception):
+        pass
+    rings = [types.SimpleNamespace(kind=bot.EventType.INCOMING_CALL, msg_id=77, chat_id=12,
+                                   has_video=v) for v in (False, True)]
+
+    def wait_for_event():
+        if not rings:
+            raise Stop
+        return rings.pop(0)
+    mp.setattr(bot, "log", out.append)
+    mp.setattr(bot, "calls_refusal", lambda starts=True: None)
+    mp.setattr(bot, "calls", types.SimpleNamespace(incoming=lambda account, event: None))
+    with pytest.raises(Stop):
+        bot.handle_events(types.SimpleNamespace(wait_for_event=wait_for_event))
+    rings.append(types.SimpleNamespace(kind=bot.EventType.INCOMING_CALL, msg_id=78, chat_id=12,
+                                       has_video=False))
+    mp.setattr(bot, "calls", None)                      # heard, and ignored: no media pack
+    with pytest.raises(Stop):
+        bot.handle_events(types.SimpleNamespace(wait_for_event=wait_for_event))
+
+    mp.setattr(calls, "_hooks", calls.Hooks(out.append, None, None))
+    mp.setattr(calls, "RING", True)
+    s = object.__new__(calls.CallSession)
+    s.msg_id, s.chat_id, s.chat_name, s.caller, s.has_video = 77, 12, "Pat", "Pat", False
+
+    async def named():
+        pass
+
+    async def not_picked_up(loop):
+        return False
+    s._names, s._ring = named, not_picked_up
+    asyncio.run(s.run())
+
+
 @pytest.fixture(scope="module")
 def emitted(_message_tripwire_script, tmp_path_factory):
     """Every line the drives log. A module fixture runs BEFORE the autouse,
@@ -273,17 +319,18 @@ def emitted(_message_tripwire_script, tmp_path_factory):
     host PATH: with no sessionmail installed no turn was "mailed" and the
     turn lines were never emitted; with it installed, the REAL binary was
     resolved. Now the test means the same on any machine."""
-    from sessionphone.bridge import seatmail
+    from sessionphone.bridge import seatmail, spool
     out = []
     trips = tmp_path_factory.mktemp("doc-message-calls") / "calls"
     with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(spool, "DIR", tmp_path_factory.mktemp("doc-undelivered"))   # a refused turn is kept
         mp.setenv("DC_MESSAGE", str(_message_tripwire_script))
         mp.setenv("MESSAGE_TRIP_LOG", str(trips))
         mp.setattr(seatmail, "MESSAGE", None)
         mp.setattr(dc_env, "MAILTO", BOX)
         mp.setattr(calls, "_call_id", None)
         for drive in (_drive_turns, _drive_noreply, _drive_ice, _drive_redact, _drive_heard,
-                      _drive_first_wait):
+                      _drive_first_wait, _drive_ring):
             drive(mp, out)
     assert not trips.exists() or not trips.read_text(), f"a drive ran message:\n{trips.read_text()}"
     return out

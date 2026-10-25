@@ -47,18 +47,20 @@ root `bot install` keeps in `phone.json` (below), else `~/.sessionphone`.
 `<home>` is the bot's home: `<root>` itself for the default profile, and
 `<root>/<profile>` for a bot run with `DC_PROFILE` (see
 [Two profiles on one root](#two-profiles-on-one-root)).
-`<agent>` is `DC_AGENT` as below, and `<Name>` is `DC_AGENT_NAME`.
+`<agent>` is `DC_AGENT` as below. `<Name>` is the name the bot greets by:
+`DC_AGENT_NAME`, else `DC_NAME`, else the account's display name (the name
+`setup --name` gave it), else `<agent>`, capitalised.
 
 ## Identity and mail
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `DC_AGENT` | name | as **Which bot** below, for `bot install`, `bot run` and the `dc-*` tools alike | who the bot speaks for, in lower case. It names the launchd job |
-| `DC_AGENT_NAME` | text | `<agent>`, capitalised | the name in greetings and in the mail's From |
+| `DC_AGENT_NAME` | text | `<agent>`, capitalised | the name in the mail's From. Set, it is also the name in the greetings; unset, they use the display name |
 | `DC_NAME` | text | `<agent>`, title-cased, unless the account has a name set by hand | the bot's Delta Chat display name, the name people see. The bot sets it at its start and writes the saved invite again, so `invite` and `qr` show it. Unset, it is the agent's name over an empty name or the name of the agent the bot is or replaced (`--replace`); any other name was set by hand and is kept. See [The bot's name][bots-name] in the README |
 | `DC_HOST` | host | sessionmail's host: `SESSIONMAIL_HOST`, else the `host` in sessionmail's `mail.json`, else the first part of this machine's name | the domain the default addresses are built on. The bot refuses to start when it is unset and that host is empty or `localhost` |
 | `DC_ADDR` | address | `<agent>-chat@<host>` | the bot's own From seat. Its local part is the seat the key signs as. Do not set it to the agent's box: the signer and the From would be different seats, and the bot refuses |
-| `DC_MAILTO` | address | `<agent>@<host>` | where Delta text goes: the agent's box, where chat and call turns are mailed |
+| `DC_MAILTO` | box | `<agent>` (bare) | where Delta text goes: the agent's box, where chat and call turns are mailed. A bare name is a box on this host (sessionmail adds the host, so it survives a rename); `box@host` is kept as given, for a box on another host |
 | `DC_MESSAGE` | path | `message` on `PATH` | sessionmail's `message` binary. `bot install` pins it to an absolute path: launchd's `PATH` is short |
 | `DC_SIGNER_SOCK` | path | `SEAT_SOCKET` from `message seat agent --install` | the socket of the seat's key agent. Unset on the mail drop, the bot does not sign. When it signs (an MTA, or `--registry`) with neither `DC_SIGNER_*` set, `bot install` runs that command and uses what it prints (saved only with `--registry`); a sessionmail without `Capability: install` refuses instead |
 | `DC_SIGNER_PUB` | path | `SEAT_PUB` from `message seat agent --install` | the seat's `.pub`, or a copy kept apart from the key. Set both `DC_SIGNER_*` to use a seat agent you run yourself |
@@ -88,12 +90,13 @@ leaves the last settings that worked.
   later one. It is repeatable.
 - **Which bot:** `DC_AGENT`, else the seat sessionmail says the installing
   session has (`message subscription list`), when a later session can be
-  started as it, else the one bot the file records, else `claude`. A session
-  id or a `+` address never names the bot, so a plain `claude` or a task
-  seat (whose `CLAUDE_CODE_AGENT` is a role) gets the recorded bot, else
-  `claude`. Only when sessionmail gives no answer is `CLAUDE_CODE_AGENT`
-  taken instead. With two or more recorded and no name in your shell,
-  install refuses (exit 2) and names them.
+  started as it, else the one bot the file records, else the harness
+  vendor's word (`session agent default`, from sessiontools 0.3.1), else
+  `claude`. A session id or a `+` address never names the bot, so a plain
+  `claude` or a task seat (whose `CLAUDE_CODE_AGENT` is a role) gets the
+  recorded bot, else that same default. Only when sessionmail gives no
+  answer is `CLAUDE_CODE_AGENT` taken instead. With two or more recorded
+  and no name in your shell, install refuses (exit 2) and names them.
 - **One bot to a root:** a root is one Delta Chat account. When the files
   record another bot whose root (`DC_ROOT`, else `SESSIONPHONE_ROOT`, else
   `~/.sessionphone`) or account folder (`DC_ACCOUNTS`, else
@@ -196,8 +199,8 @@ root itself and `DC_VOICES`, which every profile shares under `<root>`.
 | `DC_LOG` | `<home>/bot.log` | the bot's log |
 | `DC_SEEN` | `<home>/bridged-ids.txt` | the message ids already mailed, so a restart never mails one again |
 | `DC_UNDELIVERED` | `<home>/undelivered` | agent mail that failed to send, waiting for a retry |
-| `DC_CALLERS_FILE` | `<home>/callers.txt` | who may ring the bot |
-| `DC_CHANNELS_FILE` | `<home>/channels.txt` | where the bot may send |
+| `DC_CALLERS_FILE` | `<home>/callers.txt` | who may ring the bot: one `ADDR  key:FPR` line per caller, bound to a key |
+| `DC_CHANNELS_FILE` | `<home>/channels.txt` | where the bot may send; an address is bound to a key (`NAME ADDR key:FPR`) |
 | `DC_GUESTS` | `<home>/call-guests.txt` | who may mail into a call |
 | `DC_VOICES` | `<root>/voices.json` | which voice reads each sender's mail into a call |
 | `DC_CALLS_DIR` | `<home>/calls` | one directory per call |
@@ -260,6 +263,8 @@ rivals; two bots on one home still are.
 | `DC_GREETING_VOICEMAIL` | text | `<Name> can't pick up right now. Leave a message and it reaches <Name> as mail.` | said when a call goes to voicemail |
 | `DC_NO_REPLY_S` | seconds | `0` (off) | after this long with no reply to a turn, say the holding line, once |
 | `DC_HOLDING_LINE` | text | `I heard you, give me a moment.` | the holding line |
+| `DC_FLOOR_GAP` | seconds | `0.8` | a reply (a `dc-say`, a mail into the call, a mouth line) does not start while the caller is speaking: it waits until the caller has been quiet this long. `0` turns it off |
+| `DC_FLOOR_CAP` | seconds | `6` | the longest a reply waits for that quiet. Then it plays anyway, so noise on the line cannot silence the agent |
 | `DC_FIRST_CALL_WAIT` | `on`/`off` | `on` | while the speech models are still downloading, a call hears a line saying so, then the music file, until it can hear. Off, that first call is silent until the models are in |
 | `DC_WAIT_MUSIC` | path | `<root>/wait-music.opus` | the music for that wait: any audio file the bot can decode. Missing or unreadable, the line repeats every 20 s with the download's progress instead |
 | `DC_HOLD_TURN` | `1`/`0` | `1` | keep a turn open while the caller is still speaking. `0` lets a turn go out while they talk on |
@@ -324,7 +329,7 @@ also a flag, and the flag wins.
 
 | Key | Flag | Default | What it does |
 | --- | --- | --- | --- |
-| `DC_MAILTO` | `--mail-to` | `<DC_AGENT>@<host>`; with neither set, `--legs` is refused | the seat each finished turn is mailed to, with `--legs` |
+| `DC_MAILTO` | `--mail-to` | the bare `<DC_AGENT>`; with neither set, `--legs` is refused | the seat each finished turn is mailed to, with `--legs` |
 | `DC_CALLER_NAME` | `--caller-name` | `owner` | the caller's name, and a new passkey's label. It grants nothing |
 | `EARS_HEARD_DIR` | `--heard-dir` | `$VOICEMODE_BASE_DIR/logs/conversations`, else `~/.voicemode/logs/conversations` | the heard log the turns are read from |
 | `SESSIONPHONE_ROOT` | `--root` | `~/.sessionphone` | the root. The web state goes in its `web/` |

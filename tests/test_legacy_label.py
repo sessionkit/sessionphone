@@ -357,7 +357,7 @@ def test_a_changed_agent_gets_its_own_line_not_the_env_rerun(rig, monkeypatch, g
         f"This legacy job's DC_AGENT is Bob, not ada: install as bob (`sessionphone bot "
         f"uninstall` first, it removes {OLD}, then `DC_AGENT=Bob sessionphone bot install`: "
         "install's name is DC_AGENT, else this session's seat, else the one bot phone.json "
-        "records, else claude), or "
+        "records, else the harness vendor's word, else claude), or "
         "`sessionphone bot uninstall` first to accept the change, then `sessionphone bot install`.")
     assert "re-run with DC_AGENT" not in msg                  # the advice that loops
     assert "with the old values in the env" not in msg

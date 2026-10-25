@@ -7,7 +7,388 @@ version lives in `pyproject.toml`; `scripts/release.py` bumps it with
 `uv version`, mirrors it into `.claude-plugin/*.json` when present, and
 stamps this file.
 
+Changes since the last release are in `changelog.d/`, one file each, not in
+this file; `changelog.d/README.md` says how to write one. `make changelog`
+prints them as the next release will read. The release moves them in here,
+under the new version.
+
 ## [Unreleased]
+
+## [0.3.1] - 2026-10-25
+
+### Changelog entries are written one file per change
+
+- A change now writes its changelog entry to its own file,
+  `changelog.d/<TASK-ID>-<slug>.md`, and no longer edits `CHANGELOG.md`.
+  Two changes in flight never clash on one file, and an entry can no longer
+  merge cleanly under a version that has already been released.
+  `changelog.d/README.md` says how to write one.
+- `make release` collects the pending entries under the new version, in
+  file-name order with numbers compared as numbers, then removes them in the
+  release commit. It refuses a malformed entry, or a file under
+  `changelog.d/` it would not read, before it bumps the version.
+- `make changelog` prints `[Unreleased]` as the next release will write it,
+  pending entries included. It writes nothing.
+
+### What sessionphone depends on, in one place
+
+- `docs/dependencies.md` lists sessionphone's direct dependencies and the
+  tools a user meets: what needs each one, by command, whether it is
+  required or optional, how it gets onto the Mac and how to upgrade it. It
+  links `uv.lock` for the full resolved set.
+- Its ffmpeg entry says what fails without it: with the speech server up,
+  a call's spoken replies go to the chat as text and the caller hears
+  nothing.
+- The README has a short `## Requirements` section: the operating systems,
+  and a link to that page.
+- `.github/dependabot.yml` asks for a daily check of the Python
+  dependencies in `uv.lock`.
+
+### Check callers.txt and channels.txt before the key upgrade
+
+- The first start on the key-bound version pins only the owner line: in
+  `callers.txt` the line whose note starts `owner`, in `channels.txt` the
+  line named `owner` or noted `owner`. A list written by hand may have no
+  such line, and then nobody can ring until a key is pinned by hand. Add
+  `# owner` to the owner's line before you upgrade.
+- The upgrade skips a list that group or others can write, and every address
+  line in it stays refused, the owner's included. 0.3.0 never checked the
+  mode of `callers.txt`, so a loose one that rings today stops ringing. Run
+  `chmod 600` on both lists before you upgrade.
+- One `callers.txt` shared by two bots (`DC_CALLERS_FILE`) is upgraded once,
+  by whichever bot starts first, counting key contacts in its own account
+  only. The other bot's owner stays unpinned. Give each bot its own file, or
+  write each owner's `key:FPR` on its line by hand, with both bots stopped
+  and upgraded.
+- The README's "Callers" section says all this under "Before you upgrade,
+  check each list", with how to tell which lines will stay unpinned.
+
+### The callers verbs and `link` use the bot's own callers file and account
+
+- `sessionphone callers` (the list, `add` and `pin`) and `sessionphone link`
+  wrote `<SESSIONPHONE_ROOT>/callers.txt` and opened
+  `<SESSIONPHONE_ROOT>/accounts`, ignoring `DC_CALLERS_FILE`, `DC_ROOT`,
+  `DC_PROFILE` and `DC_ACCOUNTS`, which the bot honours. On a bot run with any
+  of them, an approved or pinned caller landed in a file the bot never read,
+  and `link`, or a pin without `--key`, used another account.
+- They now resolve both exactly as the bot does, through one shared
+  resolver: `DC_CALLERS_FILE`, else `<home>/callers.txt`; `DC_ACCOUNTS`, else
+  `<home>/accounts`. Run them with the bot's settings to reach that bot.
+- Each names the file it read or wrote (`callers: <file>`, or `in <file>` on
+  the result line), and `link` and a lookup without `--key` print
+  `account: <folder>`.
+- `sessionphone setup` opens that same account, so it and `sessionphone
+  invite` keep the account's invite in `<home>/invite.txt`, where the bot
+  rewrites it, and no longer over the default profile's.
+- The bot's "nobody may ring" and "`DC_CALLERS` is IGNORED" lines no longer
+  say to hand-edit a callers file outside the root: they name the
+  `sessionphone` command, with the settings it needs in front.
+
+### A release no longer re-locks the dependencies
+
+- The version bump runs `uv version` with `--frozen`, on a dry run and a
+  real one, so a release resolves nothing and changes no dependency pin.
+  A release cut before a dependency's new version is on PyPI no longer
+  fails, and a local package index in the environment can no longer end up
+  in the committed `uv.lock`.
+- The release writes the new version onto the project's own line in
+  `uv.lock`, and changes nothing else in it, so `uv lock --check` passes
+  after a release. It refuses, before it writes anything, a `uv.lock` that
+  does not hold exactly one such line.
+- A release refuses an existing tag before it bumps the version, so a
+  refused release leaves the tree clean.
+- `make release` runs the script with `python3`, not `uv run`, which locked
+  the project before the script started.
+
+### Install no longer says a session will not hear its own box
+
+- With `DC_MAILTO` naming the installing session's own box (its session
+  id), `bot install`'s `hear:` line said `this session will NOT hear` it,
+  and put that warning first, though the session did hear the box. The
+  line now says `this session hears box <id> (its own session box)`, and
+  `--hear-here` says it is not needed. Another session's box, even one
+  whose id starts the same, is still reported as not heard.
+- When the bot's name came from the default and nothing hears its box,
+  install now says so in one `default:` line, which names the fix: start
+  a bare `session start` first. It asks sessionmail who hears the box,
+  read only, and says nothing when the answer is not plainly "nobody".
+- The skill and the README's quick start now say in plain words where
+  Delta text lands (the bot's own box, named after its agent), how a
+  session hears it, and what `DC_MAILTO` changes.
+
+### With nothing naming it, the bot takes the harness vendor's name
+
+- When no name is given (no `DC_AGENT`, no durable seat, no bot recorded in
+  `phone.json`), the bot was always named `claude`. Its name now comes from
+  the harness vendor, as `session agent default` prints it, so the bot and
+  the default seat are named alike. The `dc-*` tools pick the same name.
+- phone 0.3.1 works with sessiontools 0.3.0: when `session agent default`
+  is missing, fails, prints no single word or does not answer within a few
+  seconds, the name falls back to `claude`, as before.
+
+### The agent's box is a bare name, so it survives a renamed machine
+
+- Delta text went to `<agent>@<host>` by default, with this machine's name
+  baked in. Once the machine was renamed, every mail to that address was
+  refused, and `setup` and `bot install` printed the host-qualified address
+  as the one to use.
+- `DC_MAILTO` now defaults to the bare agent name, such as `claude`.
+  sessionmail adds this machine's host when it delivers, so the box keeps
+  working after a rename. A `DC_HOST` no longer changes that default.
+- A `DC_MAILTO` that names a host is kept exactly as given: name a host only
+  for a box on another machine. A bare `DC_MAILTO` is a box on this machine,
+  so the bot makes it at start instead of refusing it on the mail drop.
+- `sessionphone web --legs` accepts a bare `--mail-to` or `DC_MAILTO`, and
+  its default seat is the bare `DC_AGENT`.
+- The `hear:` hints, the README, the settings docs and the skill now show
+  bare box names (`DC_MAILTO=BOX`).
+
+### A call turn the mail system refuses is kept and retried
+
+- A call mail that `message send` refused was logged and dropped, so every
+  turn of a call could be lost while the caller kept talking. Call mails are
+  now kept in the undelivered spool and retried like any other agent mail.
+  A call's preview is still not kept: the turn carries its whole text.
+- A call mail is never delivered twice. Before a retry, the bridge reads the
+  agent's box, read-only, for the mail's own Message-ID, and does not send
+  it again if it is there. A mail that may already have gone, to a box the
+  bridge cannot read, goes to `undelivered/dead/` instead of being resent.
+- `sessionphone bot status` now prints an `undelivered:` line with the mail
+  waiting and dead in the bot's spool, call turns included.
+
+### The caller hears when a call turn does not reach the agent
+
+- When a turn's mail was refused, the call said nothing, and the caller
+  kept talking into silence. Now the call says "I couldn't reach the
+  agent." once for that turn: never once per chunk, and not again when the
+  bridge retries it. A call that is hanging up says nothing.
+
+### Reinstalling the bot no longer drops a live call
+
+- `sessionphone bot install` and `bot uninstall` stop the bot, and the call
+  it holds dropped with no warning. While a call is up they now refuse,
+  exit 2, with `a call is live; hang up or pass --force`, then the call.
+  Nothing is written or stopped.
+- `--force` restarts or stops the bot anyway, and the call drops.
+- A `call-live.json` left by a bot that was stopped mid-call is not counted
+  as a call, so it never blocks a later install.
+
+### Setup checks speech-to-text before the phone is linked
+
+- `sessionphone setup` now ends with a `hearing:` check: it sends a
+  half-second test clip to the speech-to-text server the bot will use
+  (`DC_STT_URL`, else the default) before the phone is linked. When nothing
+  answers, it names the install step: under Session Kit
+  `ears services install --only speech`, standalone VoiceMode's. Before, a
+  missing speech server was first reported at `bot install`, the last step,
+  after the link. Setup's exit codes do not change.
+- `sessionphone bot status` now gives one `hearing:` line for the job's
+  speech-to-text server, capped at a few seconds. A server that stopped
+  answering after install is reported, with the URL that did not answer.
+
+### `dc-say --text-only` posts to the chat without speaking into a call
+
+- A plain `dc-say` is read aloud into a call that is live in the chat, so a
+  report meant for the chat was spoken into the owner's call.
+- `dc-say --text-only CHAT "text"` now posts to the chat and never speaks.
+  The ack ends `NOT spoken (chat only)`.
+- `--text-only` with `--call` is a usage error (exit 1), and nothing is
+  queued. A `dc-say` without the flag behaves as before.
+
+### A call reply waits for the caller to finish speaking
+
+- A reply spoken into a call (a mouth line, a `dc-say`, a mail into the
+  call) started the moment it arrived, even in the middle of the caller's
+  sentence. Each reply the caller talked over made a new turn, which drew
+  the next reply, and the replies stacked up.
+- A reply now waits until the caller has been quiet for `DC_FLOOR_GAP`
+  seconds (0.8 by default), then plays. It waits `DC_FLOOR_CAP` seconds at
+  most (6 by default), so noise on the line cannot keep the agent silent.
+  `DC_FLOOR_GAP=0` turns the wait off.
+- Each reply that waited logs one `FLOOR` line: how long it was held, and
+  whether quiet or the cap released it. The bridge's own lines (the
+  greeting, the holding line, the notices) do not wait.
+- The skill now says how an agent takes turns on a call: one `dc-say`
+  per caller turn, a sentence or two; no reply to a fragment that asks
+  nothing ("No.", "Okay."); never a second `dc-say` before the caller
+  speaks again, and anything more goes as text in the chat, with
+  `dc-dm` (a `dc-say` to that chat is spoken into the call).
+
+### A bot stopped mid-call no longer leaves a dead call reported as live
+
+- When launchd stopped the bot during a call (a bootout, or an install over
+  a running bot), the call was never ended and `call-live.json` stayed. The
+  next bot left it there, so `dc-live` and `dc-say --call` reported the dead
+  call as live until the next call.
+- On SIGTERM the bot now ends each call it holds, so the phone hangs up too,
+  and removes `call-live.json` before it exits, well inside launchd's grace.
+- At start, once it holds the account, the bot removes a `call-live.json`
+  older than itself and says so once in `bot.log`.
+- `dc-live` no longer believes a `call-live.json` whose call began before
+  the running bot started: it says no call is live (exit 1, the reason on
+  stderr), and `dc-live --id` prints nothing.
+- The bot writes `call-live.json` whole (a temporary file renamed in), so a
+  stop in the middle of the write cannot leave a torn file.
+  A temporary file left by a bot killed in that moment is removed at the
+  next start.
+
+### Upgrade from 0.3.0: its caller check trusted the sender's address
+
+- In 0.3.0 the caller check trusted the sender's address, and an address
+  could be faked. A call could reach the bot from someone the owner never
+  approved.
+- Upgrade to 0.3.1, which checks the caller's key instead. Until you can
+  upgrade, stop the bot.
+- Read the upgrade notes first: "Before you upgrade, check each list" in the
+  "Callers" section of `README.md`, and the entry "Approved callers are bound
+  to a key fingerprint".
+
+### A kept call always tells the caller it is kept
+
+- When a call was kept with the chat line off and the spoken notice failed
+  (no ffmpeg, a speech server down, a render error), the caller got no
+  recording notice at all. The same happened with the chat line on when it
+  could not be sent and speech failed too.
+- On a kept call where neither notice reached the caller, the notice is now
+  posted once as chat text before the greeting, in the chat line's own words.
+  A notice cut short by a barge-in counts as not delivered. With the chat
+  line posted, nothing more is sent.
+- A chat line refused by `channels.txt` is not retried, and one not confirmed
+  within 5 seconds is not sent again. Each case where a notice did not get
+  through writes one `recording notice:` line to `bot.log`, ending in
+  `delivered as text` or saying the caller was `NOT delivered` the notice and
+  the call is still kept. What is recorded does not change.
+
+### Every ring is logged the moment the bot sees it
+
+- A call the bot answered wrote its first line, `CALL INCOMING`, only after
+  the call's session had looked up the chat and caller names. If a call was
+  missed and `bot.log` had no line for it, there was no telling whether the
+  ring never reached the bot or the session stalled before that line.
+- The bot now logs `CALL EVENT IncomingCall msg <id> chat <chat_id>
+  video=<False|True>` for every ring, first, before it answers, refuses or
+  ignores the call and before any lookup. The line carries no caller
+  address.
+- README's "Call troubleshooting" has a new part, "A missed call", on reading
+  the two lines together.
+
+### A long call turn reaches the agent whole
+
+- A turn of more than 4000 characters was cut at 4000, with "..." added, and
+  the rest was dropped. The agent read the "..." as the caller trailing off,
+  and never learned what else was said. The cut came from the log-line
+  helper, `one_line`, reused on the paths that carry heard words.
+- Heard words are now flattened to one line and never cut, by a new helper,
+  `flat`, on every path that feeds an agent: the Delta call's turn mail,
+  preview mail and heard-log turn and partials (both the chunk path and the
+  ears path), and the web call's turn mail and the echo check before it. The
+  call's transcript keeps the whole turn as well.
+- The caps that stay are display only, and none of them feeds an agent: the
+  bridge's log lines (`one_line`, 400 characters by default), the turn mail
+  Subject (44 characters of the turn, 34 of a preview, at most 69 in all),
+  the web turn Subject (44, at most 69), and the heard feed into a webxdc app
+  (`MAX_TEXT`, 4000 characters per payload).
+
+### A call greets by the bot's own name
+
+- A call greets by the bot's display name, the name `setup --name` gave it
+  and people see in their chat list. A bot whose agent was the default said
+  "Claude here" instead. `DC_AGENT_NAME` and `DC_GREETING*` still win, and the
+  mail's From keeps the agent's name.
+
+### A dc-say ack says "spoken" only when the line was spoken
+
+- With a call live, a `dc-say` ack said `spoken into the call` as soon as
+  the speech was scheduled. When the speech then failed (no ffmpeg, the
+  speech server down), the ack still said it, and the failure was only in
+  `bot.log`.
+- The ack now waits up to 3 s for the speech. It says `spoken into the call`
+  only after every sentence was rendered and handed to the call, and
+  `NOT spoken: tts failed: <reason>` (or `NOT spoken in full: ...`) when it
+  was not. A line still rendering is acked `queued to speak`; if it fails
+  later, the bot mails the agent one line that starts `NOT spoken`.
+- The 3 s is one wait per pass of the outbox, shared by every speaking
+  `dc-say` in it, so a burst of them still acks inside `dc-say --call`'s
+  8 s and every job is still taken inside 10 s.
+
+### Approved callers are bound to a key fingerprint
+
+- A `callers.txt` line is now `ADDR  key:FPR  # note`. The bot answers a
+  call when the caller's Delta Chat contact holds the key with that
+  fingerprint; the address is the label. A line with no `key:` is refused
+  until a key is pinned to it.
+- `sessionphone link` binds the owner line to the key of the contact that
+  joined by the invite. `sessionphone callers add ADDR --key FPR` and the new
+  `sessionphone callers pin ADDR --key FPR` take the fingerprint the phone
+  shows under the contact's profile, Encryption; without `--key` they open
+  the account (with the bot stopped) and pin only when exactly one key
+  contact has that address. `sessionphone bot install --owner ADDR` takes
+  `--owner-key FPR`. `sessionphone callers` shows each line's key, or
+  UNPINNED.
+- Upgrading: at its first start, the bot pins the owner line of a callers
+  file from an older version to the owner's one key contact. It keeps the
+  original as `callers.txt.pre-keys`, writes a marker line on top, and runs
+  only once per file. Any other line, or an owner address with no key
+  contact or with more than one, is left unpinned, and the log names the
+  `callers pin` command for it.
+
+### Address channels are bound to a key fingerprint
+
+- A `channels.txt` address line is now `NAME  ADDR  key:FPR  # note`. The
+  bot writes to, and on the public profile takes in, the 1:1 chat of a
+  contact only while that contact holds the key with that fingerprint; the
+  address is the label. An address line with no `key:` is refused until a
+  key is pinned to it. `chat:N` lines are unchanged and take no key.
+- A channel NAME (dc-say, dc-dm, dc-ring) opens the chat of the contact that
+  holds the pinned key, found by its address first and else among all the
+  profile's contacts.
+- `sessionphone link` lists the owner bound to the joiner's key.
+  `sessionphone channels add NAME ADDR --key FPR` and the new
+  `sessionphone channels pin NAME --key FPR` take the fingerprint; without
+  `--key` they open the account (with the bot stopped) and pin only when
+  exactly one key contact has that address. `bot install` and
+  `channels seed` copy the callers owner line's key. `sessionphone channels`
+  shows each address line's key, or UNPINNED.
+- Upgrading: at its first start the bot pins the owner line of a
+  `channels.txt` from an older version, as it does in `callers.txt`, keeping
+  `channels.txt.pre-keys`.
+
+### The docs say what each identity is
+
+- `X-Delta-Chat-Sender` is documented as the address a message carries, a
+  label for people, not a key and not an identity. `X-Delta-Chat-Channel` is
+  the header that carries a checked answer, and the README, the skill and
+  `docs/` say so.
+- The README has a new "Callers" section: the `ADDR  key:FPR` line, what a
+  line with no key does, the one-time upgrade (the `.pre-keys` backup, the
+  marker, what is pinned and what is not), and how to resolve an `UNPINNED`
+  or `AMBIGUOUS` line. "Channels" gains the same for `NAME ADDR key:FPR`.
+
+### `bot install` says when the bot cannot speak: no ffmpeg
+
+- On a Mac with no `ffmpeg`, `bot install` printed `hearing: yes` and
+  nothing else, yet every spoken reply failed and went to the caller as
+  chat text. The bot needs ffmpeg to turn the speech server's replies into
+  call audio, and nothing checked for it before the first call.
+- `bot install` now ends with a `speaking:` line. It looks for ffmpeg
+  where the bot looks, on the job's environment: `DC_FFMPEG`, then the
+  job's `PATH`, then `/opt/homebrew/bin/ffmpeg` and `/usr/local/bin/ffmpeg`.
+  With none, or a `DC_FFMPEG` that names no program, it says `NO`, that
+  spoken replies go as chat text, and the fix: `brew install ffmpeg`, then
+  `sessionphone bot install` again. `DC_TTS=apple` needs no ffmpeg and says
+  so. `bot status` prints the same line. Neither exit code changes.
+
+### Under Session Kit, `bot install` gives both forms of `ears services install`
+
+- When hearing is `NO` under Session Kit and the kit has no speech server,
+  the `hearing:` line gave the bare `ears services install`. ears refuses
+  that form (exit 2) while it names no seat to wake, so a Mac that only
+  runs the bot was sent straight into the refusal.
+- The line now gives both forms, one line each, after a line saying which
+  Mac it fits: `ears services install --no-agent` for a Mac that only runs
+  the bot, with no agent seat for ears to wake, and
+  `ears services install --agent NAME` for a Mac with an agent seat that
+  ears should wake when you speak. The skill's step 7 says the same.
 
 ## [0.3.0] - 2026-10-24
 

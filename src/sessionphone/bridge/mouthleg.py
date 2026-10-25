@@ -168,7 +168,8 @@ async def serve_one(manager, reader, writer, log=print):
         text = str(hdr.get("text") or "")
         who = str(hdr.get("who") or dc_env.AGENT_NAME)
         who = who.capitalize() if who.islower() else who   # the mouth sends the agent name in lowercase
-        line = cand.voice.line(who)   # its place in the call's lines: arrival order
+        line = cand.voice.line(who, floor=True)   # its place in the call's lines: arrival order;
+                                                  # a reply: it waits for the caller's quiet
         s = cand
 
         def on_queue(start_at, secs):   # A frames reach the track: now, or at this line's turn

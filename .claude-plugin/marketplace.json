@@ -2,7 +2,7 @@
   "name": "sessionphone",
   "metadata": {
     "description": "Self-hosting marketplace for the sessionphone plugin - add with `claude plugin marketplace add <path or url>`.",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "owner": {
     "name": "Mike Bailey",

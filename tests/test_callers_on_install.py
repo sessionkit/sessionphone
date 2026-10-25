@@ -19,11 +19,12 @@ Delta Chat address. Every test here runs with HOME pointed at a tmp dir.
 """
 import os
 import stat
+import types
 
 import pytest
 from click.testing import CliRunner
 
-from sessionphone import account, service
+from sessionphone import account, keygate, service
 from sessionphone.bridge import dc_env
 from sessionphone.cli import main as cli
 
@@ -82,16 +83,17 @@ def test_the_no_owner_refusal_names_the_two_ways_forward(rig, tmp_path):
     assert rig.calls == []
 
 
-def test_past_a_dc_callers_file_the_refusal_offers_the_file_not_link(rig, monkeypatch, tmp_path):
-    """`link` writes only the default file, so past DC_CALLERS_FILE the first way
-    is to add the address to that file; there are still two ways."""
+def test_past_a_dc_callers_file_the_refusal_offers_link_with_that_file(rig, monkeypatch, tmp_path):
+    """`link` writes the bot's file for the environment it runs in, so past
+    DC_CALLERS_FILE the first way is still `link`, with that setting in front;
+    there are still two ways, and neither is a hand edit."""
     elsewhere = tmp_path / "elsewhere" / "callers.txt"
     monkeypatch.setenv("DC_CALLERS_FILE", str(elsewhere))
     r = CliRunner().invoke(cli, ["bot", "install"])
     assert r.exit_code == 2, r.output
     ways = " ".join(r.output.split()).split("Name the owner, one of two ways: ", 1)[1]
-    assert ways.startswith(f"add the owner's Delta Chat address to {elsewhere}, one per line")
-    assert "sessionphone link" not in ways
+    assert ways.startswith(f"run `DC_CALLERS_FILE={elsewhere} sessionphone link` and scan the invite")
+    assert "one per line" not in ways
     assert "--owner ADDR" in ways and "Delta Chat address" in ways
     assert rig.calls == [] and not elsewhere.exists()
 
@@ -219,7 +221,8 @@ def test_callers_ignored_names_the_variable_and_the_file(tmp_path):
     f = tmp_path / "c.txt"
     assert dc_env.callers_ignored({"DC_CALLERS_FILE": str(f)}) is None
     got = dc_env.callers_ignored({"DC_CALLERS": "a@b.example", "DC_CALLERS_FILE": str(f)})
-    assert got.startswith("DC_CALLERS is set and IGNORED") and f"to {f}, one per line" in got
+    assert got.startswith("DC_CALLERS is set and IGNORED")
+    assert f"with `DC_CALLERS_FILE={f} sessionphone callers add ADDR`" in got
     got = dc_env.callers_ignored({"PIP_CHAT_CALLERS": "a@b.example", "DC_CALLERS_FILE": str(f)})
     assert got.startswith("PIP_CHAT_CALLERS is set and IGNORED")
 
@@ -304,3 +307,116 @@ def test_a_bot_with_dc_callers_set_says_it_is_ignored(bot, monkeypatch, tmp_path
     text = (tmp_path / "bot.log").read_text()
     assert "WARNING: DC_CALLERS is set and IGNORED" in text and str(callers) in text
     assert "NOBODY" not in text
+
+
+# --- callers bound to a key: --owner-key, a keyed file, the start migration ---
+
+K1 = "753E8B231F10DDFB82D742DE9D43B582A752BA4C"     # tests/fixtures/openpgp/test-v4-key-1.b64
+K2 = "1A6302103BABBD68294D5F4EC5BB94C86CF1C259"
+
+
+def test_install_owner_key_binds_the_owner_line(rig, tmp_path):
+    grouped = " ".join(K1[i:i + 4] for i in range(0, 40, 4)).lower()     # as the phone shows it
+    r = CliRunner().invoke(cli, ["bot", "install", "--owner", OWNER, "--owner-key", grouped])
+    assert r.exit_code == 0, r.output
+    f = tmp_path / "root" / "callers.txt"
+    assert keygate.read_caller_entries(f)[0].key == K1 and keygate.is_marked(f)
+    assert f"bound to key {K1}" in r.output
+
+
+def test_install_refuses_a_bad_owner_key_writing_nothing(rig, tmp_path):
+    r = CliRunner().invoke(cli, ["bot", "install", "--owner", OWNER, "--owner-key", "1234"])
+    assert r.exit_code != 0 and "1234" in r.output
+    assert rig.calls == [] and not (tmp_path / "root" / "callers.txt").exists()
+
+
+def test_install_owner_without_a_key_on_a_keyed_file_is_refused_naming_owner_key(rig, tmp_path):
+    f = tmp_path / "root" / "callers.txt"
+    f.write_text(f"{keygate.MARKER}\nann@example.org  key:{K2}  # Ann\n")
+    before = f.read_text()
+    r = CliRunner().invoke(cli, ["bot", "install", "--owner", OWNER])
+    assert r.exit_code == 2 and "--owner-key" in r.output
+    assert f.read_text() == before and rig.calls == []
+
+
+def test_install_owner_already_pinned_needs_no_key(rig, tmp_path, given_seat):
+    given_seat("ada-chat")
+    f = tmp_path / "root" / "callers.txt"
+    f.write_text(f"{keygate.MARKER}\n{OWNER}  key:{K1}  # owner\n")
+    service.install("ada", owner=OWNER)                  # a re-install: nothing to write
+    assert keygate.read_caller_entries(f)[0].key == K1
+
+
+def test_install_owner_key_never_replaces_another_pinned_key(rig, tmp_path):
+    f = tmp_path / "root" / "callers.txt"
+    f.write_text(f"{keygate.MARKER}\n{OWNER}  key:{K1}  # owner\n")
+    r = CliRunner().invoke(cli, ["bot", "install", "--owner", OWNER, "--owner-key", K2])
+    assert r.exit_code == 2 and "callers pin" in r.output
+    assert keygate.read_caller_entries(f)[0].key == K1
+
+
+def test_install_owner_without_a_key_on_an_old_file_is_left_for_the_start_to_pin(rig, tmp_path, given_seat):
+    given_seat("ada-chat")
+    service.install("ada", owner=OWNER)
+    f = tmp_path / "root" / "callers.txt"
+    assert keygate.read_caller_entries(f)[0].key is None and not keygate.is_marked(f)
+
+
+def test_a_keyed_file_with_nothing_pinned_is_nobody(tmp_path):
+    f = tmp_path / "callers.txt"
+    f.write_text(f"{keygate.MARKER}\n{OWNER}  # owner\n")
+    why = dc_env.callers_problem({"DC_CALLERS_FILE": str(f)})
+    assert "NOBODY" in why and "none pinned" in why and "callers pin" in why
+    f.write_text(f"{OWNER}  # owner\n")                  # an old file: the bot's start pins it
+    assert dc_env.callers_problem({"DC_CALLERS_FILE": str(f)}) is None
+
+
+def test_the_bot_start_pins_an_old_owner_line(bot, monkeypatch, tmp_path):
+    import _keyfakes as kf
+    callers = tmp_path / "callers.txt"
+    callers.write_text(f"{OWNER}  # owner, Bea, joined 2030-06-09\n")
+    callers.chmod(0o600)
+    monkeypatch.setenv("DC_CALLERS_FILE", str(callers))
+    _start(bot, monkeypatch, kf.Account([kf.Contact(10, OWNER, kf.K1)]))
+    assert keygate.read_caller_entries(callers)[0].key == kf.FPR_K1
+    assert "1 pinned, 0 unpinned, 0 ambiguous" in (tmp_path / "bot.log").read_text()
+
+
+def test_the_bot_start_pins_an_old_channels_owner_line_too(bot, monkeypatch, tmp_path):
+    import _keyfakes as kf
+
+    from sessionphone import channels
+    chans = tmp_path / "channels.txt"
+    chans.write_text(f"owner  {OWNER}  # owner, Bea, joined 2030-06-09\nfamily  chat:42\n")
+    chans.chmod(0o600)
+    monkeypatch.setenv("DC_CHANNELS_FILE", str(chans))
+    monkeypatch.setenv("DC_CALLERS_FILE", str(tmp_path / "callers.txt"))
+    _start(bot, monkeypatch, kf.Account([kf.Contact(10, OWNER, kf.K1)]))
+    assert channels.load(chans).entries["owner"].key == kf.FPR_K1
+    assert chans.with_name("channels.txt.pre-keys").exists()
+    assert f"keys: {chans}: 1 pinned, 0 unpinned, 0 ambiguous" in (tmp_path / "bot.log").read_text()
+
+
+def _start(bot, monkeypatch, acc):
+    """bot.main() on ACC, up to the line after the start hook."""
+    acc.is_configured = lambda: True
+    acc.start_io = lambda: None
+
+    class Rpc:
+        def __init__(self, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(bot, "Rpc", Rpc)
+    monkeypatch.setattr(bot, "DeltaChat", lambda rpc: types.SimpleNamespace(get_all_accounts=lambda: [acc]))
+    monkeypatch.setattr(bot.pidfile, "write", lambda *a: False)
+
+    def stop(_account):
+        raise bot.Reached
+    monkeypatch.setattr(bot, "address", stop)           # the line after the start hook
+    with pytest.raises(bot.Reached):
+        bot.main()

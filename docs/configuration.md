@@ -41,8 +41,8 @@ your launchd job.
 | the invite link `setup` saved | `<root>/invite.txt` |
 
 `<agent>` is `DC_AGENT`, else `CLAUDE_CODE_AGENT`, else the one bot
-`~/.sessionkit/phone/settings/phone.json` records, else `claude`, in lower
-case.
+`~/.sessionkit/phone/settings/phone.json` records, else the harness vendor's
+word (`session agent default`, sessiontools >= 0.3.1), else `claude`, lowered.
 
 **What the job carries.** `bot install` writes the plist with this
 environment:
@@ -139,7 +139,7 @@ point the bot at the seat:
 | `DC_SIGNER_SOCK` | the socket of the seat's key agent (`SEAT_SOCKET` from `message seat agent --install`, or your own `message seat agent`'s) |
 | `DC_SIGNER_PUB` | the seat's `.pub` (`SEAT_PUB`), or a copy of it kept apart from the key |
 | `DC_ADDR` | the bot's own From seat; its local part is the seat the key signs as. Not the agent's box |
-| `DC_MAILTO` | where Delta text goes: the agent's box, `<agent>@<host>` by default |
+| `DC_MAILTO` | where Delta text goes: the agent's box, the bare `<agent>` by default; `box@host` only for a box on another host |
 
 The bot refuses to start when there is no `message` binary, a carrier
 sessionmail refuses or cannot read, a carrier of a kind the bot does not
@@ -177,12 +177,24 @@ use, so an edit takes effect at once.
 
 | File | Default | Override | What it holds |
 | --- | --- | --- | --- |
-| callers | `<root>/callers.txt` | `DC_CALLERS_FILE` | who may ring the bot, one address per line |
-| channels | `<root>/channels.txt` | `DC_CHANNELS_FILE` | where the bot may send, one `NAME TARGET` per line |
+| callers | `<root>/callers.txt` | `DC_CALLERS_FILE` | who may ring the bot, one line per caller: `ADDR  key:FPR`, bound to a key fingerprint |
+| channels | `<root>/channels.txt` | `DC_CHANNELS_FILE` | where the bot may send, one `NAME TARGET` per line; an address TARGET is bound to a key: `NAME ADDR key:FPR` |
 
-- `sessionphone link` writes the owner into the callers file;
-  `sessionphone callers add` adds more.
-- `sessionphone channels add` and `channels seed` write the channels list.
+- `sessionphone link`, `callers`, `callers add` and `callers pin` use the
+  callers file (and account) the bot uses, from the shell's environment, so
+  `DC_CALLERS_FILE`, `DC_ROOT`, `DC_PROFILE` and `DC_ACCOUNTS` move them too.
+  Each names the file it read or wrote, and the account it opened. `setup`
+  opens that same account, and it and `invite` keep its invite beside it, in
+  `<home>/invite.txt`, where the bot rewrites it.
+- `sessionphone link` writes the owner into the callers file, bound to the
+  key of the contact that joined; `sessionphone callers add ADDR --key FPR`
+  adds more, and `callers pin` binds a line that has no key. A line with no
+  `key:` is refused until it is pinned. The first start after an upgrade
+  pins the owner line once, and keeps the old file as `callers.txt.pre-keys`
+  (README, "Callers").
+- `sessionphone channels add`, `channels pin` and `channels seed` write the
+  channels list. An address line needs its `key:FPR` the same way; `chat:N`
+  lines take none.
   Keep it 0600: the bot refuses a list that group or world can write.
 - `DC_CALLERS` grants nothing. Callers come from the file only, and `bot
   install` refuses while `DC_CALLERS` is set.
@@ -269,7 +281,8 @@ account.
     was edited to another name, install says so. To keep that name, run
     `sessionphone bot uninstall` first, then install with `DC_AGENT` set to
     it. Install takes its name from `DC_AGENT`, else `CLAUDE_CODE_AGENT`,
-    else `claude`. To accept the change, run `sessionphone bot uninstall`
+    else the harness vendor's word (`session agent default`), else
+    `claude`. To accept the change, run `sessionphone bot uninstall`
     first, then `sessionphone bot install`. Uninstall removes the old plist
     that install checks against, so either way the install line install
     prints also sets every other changed key it carries. Use that line.
@@ -291,6 +304,11 @@ account.
 - **`sessionphone bot uninstall`** removes the new job and the old one, one
   line for each. It says `no launchd job was installed` only when neither
   is there.
+- **Neither one drops a live call.** While a call is up on the bot it would
+  stop, install or uninstall refuses (exit 2, nothing written, nothing booted
+  out): `a call is live; hang up or pass --force`. That covers the bots
+  `--replace` names and the old job too. `--force` goes ahead, and the call
+  drops.
 - **`sessionphone bot status`** names the new label, and prints a `legacy:`
   line while the old job is loaded or its plist exists. The line names the
   command that retires the old job: `sessionphone bot install`, or
@@ -312,7 +330,7 @@ the bot's job.
 It binds `127.0.0.1:8775` by default (`--host`, `--port`). With `--legs` each
 finished turn is mailed to a seat, and it reads:
 
-- the seat: `--mail-to`, else `DC_MAILTO`, else `<DC_AGENT>@<host>`;
+- the seat: `--mail-to`, else `DC_MAILTO`, else the bare `<DC_AGENT>`;
 - the host: `DC_HOST`, else this machine's DNS name;
 - the From: `DC_ADDR`, `DC_AGENT_NAME`, and the same `DC_SIGNER_*` and
   `DC_MESSAGE` as the bot;

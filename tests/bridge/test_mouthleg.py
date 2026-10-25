@@ -36,7 +36,7 @@ class Voice:
     def __init__(self):
         self.q, self.cuts = [], 0
 
-    def line(self, who=""):
+    def line(self, who="", floor=False):
         return Line(self)
 
     def say(self, pcm):

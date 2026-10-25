@@ -13,10 +13,11 @@ import os
 import stat
 import types
 
+import _keyfakes
 import pytest
 from click.testing import CliRunner
 
-from sessionphone import account, channels, service
+from sessionphone import account, channels, keygate, service
 from sessionphone.bridge import dc_env
 from sessionphone.cli import main as cli
 
@@ -46,16 +47,17 @@ def root(monkeypatch, tmp_path):
 
 def test_channels_add_then_list(root):
     run = CliRunner()
-    r = run.invoke(cli, ["channels", "add", "owner", "Bea@Phone.example.org", "--note", "owner, Bea"])
+    r = run.invoke(cli, ["channels", "add", "owner", "Bea@Phone.example.org", "--note", "owner, Bea",
+                         "--key", _keyfakes.FPR_K1])
     assert r.exit_code == 0, r.output
     f = root / "channels.txt"
-    assert f"listed: owner  {OWNER} ({f})" in r.output
+    assert f"listed: owner  {OWNER}  key:{_keyfakes.FPR_K1} ({f})" in r.output
     assert _mode(f) == 0o600
     assert run.invoke(cli, ["channels", "add", "family", "chat:42"]).exit_code == 0
     r = run.invoke(cli, ["channels"])
     assert r.exit_code == 0, r.output
     lines = r.output.splitlines()
-    assert lines[0].split() == ["owner", OWNER, "#", "owner,", "Bea"]
+    assert lines[0].split() == ["owner", OWNER, f"key:{_keyfakes.FPR_K1}", "#", "owner,", "Bea"]
     assert lines[1].split() == ["family", "chat:42"]
     # the one parser: what the CLI wrote is what the bot's gate reads
     assert set(channels.load(f).entries) == {"owner", "family"}
@@ -83,7 +85,7 @@ def test_channels_add_to_an_unreadable_list_exits_2_naming_it(root):
     f.write_text("family  chat:42\n")
     f.chmod(0o000)
     try:
-        r = CliRunner().invoke(cli, ["channels", "add", "owner", OWNER])
+        r = CliRunner().invoke(cli, ["channels", "add", "owner", OWNER, "--key", _keyfakes.FPR_K1])
     finally:
         f.chmod(0o600)
     assert r.exit_code == 2, (r.output, r.exception)
@@ -144,15 +146,15 @@ def test_channels_add_says_out_loud_when_it_tightens_a_loose_list(root):
     f = root / "channels.txt"
     f.write_text("family  chat:42\n")
     f.chmod(0o664)
-    r = CliRunner().invoke(cli, ["channels", "add", "owner", OWNER])
+    r = CliRunner().invoke(cli, ["channels", "add", "owner", OWNER, "--key", _keyfakes.FPR_K1])
     assert r.exit_code == 0, r.output
     assert f"tightened {f} from 0664 to 0600; check its entries" in r.stderr
     assert _mode(f) == 0o600
 
 
 def test_channels_add_to_a_tight_list_says_nothing_of_the_kind(root):
-    r = CliRunner().invoke(cli, ["channels", "add", "owner", OWNER])
-    assert "tightened" not in r.output
+    r = CliRunner().invoke(cli, ["channels", "add", "owner", OWNER, "--key", _keyfakes.FPR_K1])
+    assert r.exit_code == 0 and "tightened" not in r.output
 
 
 def test_channels_respects_dc_channels_file(root, monkeypatch, tmp_path):
@@ -179,7 +181,7 @@ def test_channels_file_resolves_as_the_bot_does(tmp_path):
 # --- callers add hints at the second list (Q4, DECIDED) ---------------------
 
 def test_callers_add_hints_to_list_the_chat_too(root):
-    r = CliRunner().invoke(cli, ["callers", "add", "Bea@Phone.example.org"])
+    r = CliRunner().invoke(cli, ["callers", "add", "Bea@Phone.example.org", "--key", _keyfakes.FPR_K1])
     assert r.exit_code == 0, r.output
     assert f"sessionphone channels add NAME {OWNER}" in r.output
 
@@ -240,7 +242,11 @@ class _Contact:
         self.calls, self.chans = calls, chans
 
     def get_snapshot(self):
-        return types.SimpleNamespace(address="Bea@Phone.example.org", display_name="Bea")
+        return types.SimpleNamespace(address="Bea@Phone.example.org", display_name="Bea",
+                                     is_key_contact=True)
+
+    def make_vcard(self):        # the joiner's key: link binds the owner line to it
+        return _keyfakes.vcard("bea@phone.example.org", _keyfakes.K1)
 
     def create_chat(self):
         self.calls.append(("create_chat",))
@@ -285,6 +291,27 @@ def test_link_lists_the_owner_before_the_greeting(linker):
     assert channels.load(linker.chans).entries["owner"].address == OWNER
 
 
+def test_link_binds_the_owner_line_to_the_joiners_key(linker):
+    info = account.link(timeout=5, greet=False)
+    assert info["owner"] and info["key"] == _keyfakes.FPR_K1 and info["key_problem"] is None
+    text = (linker.root / "callers.txt").read_text()
+    assert text.startswith(keygate.MARKER + "\n")
+    assert f"bea@phone.example.org  key:{_keyfakes.FPR_K1}  # owner, Bea, joined " in text
+    # the channels owner line is bound to the same key, so the greeting's chat passes the gate
+    e = channels.load(linker.chans).entries["owner"]
+    assert e.address == OWNER and e.key == _keyfakes.FPR_K1
+
+
+def test_link_writes_no_owner_when_the_joiner_holds_no_key(linker, monkeypatch):
+    monkeypatch.setattr(_Contact, "make_vcard", lambda self: _keyfakes.vcard(OWNER, None))
+    info = account.link(timeout=5)
+    assert not info["owner"] and "no key" in info["key_problem"]
+    assert not (linker.root / "callers.txt").exists()
+    assert not [c for c in linker.calls if c[0] == "send_text"]       # not greeted, not listed
+    r = CliRunner().invoke(cli, ["link", "--timeout", "5"])
+    assert r.exit_code == 0 and "NOT approved to call" in r.stderr
+
+
 def test_link_without_greeting_still_lists_the_owner(linker):
     info = account.link(timeout=5, greet=False)
     assert info["listed"] and not [c for c in linker.calls if c[0] == "send_text"]
@@ -318,7 +345,8 @@ def test_link_names_the_name_the_owner_is_really_listed_under(linker):
     assert r.exit_code == 0, r.output
     assert "listed: bea," in r.stdout and "listed: owner" not in r.stdout
     assert "WARNING" not in r.stderr                       # a 0600 list says nothing of the kind
-    assert linker.chans.read_text() == f"bea  {OWNER}\n"   # nothing added
+    # nothing added: the line it had is bound to the joiner's key, in place
+    assert linker.chans.read_text() == f"{channels.MARKER}\nbea  {OWNER}  key:{_keyfakes.FPR_K1}\n"
 
 
 def test_link_warns_loudly_when_it_leaves_the_list_loose(linker):
@@ -336,6 +364,7 @@ def test_link_warns_loudly_when_it_leaves_the_list_loose(linker):
     assert f"WARNING: {linker.chans} is mode 0664" in r.stderr
     assert "REFUSES EVERY SEND" in r.stderr and f"chmod 600 {linker.chans}" in r.stderr
     assert _mode(linker.chans) == 0o664                     # never tightened quietly
+    assert linker.chans.read_text() == f"bea  {OWNER}\n"   # so not pinned either
 
 
 def test_a_second_joiner_is_not_listed(linker):

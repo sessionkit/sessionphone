@@ -740,7 +740,7 @@ def test_t8_the_seat_refusal_comes_after_the_legs_refusals(tmp_path, monkeypatch
     assert r.exit_code == 2 and "keeper scans" in r.output and "no seat is named" not in r.output
 
 
-def legs_run(short_root, tmp_path, monkeypatch):
+def legs_run(short_root, tmp_path, monkeypatch, mail_to=f"alice@{TURN_HOST}"):
     """server.run with --legs, a seat named by --mail-to, a good DC_HOST -> (rc, its lines)."""
     from sessionphone.web import server as srvmod
     no_seat_env(monkeypatch)                                      # --mail-to names it; DC_AGENT would name the From
@@ -748,7 +748,7 @@ def legs_run(short_root, tmp_path, monkeypatch):
     monkeypatch.setattr(srvmod.WebServer, "_own_origins", lambda self: {f"http://localhost:{self.port}"})
     out = []
     rc = srvmod.run(short_root / "web", port=0, host="127.0.0.1", tls=None, origins=(), legs=True,
-                    explicit_root=True, mail_to=f"alice@{TURN_HOST}", heard_dir=tmp_path / "conversations",
+                    explicit_root=True, mail_to=mail_to, heard_dir=tmp_path / "conversations",
                     echo=out.append, until=lambda: asyncio.sleep(0))
     return rc, out
 
@@ -813,14 +813,26 @@ def test_t8_run_with_legs_prints_the_to_and_the_reply_to_at_start(short_root, tm
 
 
 def test_t8_cli_legs_with_a_mail_to_that_is_no_address_exits_2(short_root, monkeypatch, tmp_path):
-    """build-002 review N3: `--mail-to alice` would go to a local user, never the seat."""
+    """`--mail-to alice@` names no box on any host: refused before anything is made."""
     no_seat_env(monkeypatch)
     monkeypatch.setenv("DC_HOST", TURN_HOST)
     monkeypatch.setenv("HOME", str(tmp_path))
     root = short_root / "r"
-    r = CliRunner().invoke(cli.main, ["web", "--legs", "--port", "0", "--root", str(root), "--mail-to", "alice"])
-    assert r.exit_code == 2 and "'alice' is not a mail address" in r.output
+    r = CliRunner().invoke(cli.main, ["web", "--legs", "--port", "0", "--root", str(root), "--mail-to", "alice@"])
+    assert r.exit_code == 2 and "'alice@' is not a mail address" in r.output
     assert not root.exists()
+
+
+def test_t8_legs_keeps_a_bare_mail_to(short_root, tmp_path, monkeypatch, fake_message, seat_key):
+    """PHONE-248 (reverses build-002 review N3): `--mail-to alice` is the box alice on
+    this host. sessionmail adds the host to a bare To on both carriers (measured), so
+    the turns go To `alice`, never to a local user, and no host is baked in."""
+    seat_key("alice-chat seat")
+    rc, out = legs_run(short_root, tmp_path, monkeypatch, mail_to="alice")
+    assert rc == 0, out
+    (line,) = [m for m in out if m.startswith("  turns: ")]
+    assert line.startswith("  turns: each finished turn of a web call mailed to alice (From seat alice-chat), "
+                           f"Reply-To calls+web-<N>@{TURN_HOST} ")
 
 
 def test_t8_run_in_echo_mode_says_nothing_of_turns(tmp_path, monkeypatch):

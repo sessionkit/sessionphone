@@ -7,6 +7,9 @@ person then sees no code until Ctrl+O. The step also says what to do when the
 phone waits at "Establishing connection, please wait". The README's `invite`
 section and the CHANGELOG say the same, in what came after 0.2.1: the
 Unreleased part before a release stamp, the new release's section after one.
+The CHANGELOG is read as the next release will write it: CHANGELOG.md with
+the pending fragments in changelog.d/ collated under Unreleased
+(tests/_changelog.py), so a note still in a fragment counts.
 
 The fold count and the PNG size are held to the code: the line count comes
 from `qrprint.text` on an invite-shaped link, and the size from the QR's
@@ -14,10 +17,10 @@ module count, `qrprint.BORDER` and `qrprint.PNG_SCALE`.
 """
 from __future__ import annotations
 
-import importlib.util
 import re
 from pathlib import Path
 
+import _changelog  # CHANGELOG.md with the pending fragments collated, by release.py's merge
 import pytest
 
 from sessionphone import qrprint
@@ -72,17 +75,19 @@ def _since(text: str) -> str:
 
 
 def _unreleased() -> str:
-    return _since((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+    """What came after 0.2.1 in the CHANGELOG as `make changelog` reads it:
+    the pending fragments collated under [Unreleased]."""
+    return _since(_changelog.preview())
 
 
-def _stamped(text: str, version: str, tmp_path: Path, monkeypatch) -> str:
-    """`text` as `scripts/release.py` stamps it for `version`: its own `stamp`."""
-    spec = importlib.util.spec_from_file_location("release", ROOT / "scripts" / "release.py")
-    release = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(release)
+def _stamped(text: str, version: str, tmp_path: Path, monkeypatch, fragments: list[Path]) -> str:
+    """`text` as `scripts/release.py` stamps it for `version`, collating
+    `fragments` (absolute paths): its own `stamp`. The caller names the
+    fragments: the live ones for the stamp the release really makes, planted
+    ones for a control, so a live fragment can never move a control."""
     (tmp_path / "CHANGELOG.md").write_text(text, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    release.stamp(version, dry=False)
+    _changelog.release().stamp(version, dry=False, fragments=fragments)
     return (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
@@ -178,7 +183,7 @@ def test_changelog_unreleased_names_the_choices(words):
 @pytest.mark.parametrize("words", CHOICES)
 def test_changelog_still_names_the_choices_after_a_release_stamp(words, tmp_path, monkeypatch):
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    stamped = _stamped(text, "9.9.9", tmp_path, monkeypatch)
+    stamped = _stamped(text, "9.9.9", tmp_path, monkeypatch, _changelog.fragments())
     assert re.search(r"^## \[Unreleased\]\n\n## \[9\.9\.9\] - ", stamped, re.MULTILINE)
     assert words in _since(stamped)
 
@@ -193,6 +198,37 @@ def test_changelog_reader_bites_in_both_shapes(tmp_path, monkeypatch):
     assert n == 1, "the control needs the phrase exactly once"
     assert word in _since(text)
     assert word not in _since(dropped)
-    assert word not in _since(_stamped(dropped, "9.9.9", tmp_path, monkeypatch))
+    assert word not in _since(_stamped(dropped, "9.9.9", tmp_path, monkeypatch, []))
     head, old = dropped.split(SHIPPED_AFTER, 1)
     assert word not in _since(head + SHIPPED_AFTER + old + "\n- " + word + "\n")
+
+
+def _plant(tmp_path: Path, body: str) -> Path:
+    d = tmp_path / "planted" / "changelog.d"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "PHONE-1-planted.md"
+    p.write_text(f"### A planted entry\n\n- {body}\n", encoding="utf-8")
+    return p
+
+
+def test_changelog_reader_bites_on_a_fragment(tmp_path, monkeypatch):
+    """A note that lives only in a fragment is found before the stamp (in
+    the preview) and after it (in the new version); once the fragment drops
+    it, both miss it. The fragments are planted, never the live ones, so the
+    control holds whatever changelog.d/ carries."""
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    word = "the plain link second"
+    wrapped = re.compile(r"\s+".join(map(re.escape, word.split())))
+    dropped, n = wrapped.subn("the link", text)
+    assert n == 1, "the control needs the phrase exactly once"
+    assert word not in _since(dropped)
+
+    has = _plant(tmp_path, f"The invite offers {word}, as a choice.")
+    assert word in _since(_changelog.preview(dropped, [has]))
+    stamped = _stamped(dropped, "9.9.9", tmp_path, monkeypatch, [has])
+    assert re.search(r"^## \[Unreleased\]\n\n## \[9\.9\.9\] - ", stamped, re.MULTILINE)
+    assert word in _since(stamped)
+
+    lacks = _plant(tmp_path, "The invite offers the link, as a choice.")
+    assert word not in _since(_changelog.preview(dropped, [lacks]))
+    assert word not in _since(_stamped(dropped, "9.9.9", tmp_path, monkeypatch, [lacks]))

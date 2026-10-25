@@ -20,7 +20,10 @@ Read the spec before you build. The spec is:
 - `skills/sessionphone/SKILL.md`: what the agent is told to do.
 
 A change in behaviour updates the doc that describes it in the same change,
-and adds a line under `[Unreleased]` in `CHANGELOG.md`.
+and writes its changelog entry as one fragment,
+`changelog.d/<TASK-ID>-<slug>.md`, never in `CHANGELOG.md`
+(`changelog.d/README.md` says how). `make changelog` prints the pending
+entries as the next release will read.
 
 ## Build and test
 

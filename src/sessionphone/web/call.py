@@ -24,7 +24,7 @@ suite. So this module ALWAYS passes an explicit path to their serve().
 
 EACH FINISHED TURN IS MAILED TO THE SEAT. With `--legs`, a web call mails
 each finished turn of the caller's to the seat, as a Delta call's turns are:
-To the seat (`--mail-to`, else DC_MAILTO, else <DC_AGENT>@HOST; the server
+To the seat (`--mail-to`, else DC_MAILTO, else the bare <DC_AGENT>; the server
 refuses to start with none), Reply-To the call's box, calls+web-<N>@HOST, so
 a plain reply is spoken into the call. The ears write the turn to the heard
 log; web/turns.py's TurnFollower, one per call, made just before the call

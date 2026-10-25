@@ -347,12 +347,16 @@ def test_the_default_dir_is_under_dc_root(monkeypatch, tmp_path):
     assert spool.directory() == tmp_path / "elsewhere"
 
 
-def test_a_call_mail_is_not_spooled(rig, monkeypatch):
-    """M5 stays on sendmail (part 2b): its failure is the call path's to report."""
-    monkeypatch.setattr(bot.subprocess, "run",
-                        lambda *a, **k: types.SimpleNamespace(returncode=75, stdout="", stderr="busy"))
+def test_a_call_mail_is_spooled(rig, script):
+    """PHONE-249: a refused M5 is kept like any other mail, under its own
+    --message-id; the retry checks the box for that id first
+    (tests/test_call_turn_dedupe.py)."""
+    script.plan(refusal("identity"))
     assert bot.mail_in("Team", 12, "call", "RINGING", msgid="ring-1@host") is False
-    assert rig.spool.counts() == (0, 0)
+    assert rig.spool.counts() == (1, 0)
+    (name,) = rig.waiting()
+    args = rig.rec(name)["args"]
+    assert args[args.index("--message-id") + 1] == "ring-1@host"
 
 
 # ---- the bot drains each pass, and says what it holds at start ---------------

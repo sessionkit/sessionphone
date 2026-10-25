@@ -63,6 +63,11 @@ RELATIVE_LINKS = [
     ("docs/configuration.md", "settings.md"),
     ("docs/configuration.md", "../README.md#call-recording-off-unless-it-is-turned-on"),
     ("docs/settings.md", "configuration.md"),
+    ("README.md", "docs/dependencies.md"),
+    ("docs/dependencies.md", "../README.md#requirements"),
+    ("docs/dependencies.md", "../README.md#installation"),
+    ("docs/dependencies.md", "../uv.lock"),
+    ("docs/dependencies.md", "settings.md"),
 ]
 
 

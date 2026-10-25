@@ -52,9 +52,13 @@ from sessionphone.bridge import dc_env as _dc_env
 
 _real_ask = _reach.ask
 _reach.ask = lambda shell, env=None, exe=None: _reach.Reach(answered=False, said="not asked at import")
+_real_default_agent = _settings.default_agent    # the harness vendor is not asked either (PHONE-247)
+_settings.default_agent = lambda shell=None: _settings.DEFAULT_AGENT
 _dc_env.bind_agent()
 _reach.ask = _real_ask
 _reach._ASKED.clear()
+_settings.default_agent = _real_default_agent
+_settings.forget_default_agent()
 
 _settings.FILE = _kept_file
 os.rmdir(_no_file_dir)
@@ -324,6 +328,19 @@ _stand_in.write_text('#!/bin/sh\n'
                      'printf \'%s | PATH %s\\n\' "$PYTEST_CURRENT_TEST" "$*" >> "${MESSAGE_TRIP_LOG:-/dev/null}"\n'
                      "cat > /dev/null\nexit 3\n")
 _stand_in.chmod(0o755)
+# ...and a stand-in `session` beside it (PHONE-247): with no name given, a dc-*
+# tool's child asks `session agent default` for the harness vendor's word
+# (settings.default_agent). Asked that, it answers as a sessiontools without
+# the verb does (exit 2), so the name is "claude", as no_vendor gives in
+# process. Any other verb goes on to the `session` the PATH had before.
+_real_session = shutil.which("session")
+_session_in = pathlib.Path(_STAND_IN_DIR) / "session"
+_session_in.write_text('#!/bin/sh\n'
+                       'if [ "$*" = "agent default" ]; then\n'
+                       '  echo "session stand-in: unknown verb \'agent\'" >&2; exit 2\nfi\n'
+                       + (f'exec {shlex.quote(_real_session)} "$@"\n' if _real_session else
+                          'echo "session: command not found" >&2; exit 127\n'))
+_session_in.chmod(0o755)
 os.environ["PATH"] = os.pathsep.join(p for p in (_STAND_IN_DIR, os.environ.get("PATH", "")) if p)
 
 
@@ -612,6 +629,32 @@ def pid_file_in_tmp(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def live_file_in_tmp(monkeypatch, tmp_path_factory):
+    """bot.main() removes, at start, a call-live.json older than the bot
+    (bot.clear_stale_live), and calls.py writes and removes it per call: both
+    at a path bound at import under the user's REAL default root, as above.
+    The suite, older than any call it runs beside, would remove a real live
+    call's file there. So dc_env.LIVE_FILE, and bot.LIVE_FILE and
+    calls.LIVE_FILE when loaded, name a tmp file. Yields it."""
+    f = tmp_path_factory.mktemp("call-live") / "call-live.json"   # never in tmp_path: tests list it
+    for name in ("sessionphone.bridge.dc_env", "sessionphone.bridge.bot", "sessionphone.bridge.calls"):
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "LIVE_FILE"):
+            monkeypatch.setattr(mod, "LIVE_FILE", f)
+    yield f
+
+
+@pytest.fixture(autouse=True)
+def sigterm_handler_kept():
+    """bot.main() installs its SIGTERM handler (bot.on_sigterm) in the process
+    that runs it: in-process, that is pytest's. Put back the one it found."""
+    import signal
+    was = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, was)
+
+
+@pytest.fixture(autouse=True)
 def home_lock_is_tmp(monkeypatch, tmp_path):
     """bot.main() locks <home>/.bot.lock for its life (bot.take_home_lock), and
     the home, bound at import as above, is the user's REAL default root. So no
@@ -782,11 +825,25 @@ def no_reach(monkeypatch):
     the hear line is measured by it). Here sessionmail gives no answer, so
     the bot is named as before it could be asked (DC_AGENT, CLAUDE_CODE_AGENT,
     the recorded bot, claude). A test of either sets its own answer
-    (tests/test_hear_measured.py)."""
+    (tests/test_hear_measured.py). Nor who hears a box (`message subscription
+    list BOX`, reach.unowned): not plainly "nobody", so install's `default:`
+    line stays silent unless a test asks for it (tests/test_hear_own_box.py)."""
     from sessionphone import reach
     monkeypatch.setattr(reach, "ask", lambda shell, env=None, exe=None:
                         reach.Reach(answered=False, said="not asked in the tests"))
+    monkeypatch.setattr(reach, "unowned", lambda box, shell, env=None, exe=None: False)
     monkeypatch.setattr(reach, "_ASKED", {})
+
+
+@pytest.fixture(autouse=True)
+def no_vendor(monkeypatch):
+    """No test asks the real sessiontools for the harness vendor's word
+    (`session agent default`: the bot's name when nothing names one). Here
+    it gives the fallback, "claude", as a sessiontools without the verb does.
+    A test of it sets its own (tests/test_vendor_default_name.py)."""
+    from sessionphone import settings
+    settings.forget_default_agent()
+    monkeypatch.setattr(settings, "default_agent", lambda shell=None: settings.DEFAULT_AGENT)
 
 
 @pytest.fixture(autouse=True)

@@ -33,16 +33,32 @@ can only repeat: it goes to undelivered/dead/ at once, logged BRIDGE MAIL DEAD.
   timeout; any other refusal (identity, exec, ...) never stops it.
 - A retry can send twice: kind "mta" with sent "unknown" means the MTA started
   and then failed, so the mail may have gone. A duplicate beats a loss; the
-  retry is logged with sent=unknown, so a duplicate can be explained.
+  retry is logged with sent=unknown, so a duplicate can be explained. Except a
+  mail under a Message-ID the bot minted (an M5, `--message-id` in its args):
+  its box is checked first (below), so it is never sent twice.
 - Past CAP_S (24 h) since the first failure, a mail goes to dead/. Nothing is
   ever deleted from dead/; a mail that finally goes is removed from the spool.
   A record that cannot be read goes to dead/ at once, as it was: it can never
   be sent, and the outbox loop would otherwise log it every second.
 - counts() is what `dc-live` and `bin/bridge-check` report: waiting and dead.
 
-The call mails (M5) are never spooled here: each goes under a Message-ID the
-bot minted, and sessionmail has no duplicate check;
-the channels alert keeps its own retry (listalert.ALERT_RETRY_S).
+THE CALL MAILS (M5) are kept here too, all but a call's preview,
+which the turn supersedes (bot.mail_in). Each goes under a Message-ID the bot
+minted, and sessionmail has no duplicate check at delivery: a send under an id
+already in the box lands twice. So before a record whose args carry
+`--message-id` is retried, _one() asks seatmail.delivered() whether the target
+box already holds that id (read-only: `message path`, then the header blocks in
+new/ and cur/):
+
+- there: the record is removed, logged BRIDGE MAIL ALREADY THERE; nothing is sent.
+- not there: it is retried as any other.
+- the box cannot be checked from here (an off-host box on an MTA): retried only
+  if every try so far said sent=no, so nothing can have gone; one that may have
+  gone (sent=unknown) goes to dead/, logged and counted, never sent twice.
+
+A record with no `--message-id` (M1-M4, and an M5 that only threads with -r)
+has no id to look for: its id is minted at each send, as before.
+The channels alert keeps its own retry (listalert.ALERT_RETRY_S).
 """
 from __future__ import annotations
 
@@ -162,8 +178,13 @@ class Spool:
 
     def __init__(self, log: Callable[[str], None], root: pathlib.Path | None = None,
                  clock: Callable[[], float] = time.time,
-                 send: Callable[..., seatmail.Sent] | None = None):
+                 send: Callable[..., seatmail.Sent] | None = None,
+                 delivered: Callable[..., bool | None] | None = None):
+        """send: the retry's send (default seatmail.send_args). delivered: the
+        duplicate check, delivered(msgid, to, since=) -> True/False/None
+        (default seatmail.delivered). Tests fake both."""
         self.log, self._root, self.clock, self._send = log, root, clock, send
+        self._delivered = delivered
 
     @property
     def root(self) -> pathlib.Path:
@@ -259,8 +280,10 @@ class Spool:
             self._bury(path, rec, f"still failing after {CAP_S / 3600:.0f} h "
                                   f"({rec.get('attempts')} tries, last: {rec.get('error')})")
             return None
-        sent = (self._send or seatmail.send_args)(rec["args"], rec["body"])
         n = int(rec.get("attempts", 1)) + 1
+        if not self._not_there(path, rec, n):
+            return None
+        sent = (self._send or seatmail.send_args)(rec["args"], rec["body"])
         if sent.ok:
             path.unlink()
             self.log(f"BRIDGE MAIL SENT on try {n} (first failed "
@@ -277,3 +300,43 @@ class Spool:
         self.log(f"BRIDGE MAIL RETRY {n} FAILED {sent.error}; next try in "
                  f"{backoff(n):.0f}s: {path}")
         return sent
+
+    def _not_there(self, path: pathlib.Path, rec: dict, n: int) -> bool:
+        """Before try N of a mail under a bot-minted Message-ID: may it be sent?
+        True: send it (no --message-id to look for, it is not in the box, or the
+        box cannot be checked and nothing can have gone). False: it was handled
+        here, removed (already in the box) or buried (may have gone, and the box
+        cannot be checked), and nothing is sent."""
+        mid, to = message_id(rec["args"]), target(rec["args"])
+        if not mid or not to:
+            return True                     # no id of ours: a duplicate beats a loss, as before
+        since = float(rec.get("created", self.clock())) - seatmail.DELIVERED_SLACK_S
+        there = (self._delivered or seatmail.delivered)(mid, to, since=since)
+        if there is True:
+            path.unlink()
+            self.log(f"BRIDGE MAIL ALREADY THERE on try {n}: <{mid}> is in {to}'s box; "
+                     f"not sent again: {path.name}")
+            return False
+        if there is False:
+            return True
+        tries = rec.get("tries") or [{"sent": rec.get("sent", "no")}]
+        gone = [t.get("sent") for t in tries if isinstance(t, dict) and t.get("sent", "no") != "no"]
+        if not gone:
+            return True                     # every try said sent=no: nothing has gone, no duplicate
+        self._bury(path, rec, f"<{mid}> may have gone (sent={gone[-1]}) and {to}'s box cannot "
+                              f"be checked from here; never sent twice")
+        return False
+
+
+def message_id(args: list[str]) -> str | None:
+    """The --message-id in a kept send's ARGS (seatmail.args), bare; None if none."""
+    try:
+        v = args[args.index("--message-id") + 1]
+    except (ValueError, IndexError):
+        return None
+    return seatmail.bare(v) or None
+
+
+def target(args: list[str]) -> str | None:
+    """The To of a kept send's ARGS (`send TO ...`); None if it has none."""
+    return args[1] if len(args) > 1 and args[0] == "send" and args[1] else None

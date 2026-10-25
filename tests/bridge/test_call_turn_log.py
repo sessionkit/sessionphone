@@ -264,7 +264,7 @@ class _Replies:
 def test_dc_say_into_a_live_call_counts_as_a_reply_before_it_is_spoken(monkeypatch):
     order = []
     s = types.SimpleNamespace(chat_id=12, pc=object(), replied=lambda via: None,
-                              speak=lambda *a: order.append("speak"))
+                              speak=lambda *a, **k: order.append("speak"))
     loop = types.SimpleNamespace(call_soon_threadsafe=lambda fn, *a: order.append(("replied",) + a))
     mgr = types.SimpleNamespace(live_for_chat=lambda c: [s], loop=loop)
     monkeypatch.setattr(calls.asyncio, "run_coroutine_threadsafe", lambda coro, lp: coro)
@@ -277,7 +277,7 @@ def test_mail_into_a_live_call_counts_as_a_reply(monkeypatch, tmp_path):
     s = object.__new__(calls.CallSession)
     s.pc, s.root_id, s.chat_id = object(), "call-12-1789@example.org", 12
     s.account = None
-    s.speak = lambda *a: None
+    s.speak = lambda *a, **k: None
     loop = types.SimpleNamespace(call_soon_threadsafe=lambda fn, via: vias.append((fn, via)))
     lg = object.__new__(calls.MailLeg)
     lg.manager = types.SimpleNamespace(sessions={1: s}, loop=loop)

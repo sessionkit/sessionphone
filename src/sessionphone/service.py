@@ -10,6 +10,7 @@ show "session-phone", not "Python" (procname.py).
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import plistlib
@@ -19,7 +20,7 @@ import sys
 import time
 
 from sessionphone import channels, displayname, paths, seat, settings
-from sessionphone.bridge import dc_env, seatmail, stt
+from sessionphone.bridge import dc_env, pidfile, seatmail, stt
 from sessionphone.procname import named_python
 
 # every launchd label the kit ships is dev.sessionkit.<package>.<job>: the kit's label scheme
@@ -80,7 +81,8 @@ ORIGIN_NOT_CARRIED = (f"{ORIGIN_VAR} is set in this shell and NOT carried: a val
 def agent() -> str:
     """Who the bot speaks for, picked as install picks it (dc_env.agent_from):
     DC_AGENT, else this session's durable seat, else the one bot phone.json
-    records, else "claude"."""
+    records, else the harness vendor's word (`session agent default`, else
+    "claude")."""
     return dc_env.agent_from()[0]
 
 
@@ -255,7 +257,7 @@ NoBox = seat.NoBox               # the agent's box is not on this host: exit 2
 
 
 class NoMailHost(Exception):
-    """The job would mail <agent>@<junk host>: set DC_HOST. Exit code 2."""
+    """The bot's own address would be <agent>-chat@<junk host>: set DC_HOST. Exit code 2."""
 
 
 class NoSTTModel(Exception):
@@ -283,6 +285,17 @@ class LegacyCarryOver(Exception):
     change: a rename must never silently move a bot's calls dir or its
     recording switch. Refused before anything is written. Exit code 2, naming
     each key old -> new and the fix."""
+
+
+class CallLive(Exception):
+    """A call is up on a bot this verb would stop (live_call): booting its job
+    out drops the call, with no warning to the person on it. Refused before
+    anything is written or booted out, unless --force. Exit code 2, the line
+    CALL_LIVE first, then the call as dc-live says it."""
+
+
+# the refusal's first words, as the task asked them
+CALL_LIVE = "a call is live; hang up or pass --force"
 
 
 class LegacyStillLoaded(RuntimeError):
@@ -413,7 +426,7 @@ def check_carry_over(name: str, new_env: dict) -> None:
                f"(`sessionphone bot uninstall` first, it removes {legacy_label(name)}, then "
                f"`DC_AGENT={shlex.quote(agent_was)} {env}{INSTALL}`: install's name is "
                f"DC_AGENT, else this session's seat, else the one bot phone.json records, "
-               f"else claude), or `sessionphone bot "
+               f"else the harness vendor's word, else claude), or `sessionphone bot "
                f"uninstall` first to accept the change, then `{env}{INSTALL}`."
                if keep and keep != name else
                f"This legacy job's DC_AGENT is {agent_was!r}, which install keeps as no name "
@@ -445,6 +458,79 @@ def check_legacy_orphan(name: str) -> None:
         f"legacy job {legacy_label(name)} is loaded but its plist is gone: its env cannot be "
         f"compared, so nothing was written and nothing was booted out. "
         f"`sessionphone bot uninstall` first (it boots out {legacy_label(name)}), then `{INSTALL}`.")
+
+
+# >>> live-call-guard
+def live_call(env) -> dict | None:
+    """The call up on the bot a job with environment ENV runs, as dc-live
+    judges it, else None. The bot writes call-live.json (calls.py LIVE_FILE:
+    DC_LIVE, else <home>/call-live.json) when a call connects and removes it at
+    hang-up; bot.pid (DC_PID_FILE, else <home>/bot.pid) says whether that
+    bot runs (pidfile.started, dc-live's rule).
+    A file with no running bot behind it is stale: the bot that wrote it is
+    gone. So is a file older than the running bot (its `since` before the
+    bot's start, one second allowed for ps's resolution): a bot stopped
+    mid-call (a bootout's SIGTERM skips the bot's close) leaves the file, and
+    the next bot never removes it. A file a running bot may have just written,
+    but that cannot be read or has no `since`, counts as live: dropping a call
+    is the harm, so the doubt refuses. -> the file's fields, plus `path`."""
+    v = dc_env._get(env, "LIVE")
+    live = pathlib.Path(v).expanduser() if v else dc_env.home(env) / "call-live.json"
+    if not live.exists():
+        return None
+    v = dc_env._get(env, "PID_FILE")
+    pid = pathlib.Path(v).expanduser() if v else dc_env.home(env) / "bot.pid"
+    start, _why = pidfile.started(pid, dc_env.root_of(env))
+    if start is None:
+        return None
+    try:
+        d = json.loads(live.read_text(encoding="utf-8"))
+        since = float(d["since"])
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"path": str(live), "unreadable": f"{exc.__class__.__name__}: {exc}"}
+    if since < start - 1:
+        return None
+    return {**d, "path": str(live)}
+
+
+def _call_line(call: dict) -> str:
+    """The call, as dc-live says it, for the refusal."""
+    if "unreadable" in call:
+        return (f"{call['path']} is there and its bot runs, but it cannot be read "
+                f"({call['unreadable']}); a call may be connecting")
+    try:
+        mins = f", up {(time.time() - float(call['since'])) / 60:.0f} min"
+    except (KeyError, TypeError, ValueError):
+        mins = ""
+    return (f"call msg {call.get('call_id')} - chat {call.get('chat_id')} with "
+            f"{call.get('caller', '?')}{mins} ({call['path']})")
+
+
+def _job_envs(plists, fallback) -> list[dict]:
+    """The environment each job in PLISTS runs with: its plist's
+    EnvironmentVariables, which the running bot read at its start, not this
+    shell's (a reinstall may change the root or profile). With no plist
+    readable at all (nothing installed, or a job install did not make), it is
+    FALLBACK alone."""
+    envs = [e for e in (_plist(p).get("EnvironmentVariables") for p in plists) if isinstance(e, dict) and e]
+    return envs or [fallback]
+
+
+def check_no_live_call(plists, fallback, force: bool = False) -> None:
+    """Refuse (CallLive) while a call is up on the bot any job in PLISTS runs
+    (live_call, judged on each plist's environment; on FALLBACK when no plist
+    can be read), unless FORCE. Reads files and asks ps: never launchd, never
+    a write."""
+    if force:
+        return
+    for env in _job_envs(plists, fallback):
+        try:
+            call = live_call(env)
+        except settings.Bad:
+            continue        # no root to look in: no bot of this job's runs there
+        if call is not None:
+            raise CallLive(f"{CALL_LIVE}. {_call_line(call)}. Nothing was booted out.")
+# <<< live-call-guard
 
 
 def _retire_legacy(name: str, say) -> list[str]:
@@ -527,15 +613,20 @@ def _record_replaced(res, say) -> None:
 
 
 def install(name: str | None = None, owner: str | None = None,
-            seeded=None, say=None, seated=None, shell=None, forget=(),
-            settled=None, registry: str | None = None, replace=()) -> pathlib.Path:
+            seeded=None, owner_key: str | None = None, say=None, seated=None, shell=None, forget=(),
+            settled=None, registry: str | None = None, replace=(),
+            force: bool = False) -> pathlib.Path:
     """Write the plist (0600) and (re)load it, and check that launchd has it
     loaded. Refuses an unconfigured or unsafe root, a junk mail host, an STT
     URL with no model, and a bot nobody may ring, before it touches the old
     job. Raises NotLoaded if the job is not loaded.
 
     owner: the owner's Delta Chat address, approved in the callers file the
-    job will read (DC_CALLERS_FILE, else <root>/callers.txt). Without it the
+    job will read (DC_CALLERS_FILE, else <root>/callers.txt), bound to
+    owner_key (`--owner-key FPR`) when it is given. Without a key, on a file
+    from an older version, the line is unpinned and the bot's first start
+    pins it (keygate.migrate); on a file that keeps keys it is refused
+    (NoCallers), writing nothing, naming --owner-key. Without it the
     owner is whoever `sessionphone link` wrote there: there is nowhere else it
     is known, and the account cannot be opened while the old bot holds it.
     Nothing is read from the kit's operator setting: that is a mail address,
@@ -562,6 +653,12 @@ def install(name: str | None = None, owner: str | None = None,
     and phone.json forgets it once the new job is loaded. Raises
     RivalStillLoaded, the new job neither written nor started, if launchd
     still lists it after its bootout.
+
+    A call live on any bot this run would boot out (this job, the legacy
+    job, each --replace rival; check_no_live_call, each judged on its plist's
+    environment) refuses (CallLive, exit 2), the last refusal before the
+    first write, so nothing is written or booted out; FORCE (`--force`) goes
+    ahead and the call drops.
 
     The bot's seat (seat.py), after every refusal above and before install's
     first write of its own: DC_MESSAGE is pinned to the installing shell's
@@ -626,10 +723,13 @@ def install(name: str | None = None, owner: str | None = None,
                         "then run it again.")
     # before anything is written: a rename must not move a carried setting
     check_carry_over(name, env)
+    if owner_key is not None and not owner:
+        raise ValueError("--owner-key needs --owner ADDR")
     if owner:
         # a refused install writes NOTHING: judge the
         # list before add_owner touches the callers file
-        plan = plan_channels(env, owner)
+        plan = plan_channels(env, owner, owner_key=owner_key)
+        owner_key = judge_owner(owner, owner_key, dc_env.callers_file(env))
     else:
         why = dc_env.callers_problem(env)
         if why:
@@ -638,7 +738,11 @@ def install(name: str | None = None, owner: str | None = None,
     me = seat.seat_name(env, name)
     # writes nothing: no signer it can get refuses here. --registry asks for a key on any carrier
     given = seat.plan(env, me, shell, keyed=registry is not None)
-    check_legacy_orphan(name)          # the last refusal before the first write
+    check_legacy_orphan(name)          # before the first write
+    # the last refusal before the first write: never drop a live call on
+    # any job this run boots out: the rivals --replace names, the legacy job, this one
+    check_no_live_call([plist_path(n) for n in res.replace] + [legacy_plist_path(name), plist_path(name)],
+                       env, force)
     if given:
         made = given
     elif registry is not None:         # sessionmail's writes: the seat's key if absent, its agent
@@ -651,7 +755,7 @@ def install(name: str | None = None, owner: str | None = None,
         raise NoSigner(why)
     box = seat.ensure_box(env, shell)
     if owner:
-        add_owner(owner, dc_env.callers_file(env))
+        add_owner(owner, dc_env.callers_file(env), owner_key)
         why = dc_env.callers_problem(env)
         if why:
             raise NoCallers(why)
@@ -694,28 +798,56 @@ def install(name: str | None = None, owner: str | None = None,
     return p
 
 
-def add_owner(addr: str, path: pathlib.Path) -> bool:
+def judge_owner(addr: str, key: str | None, path: pathlib.Path) -> str | None:
+    """Judge --owner ADDR [--owner-key KEY] against the callers file at PATH,
+    writing NOTHING. -> KEY normalised (None without one). Raises ValueError
+    for a key that is not a fingerprint, and NoCallers when the line could
+    not ring: ADDR already pinned to another key, or no key given for a file
+    that keeps keys (keygate.MARKER) where ADDR is not pinned yet."""
+    from sessionphone import keygate
+    addr = addr.strip().lower()
+    entries = keygate.read_caller_entries(path)
+    have = next((e.key for e in entries if e.addr == addr and e.key), None)
+    if key is not None:
+        norm = keygate.normalize(key)
+        if norm is None:
+            raise ValueError(f"--owner-key {key!r} is not a key fingerprint (40 or 64 hex digits)")
+        if have and have != norm:
+            raise NoCallers(f"{addr} is already pinned to key {have} in {path}; "
+                            f"`sessionphone callers pin {addr} --key FPR` replaces it")
+        return norm
+    if not have and keygate.is_marked(path):
+        raise NoCallers(f"--owner {addr} with no --owner-key: {path} binds each caller to a key, so "
+                        f"an address alone would be refused until pinned. Give --owner-key FPR "
+                        f"({keygate.SHOWS}); nothing was written.")
+    return None
+
+
+def add_owner(addr: str, path: pathlib.Path, key: str | None = None) -> bool:
     """Approve addr as the owner in the callers file at path (made 0600, its
-    directory 0700 if new). -> False if it was already approved. Raises
-    ValueError, writing nothing, if addr is not an address."""
+    directory 0700 if new), bound to KEY when given. -> False if nothing
+    changed. Raises ValueError, writing nothing, if addr is not an address."""
     # account starts no rpc on import, but it is heavy: only when an owner is named
     from sessionphone.account import add_caller
     if "@" not in addr.strip():
         raise ValueError(f"--owner {addr!r} is not an address (want name@domain)")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    return add_caller(addr, f"owner, named by `sessionphone bot install --owner`, {stamp}", path)
+    return add_caller(addr, f"owner, named by `sessionphone bot install --owner`, {stamp}", path, key=key)
 
 
 INSTALL = "sessionphone bot install"     # plan_channels' default RETRY: install's own wording
 
 
-def plan_channels(env: dict, owner: str | None = None, retry: str = INSTALL) -> tuple | None:
+def plan_channels(env: dict, owner: str | None = None, retry: str = INSTALL,
+                  owner_key: str | None = None) -> tuple | None:
     """Judge the list dc_env.channels_file(env), writing NOTHING.
 
     -> None if it already has entries (it is left alone), else (path, addr,
-    note): the owner line to seed, from OWNER (--owner), else from the callers
-    file's owner line. Raises NoChannels, naming the file, when there is no one
+    note, key): the owner line to seed, from OWNER (--owner, bound to
+    OWNER_KEY, else to the key the callers file pins to OWNER), else from the
+    callers file's owner line and its key. No key: the line is unpinned, for
+    the bot's first start to pin (channels.migrate). Raises NoChannels, naming the file, when there is no one
     to seed it with, or when the file is there but the bot would refuse it
     (loose, unreadable): install never tightens it quietly, which would lift
     the bot's refusal of a loose list. Raises ValueError if OWNER is not an address. So every
@@ -733,15 +865,20 @@ def plan_channels(env: dict, owner: str | None = None, retry: str = INSTALL) -> 
     if listing.entries:
         return None
     callers = dc_env.callers_file(env)
+    from sessionphone import keygate
+    entries = keygate.read_caller_entries(callers)
     if owner:
         addr, came = owner.strip().lower(), "named by `sessionphone bot install --owner`"
         norm = channels.parse_target(addr)
         if norm is None or norm.startswith("chat:"):
             raise ValueError(f"--owner {owner!r} is not an address (want name@domain)")
+        key = keygate.normalize(owner_key) if owner_key is not None else None
+        if key is None:
+            key = next((e.key for e in entries if e.addr == addr and e.key), None)
     else:
-        # account starts no rpc on import, but it is heavy: only when needed
-        from sessionphone.account import read_owner
-        addr, came = read_owner(callers), f"the owner line of {callers}"
+        found = next((e for e in entries if e.note.lower().startswith("owner")), None)
+        addr, came = (found.addr if found else None), f"the owner line of {callers}"
+        key = found.key if found else None
     if not addr:
         what = "has no channel in it" if path.exists() else "does not exist"
         if retry == INSTALL:
@@ -759,7 +896,7 @@ def plan_channels(env: dict, owner: str | None = None, retry: str = INSTALL) -> 
             f"(no --owner, and no owner line in {callers}), so every send would be refused. "
             + name)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    return path, addr, f"owner, {came}, {stamp}"
+    return path, addr, f"owner, {came}, {stamp}", key
 
 
 def write_channels(plan: tuple | None) -> channels.Entry | None:
@@ -767,19 +904,23 @@ def write_channels(plan: tuple | None) -> channels.Entry | None:
     or the address is already listed). Raises NoChannels if the write is refused."""
     if plan is None:
         return None
-    path, addr, note = plan
+    path, addr, note, key = plan
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        return channels.seed_owner(addr, note, path)
+        return channels.seed_owner(addr, note, path, key=key)
     except ValueError as exc:
         raise NoChannels(f"the bot would send NOWHERE: {exc}") from exc
 
 
-def uninstall(name: str | None = None) -> list[str]:
+def uninstall(name: str | None = None, force: bool = False) -> list[str]:
     """Stop the job and remove its plist, and the same for a legacy job of
     this agent (legacy_label). -> one line per job removed, saying what was
-    done to it; empty if neither job was there."""
+    done to it; empty if neither job was there. Refused (CallLive), nothing
+    stopped or removed, while a call is up on either job's bot (live_call:
+    each judged on its plist's environment, else this shell's), unless
+    FORCE."""
     name = name or agent()
+    check_no_live_call([plist_path(name), legacy_plist_path(name)], os.environ, force)
     said = []
     for lab, p, what in ((label(name), plist_path(name), "removed launchd job"),
                          (legacy_label(name), legacy_plist_path(name), "retired legacy launchd job")):
@@ -818,6 +959,20 @@ def log_paths(name: str | None = None) -> tuple[pathlib.Path, pathlib.Path]:
     err = j.get("StandardErrorPath")
     launchd_log = pathlib.Path(err) if isinstance(err, str) and err else paths.root() / "bot.launchd.log"
     return bot_log, launchd_log
+
+
+def undelivered_dir(name: str | None = None) -> pathlib.Path:
+    """The bot's undelivered spool (bridge/spool.py), as the installed plist
+    names it: DC_UNDELIVERED, else <home>/undelivered, the home being
+    <DC_ROOT, else SESSIONPHONE_ROOT, else the root>[/<DC_PROFILE>] (bin/dc-env's
+    DC_UNDELIVERED, dc_env.home). Read from the job, never this shell, so status
+    counts the spool the running bot writes."""
+    env = (_plist(plist_path(name)).get("EnvironmentVariables") or {})
+    env = env if isinstance(env, dict) else {}
+    given = dc_env._get(env, "UNDELIVERED")
+    if given:
+        return pathlib.Path(given).expanduser()
+    return dc_env.home(env) / "undelivered"
 
 
 def last_line(p: pathlib.Path, tail: int = 65536) -> str | None:

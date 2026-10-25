@@ -154,7 +154,7 @@ def test_the_bot_rebinds_its_addresses_on_the_mail_json_host(asked, import_time,
         monkeypatch.delenv(k, raising=False)
     asked(host=("mailhost", "host"))
     assert dc_env.take_mail_host() == f"sessionmail's {MAIL_JSON} `host`"
-    assert (dc_env.HOST, dc_env.ADDR, dc_env.MAILTO) == ("mailhost", "ada-chat@mailhost", "ada@mailhost")
+    assert (dc_env.HOST, dc_env.ADDR, dc_env.MAILTO) == ("mailhost", "ada-chat@mailhost", "ada")
     assert dc_env.HOST_PROBLEM is None
 
 

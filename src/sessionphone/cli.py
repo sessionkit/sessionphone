@@ -4,11 +4,11 @@
     sessionphone qr                  the connect page (HTML + QR) on stdout
     sessionphone link                wait for the person to scan; they become the owner
     sessionphone invite [--qr [--invert]] [--png FILE]  print the saved invite link (or its QR)
-    sessionphone callers [add ADDR]  who may ring this agent
+    sessionphone callers [add|pin ADDR [--key FPR]]  who may ring this agent
     sessionphone avatar [PATH | --clear]  show, set or clear the bot's picture
     sessionphone channels [list|add NAME TARGET|seed]  where the bot may send
     sessionphone channels rejected [--profile public]  who the public bot turned away
-    sessionphone bot install [--owner ADDR] [--forget KEY]  run the resident bot under launchd
+    sessionphone bot install [--owner ADDR [--owner-key FPR]] [--forget KEY]  run the resident bot under launchd
     sessionphone bot status|uninstall|run
     sessionphone web [--port --root --origin --tls --host --legs --mail-to --heard-dir]
                                      a browser tab as a call, passkey first
@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import pathlib
 import plistlib
+import shlex
 import sys
 
 import click
@@ -33,6 +34,7 @@ from sessionphone import (
     channels,
     displayname,
     hearing,
+    keygate,
     media,
     paths,
     seat,
@@ -76,9 +78,15 @@ def main(ctx: click.Context) -> None:
 def setup(name: str, status: str, relay: str | None) -> None:
     """Make this agent's account on a public chatmail relay; print the invite link.
 
-    Then it makes the box Delta text goes to (DC_MAILTO, else <agent>@<host>)
+    Then it makes the box Delta text goes to (DC_MAILTO, else the bare <agent>)
     with sessionmail's `message setup --box <agent>`, proves it with `message
     path`, and prints the one step that makes a Claude session hear it.
+    Last, BEFORE the phone is linked, its `hearing:` lines say whether the bot
+    will hear the caller: it sends a half-second test clip to the STT the bot
+    will use (DC_STT_URL in this shell, which `bot install` carries into the
+    job, else the default), saying so first. When nothing answers it names
+    the install step: under Session Kit `ears services install --only
+    speech`, else VoiceMode's. Said, never a refusal: the exit code is the same.
     Idempotent: run it again and it keeps the account, sets the name, and
     prints the same invite. Exit 0 done, 1 it failed (the reason is printed),
     2 the box could not be made (the step to run is printed).
@@ -103,6 +111,24 @@ def setup(name: str, status: str, relay: str | None) -> None:
     click.echo(f"box:     {box.line()}")
     if box.path is not None:
         click.echo(f"hear:    {seat.hear_line(box.name, os.environ)}")
+    _setup_hearing(name)
+
+
+def _setup_hearing(name: str) -> None:
+    """setup's last lines: will the bot hear the caller? Asked BEFORE the phone
+    is linked, so a missing speech server is found while there is
+    time to install it, not at `bot install`, the last step. Judged on the
+    environment `bot install` will give the job (service.job: its PATH and the
+    DC_* set in this shell), by the same probe and lines as install's. Its
+    check-again line is setup itself: before a phone is linked, `bot install`
+    refuses before it probes. Said, never a refusal: the exit code stays 0."""
+    env = {"PATH": service.BASE_PATH,
+           **{k: v for k, v in os.environ.items() if k.startswith("DC_") and v}}
+    v = hearing.probe(env, say=click.echo)
+    w = hearing.weights_for(v, shell=os.environ)
+    again = f"sessionphone setup --name {shlex.quote(name)}"
+    for line in hearing.lines(v, env, shell=os.environ, weights=w, again=again, before_link=True):
+        click.echo(line)
 
 
 @main.command(context_settings=CTX)
@@ -185,6 +211,7 @@ def link(timeout: float, no_greet: bool) -> None:
     2 no account.
     """
     try:
+        click.echo(f"account: {dc_env.accounts_dir()}")
         info = account.link(timeout or None, greet=not no_greet)
     except (paths.NotConfigured, paths.Unsafe) as exc:
         _fail(exc, 2)
@@ -197,7 +224,8 @@ def link(timeout: float, no_greet: bool) -> None:
         sys.exit(124)
     who = f"{info['name']} <{info['addr']}>" if info["name"] else info["addr"]
     if info["owner"]:
-        click.echo(f"joined: {who}, now the OWNER and the first approved caller ({info['callers']})")
+        click.echo(f"joined: {who}, now the OWNER and the first approved caller ({info['callers']}), "
+                   f"bound to key {info.get('key')}")
         if info.get("tightened") is not None:
             _tightened(pathlib.Path(info["channels"]), info["tightened"])
         if info.get("listed"):
@@ -208,53 +236,136 @@ def link(timeout: float, no_greet: bool) -> None:
         elif info.get("channels_problem"):
             click.echo(f"sessionphone: NOT listed in {info['channels']}: {info['channels_problem']}",
                        err=True)
+    elif info.get("key_problem"):
+        click.echo(f"sessionphone: joined: {who}, but NOT approved to call: {info['key_problem']}",
+                   err=True)
     else:
         click.echo(f"joined: {who}, linked for text; NOT approved to call "
-                   f"(`sessionphone callers add {info['addr']}` on the owner's word)")
+                   f"(`sessionphone callers add {info['addr']} --key FPR` on the owner's word)")
+
+
+def _callers_file() -> pathlib.Path:
+    """The callers file the bot reads, from this shell's environment
+    (dc_env.callers_file). Under the root, the root must be private; elsewhere
+    its directory must exist. As _channels_file."""
+    f = dc_env.callers_file()
+    if f.parent == paths.root():
+        paths.ensure_private()
+    elif not f.parent.is_dir():
+        raise paths.NotConfigured(f"no directory {f.parent} for {f}")
+    return f
 
 
 @main.group(context_settings=CTX, invoke_without_command=True)
 @click.pass_context
 def callers(ctx: click.Context) -> None:
-    """Who may ring this agent: the owner first, one address per line.
+    """Who may ring this agent: the owner first, one line each, `ADDR  key:FPR`.
 
-    The bot answers a call only from an address in this list. DC_CALLERS
-    grants nothing. An empty list means nobody: it fails closed.
+    The bot answers a call only from a contact holding a key a line is
+    pinned to. A line with no key is refused until one is pinned
+    (`sessionphone callers pin ADDR`). DC_CALLERS grants nothing. An empty
+    list means nobody: it fails closed.
     """
     if ctx.invoked_subcommand is not None:
         return
     try:
-        paths.ensure_private()
+        f = _callers_file()
     except (paths.NotConfigured, paths.Unsafe) as exc:
         _fail(exc, 2)
         return
-    rows = account.read_callers()
+    rows = account.read_caller_entries(f)
     if not rows:
-        click.echo(f"nobody may ring yet ({paths.callers_path()}); `sessionphone link` makes the owner")
+        click.echo(f"nobody may ring yet ({f}); `sessionphone link` makes the owner")
         return
-    for addr in rows:
-        click.echo(addr)
+    click.echo(f"callers: {f}")
+    for e in rows:
+        if e.key:
+            click.echo(f"{e.addr}  key:{e.key}")
+        else:
+            click.echo(f"{e.addr}  UNPINNED: refused until pinned (`sessionphone callers pin {e.addr}`)")
+
+
+def _key_for(addr: str, key: str | None, pin_how: str = keygate.PIN_HOW) -> tuple[str, str | None]:
+    """-> (key, the line to print about where it came from). --key wins; else
+    the attended pin pass (PIN_HOW is the command its refusal names). Exits 1,
+    having written nothing, when there is no one key to pin."""
+    if key is not None:
+        norm = keygate.normalize(key)
+        if norm is None:
+            _fail(ValueError(f"--key {key!r} is not a key fingerprint (40 or 64 hex digits); "
+                             f"nothing was written"), 1)
+        return norm, None
+    click.echo(f"account: {dc_env.accounts_dir()}")
+    try:
+        d = account.find_key(addr, pin_how=pin_how)
+    except account.AccountBusy as exc:
+        _fail(Exception(f"{exc}; nothing was written"), 1)
+    if d.kind != "pinned":
+        _fail(Exception(f"{d.line}; nothing was written"), 1)
+    return d.key, d.line
 
 
 @callers.command("add", context_settings=CTX)
 @click.argument("addr")
 @click.option("--note", default="", help="who this is, kept as a comment")
-def callers_add(addr: str, note: str) -> None:
-    """Approve ADDR to ring this agent."""
+@click.option("--key", default=None, metavar="FPR",
+              help="the key fingerprint the caller's contact holds (their phone shows it under "
+                   "the contact's profile, Encryption); without it the account is opened to find "
+                   "the one key contact with ADDR, which fails while the bot holds the account")
+def callers_add(addr: str, note: str, key: str | None) -> None:
+    """Approve ADDR, bound to its key, to ring this agent."""
     try:
-        paths.ensure_private()
-        added = account.add_caller(addr, note)
+        f = _callers_file()
+        addr = addr.strip().lower()
+        if "@" not in addr:
+            raise ValueError(f"not an address: {addr!r}")
+        have = next((e.key for e in account.read_caller_entries(f) if e.addr == addr and e.key), None)
+        if have and key is None:        # nothing to find: it is pinned already
+            click.echo(f"already approved: {addr}  key:{have} in {f}")
+            return
+        key, said = _key_for(addr, key)
+        added = account.add_caller(addr, note, path=f, key=key)
     except (paths.NotConfigured, paths.Unsafe) as exc:
         _fail(exc, 2)
         return
     except ValueError as exc:
         _fail(exc, 1)
         return
-    click.echo(f"{'approved' if added else 'already approved'}: {addr.strip().lower()}")
+    if said:
+        click.echo(said)
+    click.echo(f"{'approved' if added else 'already approved'}: {addr}  key:{key} in {f}")
     # Callers and channels are two lists. A caller whose chat is
     # not listed hears the call but gets no in-call chat text.
     click.echo(f"hint: to let the bot write to them too (in-call chat text, replies), "
-               f"list the chat: `sessionphone channels add NAME {addr.strip().lower()}`")
+               f"list the chat: `sessionphone channels add NAME {addr}`")
+
+
+@callers.command("pin", context_settings=CTX)
+@click.argument("addr")
+@click.option("--key", default=None, metavar="FPR",
+              help="the key fingerprint to pin (the phone shows it under the contact's profile, "
+                   "Encryption); without it the account is opened to find the one key contact "
+                   "with ADDR, which fails while the bot holds the account")
+def callers_pin(addr: str, key: str | None) -> None:
+    """Pin a listed ADDR to a key, in place; a key it had is replaced."""
+    try:
+        f = _callers_file()
+        addr = addr.strip().lower()
+        if addr not in account.read_callers(f):
+            raise ValueError(f"{addr} is not listed in {f}; "
+                             f"`sessionphone callers add {addr} --key FPR` lists it")
+        key, said = _key_for(addr, key)
+        before = keygate.pin_entry(f, addr, key)
+    except (paths.NotConfigured, paths.Unsafe) as exc:
+        _fail(exc, 2)
+        return
+    except ValueError as exc:
+        _fail(exc, 1)
+        return
+    if said:
+        click.echo(said)
+    was = f" (was {before})" if before and before != key else ""
+    click.echo(f"pinned: {addr}  key:{key}{was} in {f}")
 
 
 # ---- avatar: the bot's picture ---------------------------------------------
@@ -345,8 +456,11 @@ def _loose(path: pathlib.Path, mode: int) -> None:
 def channels_(ctx: click.Context) -> None:
     """Where the bot may send: one `NAME TARGET  # note` per line.
 
-    TARGET is an address (that contact's 1:1 chat, never a group they are in)
-    or chat:N (one chat by id, the only way to list a group). Every dc-* tool
+    TARGET is an address (that contact's 1:1 chat, never a group they are in),
+    bound to a key fingerprint (`key:FPR`): it passes only while the chat's
+    contact holds that key; an address line with no key is refused until one
+    is pinned (`sessionphone channels pin NAME`). Or chat:N (one chat by id,
+    the only way to list a group). Every dc-* tool
     takes a NAME wherever it takes a chat id. A send to a chat not listed here
     is refused. A missing, unreadable or loose (group/world-writable) list
     refuses every send: it fails closed. Exit 2 when the list is refused.
@@ -385,24 +499,47 @@ def _list_channels() -> None:
     width = max(len(n) for n in listing.entries)
     twidth = max(len(e.target) for e in listing.entries.values())
     for e in listing.entries.values():
-        line = f"{e.name:<{width}}  {e.target:<{twidth}}" + (f"  # {e.note}" if e.note else "")
+        line = f"{e.name:<{width}}  {e.target:<{twidth}}"
+        if e.key:
+            line += f"  key:{e.key}"
+        elif e.address is not None:
+            line += f"  UNPINNED: refused until pinned (`sessionphone channels pin {e.name}`)"
+        line += f"  # {e.note}" if e.note else ""
         click.echo(line.rstrip())
+
+
+_CHANNEL_KEY_HELP = ("the key fingerprint the contact holds (their phone shows it under the "
+                     "contact's profile, Encryption); without it the account is opened to find the "
+                     "one key contact with the address, which fails while the bot holds the account")
 
 
 @channels_.command("add", context_settings=CTX)
 @click.argument("name")
 @click.argument("target")
 @click.option("--note", default="", help="who or what this is, kept as a comment")
-def channels_add(name: str, target: str, note: str) -> None:
-    """List NAME -> TARGET (an address, or chat:N). Refuses a NAME already listed."""
+@click.option("--key", default=None, metavar="FPR", help=_CHANNEL_KEY_HELP + "; an address TARGET only")
+def channels_add(name: str, target: str, note: str, key: str | None) -> None:
+    """List NAME -> TARGET (an address bound to its key, or chat:N). Refuses a NAME already listed."""
     try:
         f = _channels_file()
     except (paths.NotConfigured, paths.Unsafe) as exc:
         _fail(exc, 2)
         return
+    said = None
     try:
+        bad = channels.name_problem(name)
+        if bad:
+            raise ValueError(bad)
+        norm = channels.parse_target(target or "")
+        if norm is None:
+            raise ValueError(f"TARGET {target!r} must be an address or chat:N")
+        if not norm.startswith("chat:"):    # an address is bound to a key before it is written
+            text = f.read_text(encoding="utf-8") if f.exists() else ""   # unreadable: exit 2 first
+            if name in channels.parse(text, f, lambda _m: None):
+                raise ValueError(f"NAME {name!r} is already listed in {f}")
+            key, said = _key_for(norm, key, pin_how=channels.PIN_HOW.format(name=name))
         before = channels.loose_mode(f)
-        entry = channels.add(name, target, note, f)
+        entry = channels.add(name, target, note, f, key=key)
     except ValueError as exc:
         _fail(exc, 1)
         return
@@ -411,7 +548,43 @@ def channels_add(name: str, target: str, note: str) -> None:
         return
     if before is not None:
         _tightened(f, before)
-    click.echo(f"listed: {entry.name}  {entry.target} ({f})")
+    if said:
+        click.echo(said)
+    click.echo(f"listed: {entry.name}  {entry.target}" + (f"  key:{entry.key}" if entry.key else "") + f" ({f})")
+
+
+@channels_.command("pin", context_settings=CTX)
+@click.argument("name")
+@click.option("--key", default=None, metavar="FPR", help=_CHANNEL_KEY_HELP)
+def channels_pin(name: str, key: str | None) -> None:
+    """Pin the listed address channel NAME to a key, in place; a key it had is replaced."""
+    try:
+        f = _channels_file()
+    except (paths.NotConfigured, paths.Unsafe) as exc:
+        _fail(exc, 2)
+        return
+    try:
+        listing = channels.load(f, log=lambda _m: None)
+        if listing.refusal:
+            raise OSError(listing.refusal)
+        entry = listing.entries.get(name)
+        if entry is None:
+            raise ValueError(f"no channel {name!r} in {f}; `sessionphone channels add {name} ADDR "
+                             "--key FPR` lists it")
+        if entry.address is None:
+            raise ValueError(f"channel {name!r} is {entry.target}, a chat id, and takes no key")
+        key, said = _key_for(entry.address, key, pin_how=channels.PIN_HOW.format(name=name))
+        before = channels.pin(name, key, f)
+    except ValueError as exc:
+        _fail(exc, 1)
+        return
+    except OSError as exc:
+        _fail(Exception(f"cannot pin in {f}: {getattr(exc, 'strerror', None) or exc}; nothing was written"), 2)
+        return
+    if said:
+        click.echo(said)
+    was = f" (was {before})" if before and before != key else ""
+    click.echo(f"pinned: {name}  {entry.address}  key:{key}{was}")
 
 
 @channels_.command("seed", context_settings=CTX)
@@ -515,6 +688,10 @@ def bot(ctx: click.Context) -> None:
               help="approve ADDR as the owner, the first who may ring (written into the callers file), "
                    "and list them as `owner` in channels.txt if it has no channel yet. ADDR is the "
                    "owner's Delta Chat address (the one their app shows), not a mail address")
+@click.option("--owner-key", "owner_key", default=None, metavar="FPR",
+              help="bind --owner's line to this key fingerprint: the owner's own, as Delta Chat on "
+                   "the owner's phone lists it (this agent's contact profile, Encryption). Without it, "
+                   "on a callers file that keeps keys, --owner is refused")
 @click.option("--forget", "forget", multiple=True, metavar="KEY",
               help="drop KEY (a DC_* name, or SESSIONPHONE_ROOT) from the settings this bot "
                    "keeps, for this run and every later one. Repeatable")
@@ -534,8 +711,12 @@ def bot(ctx: click.Context) -> None:
                    "Chat account): boot out its launchd job, remove its plist, and forget it in "
                    "phone.json. Without it, install refuses while another bot is recorded on "
                    "the same root. Repeatable")
+@click.option("--force", is_flag=True,
+              help="restart the bot even while a call is live: the call drops. Without it, "
+                   "install refuses while one is up")
 def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None,
-                hear_here: bool = False, replace: tuple[str, ...] = ()) -> None:
+                hear_here: bool = False, replace: tuple[str, ...] = (),
+                owner_key: str | None = None, force: bool = False) -> None:
     """Run the bot as this user's launchd job, now and at every login.
 
     DC_* variables set in this shell are carried into the job, and so are
@@ -550,7 +731,8 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     DC_AGENT, else this session's seat as sessionmail names it (`message
     subscription list`) when a later session can be started as it, never a
     session id or a plus address, else the one bot the file records, else
-    claude; with two or more recorded and no name, install refuses. Only
+    the harness vendor's word (`session agent default`), else claude; with
+    two or more recorded and no name, install refuses. Only
     when sessionmail gives no answer is CLAUDE_CODE_AGENT taken instead of
     the seat. The
     mail-route settings are not saved there: sessionmail keeps them in its own
@@ -591,6 +773,13 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     which grants nothing; or when it could send nowhere: channels.txt is
     missing or empty and there is no owner to list in it (--owner, else the
     callers file's owner line).
+    Refused (exit 2, writing nothing, booting nothing out) while a call is
+    live on the bot it would restart: `a call is live; hang up or pass
+    --force`, then the call. A call is live when the bot writes its
+    call-live.json and that bot is running (its bot.pid, as dc-live reads it)
+    and started before the call. A file left by a bot that has gone, or by an
+    earlier bot, is no call. The files are the ones the installed job's plist
+    names. --force restarts it anyway, and the call drops.
     Refused (exit 2, writing nothing) when DC_STT_URL names no model: its
     kind is unknown and DC_STT_MODEL is unset (tag the URL or set the model).
     Refused too (exit 2, writing nothing) when this environment lacks the
@@ -617,6 +806,11 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     advice, stays under `box:`). A warning only: the job is installed either
     way, and the exit code does not change. From a shell that is no Claude
     session it gives the advice, and how to send Delta text to another box.
+    A DC_MAILTO naming this session's own box (its session id) is heard, as
+    "its own session box". When the bot's name came from the default and
+    sessionmail says nobody hears its box (`message subscription list
+    <agent>`: no such box, or 0 hear it and no live listener), a `default:`
+    line follows `hear:`, naming the fix: start a bare `session start` first.
     When a default picture ships, the `picture:` line says the bot sets it
     at its start if the account has none and it was not cleared
     (`sessionphone avatar --clear`); nothing ships yet, so no line.
@@ -625,8 +819,13 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     name or the name of the agent it is or replaced (--replace). Any other
     name was set by hand and is kept; the line says so, with the DC_NAME line
     that changes it.
-    Its last line, `hearing:`, says whether the bot will hear the caller: it
+    Its `hearing:` line says whether the bot will hear the caller: it
     sends a half-second test clip to the STT at DC_STT_URL, saying so first.
+    Its last line, `speaking:`, says whether the bot can speak its replies:
+    on the speech-server route it needs ffmpeg, looked for where the bot
+    looks (DC_FFMPEG, the job's PATH, the Homebrew paths). With none, it says
+    NO: every spoken reply would go to the caller as chat text, and it shows
+    the fix.
     """
     try:
         media.require("bot install")    # FIRST: a refusal writes no plist, no channels seed
@@ -638,15 +837,15 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     settled: list[settings.Resolved] = []
     unsaved: settings.NotSaved | None = None
     try:
-        p = service.install(owner=owner, seeded=seeded.append, say=click.echo,
+        p = service.install(owner=owner, owner_key=owner_key, seeded=seeded.append, say=click.echo,
                             seated=lambda made, box: seated.append((made, box)),
                             forget=forget, settled=settled.append, registry=registry,
-                            replace=replace)
+                            replace=replace, force=force)
     except settings.NotSaved as exc:   # the job is loaded: say all of it, then why, exit 1
         p, unsaved = exc.plist, exc
     except (paths.NotConfigured, paths.Unsafe, service.NoMailHost, service.NoSTTModel,
             service.NoCallers, service.NoChannels, service.LegacyCarryOver,
-            service.NoSigner, service.NoBox, settings.Bad) as exc:
+            service.NoSigner, service.NoBox, service.CallLive, settings.Bad) as exc:
         _fail(exc, 2)
         return
     except Exception as exc:  # noqa: BLE001 - the operator gets launchctl's (or sessionmail's) reason
@@ -655,14 +854,15 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     res = settled[0] if settled else None
     name, env = (res.name, res.env) if res else (None, None)
     st = service.status(name)
-    first, later = _hear_lines(seated, hear_here)
+    first, later = _hear_lines(seated, hear_here, res.name if res else "", res.name_from if res else "")
     for line in first:              # this session will NOT hear: the warning leads
         click.echo(line)
     click.echo(f"installed: {p}")
     for made, _box in seated:
         click.echo(f"seat:      {made.line()}")
     if owner:
-        click.echo(f"owner:     {owner.strip().lower()}, approved in {dc_env.callers_file(env)}")
+        bound = f", bound to key {keygate.normalize(owner_key)}" if owner_key else ""
+        click.echo(f"owner:     {owner.strip().lower()}, approved in {dc_env.callers_file(env)}{bound}")
     for e in seeded:
         click.echo(f"channels:  {e.name} {e.target}, listed in {dc_env.channels_file(env)}")
     click.echo(f"running:   {'pid ' + str(st['pid']) if st['pid'] else 'not yet - see `sessionphone bot status`'}")
@@ -683,17 +883,21 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
         for line in later.get(box.name, ()):
             click.echo(line)
     _hearing(p)
+    _speaking(p)
     if unsaved is not None:
         _fail(unsaved, 1)
 
 
-def _hear_lines(seated, hear_here: bool) -> tuple[list[str], dict[str, list[str]]]:
+def _hear_lines(seated, hear_here: bool, name: str = "", came: str = ""
+                ) -> tuple[list[str], dict[str, list[str]]]:
     """`bot install`'s hear-here: and hear: lines for each box made, measured
     once, --hear-here first (it subscribes, then the hear line measures again).
     -> (first, later): when sessionmail says THIS session will NOT hear a box
     (seat.deaf), its hear: warning and ways out, then its hear-here: line, go
     in FIRST, ahead of `installed:`; else they stay in LATER, under the box's
-    own `box:` line, as before."""
+    own `box:` line, as before. After them, for the bot's own box (NAME) when
+    its name CAME from the default, the `default:` line (seat.fallthrough)
+    when sessionmail says nobody hears it."""
     first: list[str] = []
     later: dict[str, list[str]] = {}
     for _made, box in seated:
@@ -705,10 +909,12 @@ def _hear_lines(seated, hear_here: bool) -> tuple[list[str], dict[str, list[str]
         here = f"hear-here: {seat.hear_here(box.name, os.environ)}" if hear_here else None
         r = seat.reach(os.environ)
         hear = f"hear:      {seat.hear_line(box.name, os.environ, r)}"
+        said = seat.fallthrough(box.name, came, os.environ, r) if name and box.name == name else None
+        tail = [f"default:   {said}"] if said else []
         if seat.deaf(box.name, r):
-            first += [hear, *([here] if here else [])]
+            first += [hear, *([here] if here else []), *tail]
         else:
-            lines += [*([here] if here else []), hear]
+            lines += [*([here] if here else []), hear, *tail]
     return first, later
 
 
@@ -754,10 +960,40 @@ def _hearing(plist: pathlib.Path) -> None:
         click.echo(line)
 
 
+def _speaking(plist: pathlib.Path, head: str = hearing.SPEAK_HEAD) -> None:
+    """`bot install`'s (and `bot status`'s) `speaking:` lines: can the bot speak
+    its replies? Judged on the job's environment read back from the plist, as
+    hearing is (hearing.ffmpeg_for: DC_FFMPEG, the job's PATH, the Homebrew
+    paths), never this shell's PATH. Said, never a refusal. A plist that
+    cannot be read back says nothing here: `hearing:` has said so already."""
+    env, _exc = _job_env(plist)
+    if env is None:
+        return
+    for line in hearing.speaking_lines(env, head=head):
+        click.echo(line)
+
+
+def _status_hearing(plist: pathlib.Path) -> None:
+    """`bot status`'s ONE `hearing:` line: does the STT the job
+    carries answer? A bot whose STT died after install is otherwise never
+    reported. The probe is capped (hearing.STATUS_MAX_TIME_S), and the line
+    itself names what was asked, so nothing is said before it. Said, never a
+    refusal: the exit code is the job's alone."""
+    env, exc = _job_env(plist)
+    if env is None:
+        click.echo(f"{hearing.STATUS_HEAD}not confirmed. The job's environment could not be read "
+                   f"back from {plist} ({exc}), so DC_STT_URL was not checked.")
+        return
+    v = hearing.probe(env, say=lambda _line: None, max_time=hearing.STATUS_MAX_TIME_S,
+                      run_timeout=hearing.STATUS_RUN_TIMEOUT_S)
+    click.echo(hearing.status_line(v, env))
+
+
 def _which_bot(verb: str) -> tuple[str, str | None]:
     """The bot `sessionphone VERB` acts on, as install picks it
     (settings.bot_name): DC_AGENT, else this session's durable seat, else
-    the one bot phone.json records, else claude. -> (name, its `bot:` line), the line
+    the one bot phone.json records, else the harness vendor's word
+    (settings.default_agent, else claude). -> (name, its `bot:` line), the line
     None when this shell's own variables named it (settings.named_by_shell:
     it is what was asked for). A settings file that cannot be used, or two
     bots and no name, refuses (exit 2), naming the way past it."""
@@ -770,24 +1006,63 @@ def _which_bot(verb: str) -> tuple[str, str | None]:
 
 
 @bot.command("uninstall", context_settings=CTX)
-def bot_uninstall() -> None:
+@click.option("--force", is_flag=True,
+              help="stop the bot even while a call is live: the call drops. Without it, "
+                   "uninstall refuses while one is up")
+def bot_uninstall(force: bool = False) -> None:
     """Stop the bot and remove its launchd job, and any job sessionphone 0.1.0
     left for it under the old label. The account stays.
 
+    Refused (exit 2, stopping and removing nothing) while a call is live on
+    the bot, as `bot install` judges it: `a call is live; hang up or pass
+    --force`, then the call. --force stops it anyway, and the call drops.
+
     The bot is the one install would pick: DC_AGENT, else this session's
     durable seat, else the one bot ~/.sessionkit/phone/settings/phone.json
-    records, else claude; with two or more recorded and no name, it refuses (exit 2). With
+    records, else the harness vendor's word (`session agent default`), else
+    claude; with two or more recorded and no name, it refuses (exit 2). With
     no name in this shell, its first line, `bot:`, says which it picked."""
     name, picked = _which_bot("bot uninstall")
     if picked:
         click.echo(picked)
-    for line in service.uninstall(name) or ["no launchd job was installed"]:
+    try:
+        said = service.uninstall(name, force=force)
+    except service.CallLive as exc:
+        _fail(exc, 2)
+        return
+    for line in said or ["no launchd job was installed"]:
         click.echo(line)
+
+
+def _undelivered(name: str | None) -> None:
+    """`undelivered: N waiting, M dead (<dir>)`: the bot's spool of agent mail
+    that failed, call turns included, as dc-live counts it. Said on
+    every status, 0 too; the spool is the one the installed job names."""
+    from sessionphone.bridge import spool
+    try:
+        d = service.undelivered_dir(name)
+    except settings.Bad as e:               # the root cannot be known: say so, never fail status
+        click.echo(f"undelivered: unknown ({e})")
+        return
+    waiting, dead = spool.Spool(log=lambda _m: None, root=d).counts()
+    click.echo(f"undelivered: {waiting} waiting, {dead} dead ({d})")
 
 
 @bot.command("status", context_settings=CTX)
 def bot_status() -> None:
     """Is the bot installed, loaded and running? Exit 0 running, 1 not.
+
+    With the job installed, a `hearing:` line says whether the STT at the
+    job's DC_STT_URL answers a half-second test clip (capped at a few
+    seconds: a server still loading its model reads `not confirmed`). On NO
+    it names the URL that did not answer and points at `bot install`, which
+    says how to fix it. Then a `speaking:` line says whether the bot can speak
+    its replies, judged on the plist's environment as `bot install` judges it:
+    with no ffmpeg where the bot looks, it says NO, that spoken replies go to
+    the caller as chat text, and the fix. Neither changes the exit code.
+
+    An `undelivered:` line counts the agent mail waiting in the bot's spool
+    and dead there (call turns included), from the spool its plist names.
 
     Its last line is the last line of the bot's log; before the bot has
     written one (a bot that refused to start), the last line of launchd's log
@@ -814,6 +1089,10 @@ def bot_status() -> None:
         click.echo(f"running: pid {st['pid']}")
     else:
         click.echo(f"running: no{' (last exit ' + st['last_exit'] + ')' if st['last_exit'] else ''}")
+    if st["installed"]:
+        _status_hearing(pathlib.Path(st["plist"]))
+        _speaking(pathlib.Path(st["plist"]), head="speaking: ")
+    _undelivered(name)
     log, line, launchd = service.last_log(name)
     click.echo(f"log:     {log}")
     if line is None:
@@ -831,8 +1110,9 @@ def bot_run() -> None:
 
     The bot is the one install would pick (as `bot uninstall` says):
     DC_AGENT, else this session's durable seat, else the one bot
-    ~/.sessionkit/phone/settings/phone.json records, else claude; with two
-    or more recorded and no name, it refuses (exit 2). With no name in this
+    ~/.sessionkit/phone/settings/phone.json records, else the harness
+    vendor's word (`session agent default`), else claude; with two or more
+    recorded and no name, it refuses (exit 2). With no name in this
     shell, its first line, `bot:`, says which it picked."""
     try:
         media.require("bot run")
@@ -875,10 +1155,10 @@ _ROOT_HELP = "the sessionphone root (default: $SESSIONPHONE_ROOT, else ~/.sessio
 @click.option("--demo", is_flag=True,
               help="allow --legs on a live root (the default one, or one a keeper scans): the DEMO, "
                    "a live seat on the line; it waits for the operator's GO")
-@click.option("--mail-to", "mail_to", default=None, metavar="ADDR",
-              help="with --legs: the seat each finished turn of a web call is mailed to "
-                   "(default: $DC_MAILTO, else $DC_AGENT@HOST, HOST being $DC_HOST, else the mail drop's "
-                   "host part for this machine; with neither, --legs is refused)")
+@click.option("--mail-to", "mail_to", default=None, metavar="BOX",
+              help="with --legs: the seat each finished turn of a web call is mailed to, a bare box on "
+                   "this host or box@host (default: $DC_MAILTO, else the bare $DC_AGENT; with neither, "
+                   "--legs is refused)")
 @click.option("--heard-dir", "heard_dir", type=click.Path(file_okay=False, path_type=pathlib.Path), default=None,
               metavar="DIR", help="with --legs: the ears' heard log dir the turns are read from (default: "
                                   "$EARS_HEARD_DIR, else $VOICEMODE_BASE_DIR/logs/conversations, "

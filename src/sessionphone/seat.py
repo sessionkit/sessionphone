@@ -79,7 +79,7 @@ DOORBELL = (" (it runs `claude --agent {agent}`: only a session started as {agen
 NO_AGENT_FILE = ' (no agent file "{agent}" yet: see the README)'
 # How to send Delta text to another box, said wherever the box is named.
 CHANGE = (" To send Delta text to another box, install again with DC_AGENT=NAME (the agent a "
-          "session is started as) or DC_MAILTO=ADDR (a box a session hears).")
+          "session is started as) or DC_MAILTO=BOX (a box a session hears).")
 # Said only when sessionmail, asked, says this session hears the box.
 HEARD = ("this session hears box {agent} ({how}): Delta messages and calls reach it, "
          "while it runs")
@@ -90,7 +90,7 @@ DEAF = ("this session will NOT hear Delta messages or calls: they go to box {age
         "this session hears {hears}. Ways out: start Claude with `session start {agent}` "
         "(only a session started as {agent} hears that box, today and in later sessions); "
         "or install again with DC_AGENT=NAME (the agent a session is started as) or "
-        "DC_MAILTO=ADDR (a box a session hears); or `sessionphone bot install --hear-here`, "
+        "DC_MAILTO=BOX (a box a session hears); or `sessionphone bot install --hear-here`, "
         "which lets this session hear box {agent} until this session ends.")
 UNASKED = (" Whether this session hears it was not measured: `message subscription list` "
            "gave no answer ({said}).")
@@ -98,6 +98,10 @@ UNASKED = (" Whether this session hears it was not measured: `message subscripti
 HEAR_HERE_ARGS = ("subscription", "add")
 HEAR_HERE_ENDS = ("it ends with this session: a later session does not hear the box unless "
                   "it is started with `session start {agent}`, or runs --hear-here again")
+# `bot install`, when the bot's name fell through to the default and sessionmail
+# says nobody hears its box (no seat, no subscription, no live listener).
+FALLTHROUGH = ("no seat owns box {agent}: the bot's name came from the default, so nothing hears "
+               "its mail yet. Start a bare `session start` first; it becomes {agent}.")
 
 
 class NoSigner(Exception):
@@ -403,7 +407,8 @@ def key(env: MutableMapping[str, str], seat: str, shell: Mapping[str, str], regi
 
 def on_host(mailto: str, env: Mapping[str, str]) -> bool:
     """Is MAILTO's domain this host, as sessionmail's drop judges it: its mail
-    host, or a name under it? Off this host, the box is not ours to make."""
+    host, or a name under it? A bare MAILTO (no host) is this host. Off this
+    host, the box is not ours to make."""
     return seatmail.on_host(mailto, env)
 
 
@@ -563,7 +568,8 @@ def hear_line(agent: str, shell: Mapping[str, str], r: Reach | None = None) -> s
     It never refuses anything: install has written the bot either way."""
     r = reach(shell) if r is None else r
     if r.answered and r.hears(agent):
-        how = f"its seat {r.seat}" if r.seat == agent else "by a subscription"
+        how = (f"its seat {r.seat}" if r.seat == agent else
+               "its own session box" if r.own_box(agent) else "by a subscription")
         return HEARD.format(agent=agent, how=how) + ("" if r.boxed else UNBOXED)
     if deaf(agent, r):
         line = DEAF.format(agent=agent, hears=_hears_what(r))
@@ -575,6 +581,21 @@ def hear_line(agent: str, shell: Mapping[str, str], r: Reach | None = None) -> s
     if known is None or agent not in known:
         line += NO_AGENT_FILE.format(agent=agent)
     return line
+
+
+def fallthrough(agent: str, came: str, shell: Mapping[str, str], r: Reach) -> str | None:
+    """`bot install`'s one line when the bot's name CAME from the default
+    (settings.pick_name: "the default ...") and nobody hears its box AGENT:
+    this session does not (R), and sessionmail, asked (reach_.unowned: `message
+    subscription list AGENT`, read only), says no seat, subscription or live
+    listener does. -> FALLTHROUGH, or None: any other case, and any answer
+    that is not plainly "nobody", says nothing."""
+    if not came.startswith("the default") or r.hears(agent):
+        return None
+    exe = seatmail.resolve_message(shell)
+    if exe is None or not reach_.unowned(agent, shell, tool_env(shell, exe), exe):
+        return None
+    return FALLTHROUGH.format(agent=agent)
 
 
 def hear_here(agent: str, shell: Mapping[str, str]) -> str:

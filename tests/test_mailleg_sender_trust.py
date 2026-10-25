@@ -45,7 +45,7 @@ OWN = calls.DEFAULT_VOICE_MAP                   # {dc_env.AGENT: dc_env.VOICE}, 
 class Session:
     pc, chat_id, root_id, account = object(), 12, LIVE, None
 
-    async def speak(self, text, voice, who):
+    async def speak(self, text, voice, who, floor=False):
         return None
 
 

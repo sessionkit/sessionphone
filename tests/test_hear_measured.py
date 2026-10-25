@@ -159,7 +159,7 @@ def test_a_plain_claude_session_is_told_plainly_it_will_not_hear(asks):
         "session hears only its own session box. Ways out: start Claude with `session start "
         "claude` (only a session started as claude hears that box, today and in later "
         "sessions); or install again with DC_AGENT=NAME (the agent a session is started as) "
-        "or DC_MAILTO=ADDR (a box a session hears); or `sessionphone bot install "
+        "or DC_MAILTO=BOX (a box a session hears); or `sessionphone bot install "
         "--hear-here`, which lets this session hear box claude until this session ends.")
 
 
@@ -397,5 +397,5 @@ def test_the_bots_start_words_name_the_box_and_how_to_change_it():
     words = seat.hear_words("ada")
     assert words.startswith("To hear Delta messages, start Claude with: session start ada ")
     assert words.endswith("To send Delta text to another box, install again with DC_AGENT=NAME "
-                          "(the agent a session is started as) or DC_MAILTO=ADDR (a box a "
+                          "(the agent a session is started as) or DC_MAILTO=BOX (a box a "
                           "session hears).")

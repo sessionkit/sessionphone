@@ -40,16 +40,16 @@ def _bot_identity(tmp_path, *argv, **env):
 
 
 def test_the_agent_named_only_in_argv_is_who_the_bot_is(tmp_path):
-    assert _bot_identity(tmp_path, "carol") == ["carol", "carol-chat@host.example", "carol@host.example"]
+    assert _bot_identity(tmp_path, "carol") == ["carol", "carol-chat@host.example", "carol"]   # MAILTO bare (PHONE-248)
 
 
 def test_dc_agent_in_the_environment_still_wins_over_argv(tmp_path):
     assert _bot_identity(tmp_path, "carol", DC_AGENT="alice") == \
-        ["alice", "alice-chat@host.example", "alice@host.example"]
+        ["alice", "alice-chat@host.example", "alice"]
 
 
 def test_with_no_agent_anywhere_the_bot_is_claude(tmp_path):
-    assert _bot_identity(tmp_path) == ["claude", "claude-chat@host.example", "claude@host.example"]
+    assert _bot_identity(tmp_path) == ["claude", "claude-chat@host.example", "claude"]
 
 
 def test_the_argv_fill_comes_before_every_sessionphone_import():

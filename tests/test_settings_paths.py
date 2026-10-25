@@ -66,7 +66,7 @@ ALLOWED = {
     "src/sessionphone/bridge/recording.py:145",  # LEGACY_EARS_CONF: stat-ed for the warning only
     "tests/test_stranded_ears_conf.py:23",       # OLD: the HOME=tmp test of the warning
     "tests/test_settings_paths.py:61",           # SUPERSEDED: this gate's own pattern
-    "docs/configuration.md:232",                 # the "Upgrading from 0.1.0" note
+    "docs/configuration.md:244",                 # the "Upgrading from 0.1.0" note
 }
 
 # Never shipped, or not ours: version control, caches, virtualenvs, builds.

@@ -29,7 +29,7 @@ What this does with a call:
 Runs in its own thread with its own asyncio loop; the bot's RPC calls are
 sync and are pushed to the default executor.
 """
-import asyncio, collections, email, email.policy, email.utils, fractions
+import asyncio, collections, concurrent.futures, email, email.policy, email.utils, fractions
 import json, os, pathlib, re, shlex, subprocess
 import threading, time, traceback, types, uuid, wave
 
@@ -71,6 +71,7 @@ HOME = pathlib.Path.home()
 from sessionphone.bridge import dc_env                 # >>> identity: who this bridge is
 from sessionphone.account import read_callers         # the approved-callers file, one parser
 from sessionphone import channels                      # where the bot may post, one gate
+from sessionphone import keygate                       # approved callers, bound to a key
 from sessionphone.bridge.heard_sink import CallSink, NullSink   # M8: the call's words into VoiceMode's heard log
 from sessionphone.bridge import earleg                 # the call as a mic: his PCM on call-ears.sock
 from sessionphone.bridge import ack                    # a job's yes or no
@@ -80,19 +81,20 @@ from sessionphone.bridge import recording              # is a call's audio kept?
 from sessionphone import paths                         # kit settings paths, one layout
 from sessionphone import hearing                       # weights_state() and probe(): will the call hear?
 from sessionphone.bridge import firstcall              # >>> first-call-wait: the line and the music
+from sessionphone.bridge.floor import Floor            # a reply waits for the caller's quiet
 # A second profile (the PUBLIC relay) runs this same file
 # under its own launchd job: its own call dir, its profile name in the call's
 # mail-thread id (chat ids are per account - chat 12 exists on both), and a
 # longer STUN wait. Every default is the main profile's, unchanged.
 PROFILE = dc_env.env("PROFILE", "")
 
-# The approved callers: one address per line in DC_CALLERS_FILE (default
+# The approved callers: one `ADDR  key:FPR` line each in DC_CALLERS_FILE (default
 # $DC_ROOT/callers.txt; "#" starts a comment; `sessionphone link` writes the owner
 # there first). Read on every call, so an edit takes effect without a restart.
 # Empty = nobody may ring. DC_CALLERS is IGNORED: an env var never
 # grants the right to ring (dc_env.callers_ignored).
 CALLERS_FILE = dc_env.path("CALLERS_FILE", "callers.txt")
-CALLERS_HELP = f"add the address to {CALLERS_FILE}"
+CALLERS_HELP = f"`sessionphone callers add ADDR --key FPR` writes {CALLERS_FILE}"
 
 
 def approved_callers() -> set:
@@ -122,6 +124,13 @@ def post_to_chat(account, chat_id, text, what):
 # <<< channels-gate
 
 
+# >>> recording-notice: the longest the greeting waits on the chat line's result,
+# or on the notice sent as text, when no other notice reached the caller. A send
+# still running at the bound may land; the log says "not confirmed".
+REC_NOTICE_TEXT_WAIT = 5.0
+# <<< recording-notice
+
+
 def caller_address(account, msg_id):
     """The address that placed the call, lower-cased; None if it cannot be read (then: refused)."""
     try:
@@ -135,7 +144,10 @@ CALLS_DIR = dc_env.path("CALLS_DIR", "calls")  # one dir per call: text always, 
 # THE LIVE CALL, ON DISK. The bot holds the account lock, so a shell cannot
 # ask it anything; this file is how dc-say finds out whether the call it
 # means is still up, before it queues a word. Absent = no call.
-LIVE_FILE = dc_env.path("LIVE", "call-live.json")
+LIVE_FILE = dc_env.LIVE_FILE   # DC_LIVE, else <home>/call-live.json
+# a bot being stopped (SIGTERM) ends its calls within this many seconds: well
+# inside launchd's grace (ExitTimeOut, 20 s by default) before its SIGKILL
+STOP_S = 8.0
 
 
 def ack_write(path, ok, detail=""):
@@ -207,7 +219,26 @@ RING_WAIT = dc_env.RING_WAIT
 NO_REPLY_S = dc_env.NO_REPLY_S
 HOLDING_LINE = dc_env.HOLDING_LINE
 # <<< no-reply
+FLOOR_GAP, FLOOR_CAP = dc_env.FLOOR_GAP, dc_env.FLOOR_CAP   # floor control (bridge/floor.py)
+# >>> undelivered: said on the call once for each turn whose mail did not go.
+# It promises no retry: the spool retries a kept turn, but a
+# kind that never heals goes to dead/.
+UNDELIVERED_LINE = "I couldn't reach the agent."
+# <<< undelivered
 GREETING_VOICEMAIL = dc_env.GREETING_VOICEMAIL
+
+
+def settle_greetings(display):
+    """The greetings above are copied when calls is imported, before the
+    bot's start has settled the account's display name. Bind them again from
+    DISPLAY (dc_env.settle_greetings), so a call greets by the name people
+    see in their chat list."""
+    global GREETING, GREETING_OUT, GREETING_VOICEMAIL
+    dc_env.settle_greetings(display)
+    GREETING, GREETING_OUT, GREETING_VOICEMAIL = (
+        dc_env.GREETING, dc_env.GREETING_OUT, dc_env.GREETING_VOICEMAIL)
+
+
 # The RINGING mail tells its reader what to run, and the package puts
 # no dc-* tool on any PATH (pyproject installs only `sessionphone`). The bridge
 # always runs from its checkout, so name the checkout's own bin/ tool by its
@@ -278,7 +309,13 @@ GUESTS_FILE = dc_env.path("GUESTS", "call-guests.txt")
 DEFAULT_VOICE_MAP = {dc_env.AGENT: dc_env.VOICE}   # the agent's own mail, in its own voice
 UNKNOWN_VOICE = "am_adam"   # a plain voice: an unknown sender is ANNOUNCED as
                             # unknown, never quietly given someone else's voice
-MAIL_SPEAK_MAX = 1200       # a mail longer than this is trimmed, not read out
+# The longest mail SPOKEN into a call, marker included. A mail reply holds the
+# call's track as one line: 1200 characters is about 90 s at the echo
+# canceller's measured CPS, and it bounds the longest single TTS request (a mail
+# with no sentence punctuation is one sentence). Only the speech is cut, at a
+# sentence or word end, and it closes with SPOKEN_MORE; the chat copy is whole.
+MAIL_SPEAK_MAX = 1200
+SPOKEN_MORE = "The rest is in the chat."
 # launchd's PATH has no Homebrew; the bot runs under launchd
 FFMPEG = (dc_env.env("FFMPEG") or shutil.which("ffmpeg")
           or next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
@@ -679,12 +716,24 @@ def mid_thought(text):
     return t[-1] not in ".!?" or bool(OPEN_END.search(t))
 
 
+def flat(text):
+    """Heard words on one line: whisper's line breaks and runs of spaces become
+    one space, and nothing is cut. Every path that carries heard words to an
+    agent (the turn mail, the preview mail, the heard log's turn and partials)
+    uses this, never one_line: what the caller said reaches the agent whole,
+    however long the turn."""
+    return " ".join((text or "").split())
+
+
 def one_line(text, n=400):
     """whisper answers with line breaks in it. Flatten before logging: a log
     line cut at 80 chars mid-sentence reads exactly like the SPEAKER being cut
     off mid-sentence, and an agent once read its own log that
-    way and reported a truncation bug that was not there."""
-    t = " ".join((text or "").split())
+    way and reported a truncation bug that was not there.
+
+    Display only: it cuts at N and adds "...". Never use it on text an agent
+    acts on; use flat()."""
+    t = flat(text)
     return t if len(t) <= n else t[:n] + "..."
 
 
@@ -790,10 +839,17 @@ class VoiceLine:
     say() and end() return at once, so a waiting mouth still reads its own C
     or EOF, and a waiting bot reply still renders.
 
-    state: "waiting", "owning", "done" (ended and released) or "cut"."""
+    state: "waiting", "owning", "done" (ended and released) or "cut".
 
-    def __init__(self, track, who=""):
+    floor: a REPLY line (a dc-say, a mail into the call, a mouth line). It
+    does not start while the caller is speaking (bridge/floor.py): at the
+    head of the queue, with the track idle, it waits for the caller's quiet,
+    or the cap. The bridge's own lines are opened without it."""
+
+    def __init__(self, track, who="", floor=False):
         self.track, self.who = track, who
+        self.floor = floor
+        self.held_at = None        # when the floor first held it (floor clock)
         self.state = "waiting"
         self.buf = []              # (pcm, on_queue) said while waiting
         self.complete = False      # end() was called while waiting
@@ -874,6 +930,7 @@ class PipVoiceTrack(MediaStreamTrack):
         self.said_n = 0                       # lines queued by say(), ever
         self.owner = None                     # the VoiceLine that has the track
         self.waiting = collections.deque()    # VoiceLines behind it, in arrival order
+        self.floor = None                     # bridge/floor.py's Floor: the call sets it; None = no gate
         self._start = None
         self._timestamp = 0
 
@@ -886,10 +943,11 @@ class PipVoiceTrack(MediaStreamTrack):
 
     # ---- one line at a time
 
-    def line(self, who=""):
+    def line(self, who="", floor=False):
         """Open a line. Its arrival is now: it owns the track at once if
-        nothing does, else it waits behind the lines that arrived before it."""
-        ln = VoiceLine(self, who)
+        nothing does, else it waits behind the lines that arrived before it.
+        floor: a reply line, held while the caller speaks (see _may_start)."""
+        ln = VoiceLine(self, who, floor)
         self.waiting.append(ln)
         self._grant()
         return ln
@@ -915,8 +973,12 @@ class PipVoiceTrack(MediaStreamTrack):
 
     def _grant(self):
         """Hand the track to the next waiting line, its buffer onto the queue in
-        one step. A line that already ended passes the track straight on."""
+        one step. A line that already ended passes the track straight on. A
+        reply line the floor holds stays at the head, and every line behind it
+        waits too: the order they arrived in is kept."""
         while self.owner is None and self.waiting:
+            if not self._may_start(self.waiting[0]):
+                return
             ln = self.waiting.popleft()
             self.owner, ln.state = ln, "owning"
             buf, ln.buf = ln.buf, []
@@ -925,6 +987,40 @@ class PipVoiceTrack(MediaStreamTrack):
             if ln.complete:
                 self.owner = None
                 ln._over("done")
+
+    # ---- floor control (bridge/floor.py)
+
+    def _may_start(self, ln):
+        """May LN, at the head of the queue, take the track now? A reply line
+        STARTS only when the track has nothing left to play and the caller has
+        been quiet for the floor's gap, or once the cap has held it. Its hold
+        is counted from the moment it could otherwise have started, and logged
+        once, as it is released. Every other line, a track with no floor (a web
+        call) and floor control off start as before."""
+        f = self.floor
+        if f is None or not ln.floor or not f.on or (ln.complete and not ln.buf):
+            return True          # (an ended line with nothing to say passes the track on)
+        if self.speaking():
+            return False         # the line before it is still playing: it has not started
+        now = f.tick()
+        why = f.verdict(ln.held_at, now)
+        if why is None:
+            if ln.held_at is None:
+                ln.held_at = now
+            return False
+        if ln.held_at is not None:
+            _line_log(f"FLOOR {ln.who or 'reply'} line held {now - ln.held_at:.1f}s, "
+                      f"released by {why}")
+        return True
+
+    def floor_tick(self):
+        """Once a frame: the floor reads the VAD, and a held line starts as soon
+        as it may. Nothing to do without a floor."""
+        if self.floor is None:
+            return
+        self.floor.tick()
+        if self.owner is None and self.waiting:
+            self._grant()
 
     # >>> first-call-wait: the bed (bridge/firstcall.py)
     # A bed is what the track plays when it has nothing to say: the first call's
@@ -1015,6 +1111,7 @@ class PipVoiceTrack(MediaStreamTrack):
 # <<< echo-patch cut
 
     def _next_samples(self):
+        self.floor_tick()
         return self._mixed(self._voice_samples())
 
     def _voice_samples(self):
@@ -1355,8 +1452,28 @@ def mail_speech(msg):
         if QUOTE.match(l):
             continue
         lines.append(l)
-    out = " ".join(" ".join(lines).split())
-    return out[:MAIL_SPEAK_MAX]
+    return " ".join(" ".join(lines).split())
+
+
+SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
+
+
+def spoken_part(text, cap=MAIL_SPEAK_MAX):
+    """The part of a mail's text to SAY: all of it when it fits in cap,
+    else a clean cut closed by SPOKEN_MORE, marker counted inside the cap.
+    The cut falls at the last sentence end that fits, else the last whole
+    word, else where the room runs out (one giant token)."""
+    if len(text) <= cap:
+        return text
+    room = cap - len(SPOKEN_MORE) - 2        # a space, and a "." a mid-sentence cut needs
+    ends = [m.end() for m in SENTENCE_END.finditer(text) if m.end() <= room]
+    if ends:
+        kept = text[:ends[-1]]
+    else:
+        space = text.rfind(" ", 0, room + 1)
+        kept = text[:space] if space > 0 else text[:room]
+        kept = kept.rstrip(" ,;:-") + "."     # its own sentence: the marker is spoken apart
+    return f"{kept} {SPOKEN_MORE}"
 
 
 def local_part(addr: str) -> str:
@@ -1544,7 +1661,8 @@ class MailLeg(threading.Thread):
             log(f"MAIL IN -> call chat {s.chat_id}: {who} ({voice}, {addr}, "
                 f"{'known' if known else 'unverified'}): {one_line(text, 120)}")
             reply_seen(self.manager.loop, s, "mail")   # >>> turn-log: before speak, FIFO
-            asyncio.run_coroutine_threadsafe(s.speak(text, voice, who), self.manager.loop)
+            asyncio.run_coroutine_threadsafe(s.speak(spoken_part(text), voice, who, floor=True),
+                                             self.manager.loop)
             try:
                 post_to_chat(s.account, s.chat_id, post, "mail-leg post")
             except Exception as e:
@@ -1778,6 +1896,8 @@ class CallSession:
         self.outgoing = offer_sdp is None
         self.pc = None
         self.voice = PipVoiceTrack()
+        # a reply line waits for his quiet: the floor reads the VAD's speaking
+        self.voice.floor = Floor(lambda: self.speaking, FLOOR_GAP, FLOOR_CAP)
         # >>> call-id
         # The directory carries the CALL, not just the room, so the log line
         # "closing msg 5531" and the tape on disk name the same thing.
@@ -2013,7 +2133,7 @@ class CallSession:
             "Reply-To will not do it for a CLI:\n"
             f"  message send {dc_env.ADDR} \\\n"
             f"    -r '<{self.root_id}>' -s 'your line' -f FILE\n"
-            f"Mail to {dc_env.MAILTO.split('@')[0]}@... lands in {dc_env.AGENT_NAME}'s box and is never spoken. "
+            f"Mail to {dc_env.MAILTO.split('@')[0]} lands in {dc_env.AGENT_NAME}'s box and is never spoken. "
             "One or two sentences: it is read aloud. Your own voice "
             "(voices.json, or an X-Voice: header) is used only when your "
             "mail is signed by a key pinned on your row of call-guests.txt, "
@@ -2048,7 +2168,7 @@ class CallSession:
         self.heard.event("call-started", direction="out" if self.outgoing else "in")
         hello = GREETING_OUT
         if self.outgoing and PROFILE and self.caller:
-            hello = f"Hi {self.caller}, {dc_env.AGENT_NAME} here."   # a public-profile ring names whoever it rings
+            hello = f"Hi {self.caller}, {dc_env.GREETING_NAME} here."   # a public-profile ring names whoever it rings
         # a chosen line and voice win; who = the voice, so the transcript says who spoke
         first = GREETING_VOICEMAIL if self.voicemail else GREETING      # >>> ring-first
         if FIRST_CALL_WAIT and self.wait_task is None:   # >>> first-call-wait: beside the greeting
@@ -2142,14 +2262,22 @@ class CallSession:
             log(f"call dir relabel failed: {e}")
 
     def _live_write(self):
+        # whole or not at all: a temp sibling renamed in, so a bot stopped
+        # mid-write never leaves a torn file for dc-live to doubt
+        part = LIVE_FILE.with_name(f".{LIVE_FILE.name}.{os.getpid()}.part")
         try:
             LIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            LIVE_FILE.write_text(json.dumps({
+            part.write_text(json.dumps({
                 "call_id": self.msg_id, "chat_id": self.chat_id,
                 "dir": self.dir.name, "since": time.time(),
                 "caller": self.caller}))
+            os.replace(part, LIVE_FILE)
         except Exception as e:
             log(f"live file write failed: {e}")
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _live_clear(self):
         try:
@@ -2349,7 +2477,7 @@ class CallSession:
         if e.type == "final":
             if e.text.strip():
                 log(f"HEARD seg {e.seg} [{e.start:.2f}-{e.end:.2f}] lag {(e.t or 0) - e.end:.2f}s: {one_line(e.text)}")
-                self.heard.partial(one_line(e.text, 4000), seg=e.seg)
+                self.heard.partial(flat(e.text), seg=e.seg)
         elif e.type == "vad":
             self.speaking = bool(e.get("speech"))
             # >>> recording-ears-speech
@@ -2438,9 +2566,9 @@ class CallSession:
     async def _turn_out(self):
         """Mail the assembled turn: his sentence whole, in one message."""
         parts, self.turn_parts = sorted(self.turn_parts), []
-        # one_line: whisper's own line breaks made the subject and the
-        # transcript ragged for no gain
-        text = one_line(" ".join(t for _, t in parts if t), 4000).strip()
+        # flat: whisper's own line breaks made the subject and the
+        # transcript ragged for no gain. Flattened, never cut.
+        text = flat(" ".join(t for _, t in parts if t))
         if not text:
             return
         log(f"TURN ({len(parts)} chunk{'' if len(parts) == 1 else 's'}): {one_line(text)}")
@@ -2453,8 +2581,9 @@ class CallSession:
         It logs the box it went to (`TURN <n> mailed to <box>`),
         then exactly one verdict later: `replied` (a reply line arrived in the
         call, see replied()) or `unknown`. A send the MTA refused is `NOT
-        mailed ... taken=no`, the one hard no the bridge can measure."""
-        text = one_line(text, 4000).strip()
+        mailed ... taken=no`, the one hard no the bridge can measure, and the
+        caller hears UNDELIVERED_LINE once for it (_say_undelivered)."""
+        text = flat(text)           # the whole turn: mail, heard log, transcript
         if not text:
             return
         if no_real_word(text):
@@ -2482,7 +2611,7 @@ class CallSession:
                                       f"(on the call) {text}",
                                       msgid=mid,
                                       in_reply_to=self.root_id,
-                                      subject=f"{self.caller}: {text[:44]}",
+                                      subject=f"{self.caller}: {text[:44]}",   # display only: the body is whole
                                       reply_to=dc_env.ADDR,
                                       cc=cc,
                                       supersedes=last_preview,
@@ -2506,6 +2635,24 @@ class CallSession:
     def _not_sent(self, n, e):
         log(f"TURN {n} NOT mailed to {dc_env.MAILTO}: {type(e).__name__}: "
             f"{one_line(str(e), 120)}, taken=no")
+        self._say_undelivered(n)
+
+    def _say_undelivered(self, n):
+        """Turn n's mail did not go: say UNDELIVERED_LINE on the call, ONCE for
+        the turn. A turn is one mail however many chunks it joined (_turn_out),
+        and the spool's later retries never come back here, so the caller hears
+        it once per undelivered turn, never per chunk or per retry. Only on a
+        live call (voicemail too: the caller expects the message to reach the
+        agent); a call that is closing or closed says nothing. Previews never
+        come here: they do not go through _sent."""
+        if not getattr(self, "pc", None) or getattr(self, "closed", None):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:                # no calls loop here: nothing can be said
+            return
+        log(f"UNDELIVERED box={dc_env.MAILTO} turn={n}: said on the call")
+        _keep(asyncio.ensure_future(self.speak(UNDELIVERED_LINE, None, "bridge")))
 
     def _sent_late(self, n, mid, f):
         """A send whose waiter was cancelled has landed: log it as _mail_turn would."""
@@ -2520,6 +2667,7 @@ class CallSession:
         if ok is False:      # `is False`: a hook that returns None has sent it
             # the refusal, as message send gave it (mail_in's refusal=), or "refused"
             log(f"TURN {n} NOT mailed to {dc_env.MAILTO}: {why[0] if why else 'refused'}, taken=no")
+            self._say_undelivered(n)
             return
         self.awaiting = tuple(sorted((*self.awaiting, (n, mid, time.time()))))
         to = dc_env.MAILTO + (f" cc {','.join(cc)}" if cc else "")
@@ -2656,7 +2804,7 @@ class CallSession:
         else:
             log(f"HEARD {path.name} in {time.time()-t:.1f}s: {one_line(text)}")
             self.turn_parts.append((seq, text))
-            self.heard.partial(one_line(text, 4000), chunk=seq)
+            self.heard.partial(flat(text), chunk=seq)
             if PREVIEWS:
                 p = self.previews.on_phrase(text, time.time())
                 if p:
@@ -2666,7 +2814,7 @@ class CallSession:
     async def _preview_out(self, p):
         """Mail the turn so far as a PREVIEW (never a turn): the whole text
         so far, superseding the last preview of this turn."""
-        text = one_line(p.text, 4000).strip()
+        text = flat(p.text)
         mid = (f"call-preview-{PROFILE + '-' if PROFILE else ''}{self.chat_id}-"
                f"{int(time.time()*1000)}@{seatmail.id_host()}")
         prev, self.preview_id = self.preview_id, mid
@@ -2679,30 +2827,36 @@ class CallSession:
                 f"(on the call, PREVIEW - {self.caller} is still talking; "
                 f"think and look things up, do not reply) {text}",
                 msgid=mid, in_reply_to=self.root_id,
-                subject=f"{self.caller} (preview): {text[:34]}",
+                subject=f"{self.caller} (preview): {text[:34]}",   # display only
                 reply_to=dc_env.ADDR,
                 supersedes=prev,
                 headers={"X-Call-Preview": f"{p.turn}.{p.seq}",
                          "Medium": "voice"},
                 call=self.msg_id))
 
-    async def speak(self, text, voice=None, who=None, fallback=True):
+    async def speak(self, text, voice=None, who=None, fallback=True, floor=False):
         """Say TEXT into the call. fallback: a line TTS could not say is sent
-        as chat text instead (False: it is only logged).
+        as chat text instead (False: it is only logged). floor: a REPLY (a
+        dc-say, a mail into the call): it does not start while the caller is
+        speaking (bridge/floor.py). The bridge's own lines pass False.
 
         The whole reply is ONE line on the track (PipVoiceTrack.line), and it
         takes its place as it arrives, here: a line already speaking (the
         mouth, another reply) finishes first, and nothing lands between this
         reply's sentences. A cut ends it: no later sentence is rendered or said.
-        Never waits for the track or for playback."""
+        Never waits for the track or for playback.
+        Returns what happened: {"n": sentences, "failed": how many TTS could
+        not say, "error": the first failure, "cut": cut short}. Every sentence
+        not failed and not cut was rendered and handed to the call."""
         voice, who = voice or dc_env.VOICE, who or dc_env.AGENT_NAME   # >>> identity
         loop = asyncio.get_running_loop()
-        line = self.voice.line(who)
+        line = self.voice.line(who, floor=floor)
         # >>> said-rows: one utt per line, like the mouth. A sentence starts
         # playing when it reaches the track, behind what is queued there, so
         # the line's end is estimated then; `said` is written at that end.
         utt, played, failed, started = uuid.uuid4().hex[:12], 0.0, 0, False
         # <<< said-rows
+        parts, error = sentences(text), None
 
         def queued(s):
             def on_queue(start_at, dur):       # the sentence is on the track now
@@ -2733,7 +2887,7 @@ class CallSession:
             # <<< said-rows
 
         try:
-            for s in sentences(text):
+            for s in parts:
                 if line.was_cut:
                     break
                 try:
@@ -2746,6 +2900,7 @@ class CallSession:
                     log(f"SPOKE {len(pcm)/OUT_RATE:.1f}s (tts {time.time()-t:.1f}s, {voice}): {s[:60]}")
                 except Exception as e:
                     log(f"tts failed: {e}")
+                    error = error or str(e)
                     if not fallback:
                         failed += 1
                         continue
@@ -2773,6 +2928,7 @@ class CallSession:
                     failed += 1   # >>> said-rows
         finally:
             line.end(over)         # the next line may have the track: never left holding it
+        return {"n": len(parts), "failed": failed, "error": error, "cut": line.was_cut}
 
     # ---- the end
 
@@ -2867,49 +3023,127 @@ class CallSession:
     # line into the call's chat at connect, on every call, worded by the
     # call's own switch; record_spoken_notice speaks SPOKEN_NOTICE before the
     # greeting, only on a kept call. Each has its own setting, default on.
+    # The chat post's outcome is kept (rec_chat). On a kept call where neither
+    # notice reached the caller, the notice is posted ONCE as chat text before
+    # the greeting; a chat line refused by channels.txt, or not confirmed in
+    # time, is not chased. Nothing here changes whether the call is kept.
     rec_noticed = False   # the chat line went out (or was decided against)
     rec_spoken = False    # the spoken notice was said (or decided against)
+    rec_chat = None       # the chat line's future -> (outcome, detail); None = not attempted
+    rec_notice_text = None   # the chat line's words for this call
 
     def _rec_notice_post(self):
         """Once a call, at connect: the chat line, if record_notice is on. Sent
-        off the loop, so it never holds up the greeting; a failure is logged."""
+        off the loop, so it never holds up the greeting. Its outcome is kept as
+        rec_chat, a future of ("posted" | "refused" | "raised", detail), read
+        only if the spoken notice does not reach the caller; a failure is logged."""
         if self.rec_noticed:
             return
         self.rec_noticed = True
         sw = rec_switch()
         st = self._rec_start()
         n = sw.notice()
+        # the words, kept for the text fallback: it never re-reads the switch
+        text = self.rec_notice_text = recording.notice_text(st.keep, sw.days().value)
         log(f"recording notice: {recording.notice_line(sw)}")
         if not n.on:
-            return
-        text = recording.notice_text(st.keep, sw.days().value)
+            return                              # rec_chat stays None: not attempted
         account, chat_id = self.account, self.chat_id
 
         def post():
             try:
-                post_to_chat(account, chat_id, text, "recording notice")
+                return ("posted", "") if post_to_chat(account, chat_id, text, "recording notice") \
+                    else ("refused", "")        # post_to_chat logged the refusal
             except Exception as e:
                 log(f"recording notice: could not post to chat {chat_id}: {e}")
+                return ("raised", str(e))
+        loop = None
         try:
-            _keep(asyncio.get_running_loop().run_in_executor(None, post))
+            loop = asyncio.get_running_loop()
+            self.rec_chat = _keep(loop.run_in_executor(None, post))
         except Exception as e:
             log(f"recording notice: could not post to chat {chat_id}: {e}")
+            if loop is not None:                # one shape for the reader: a done future
+                self.rec_chat = loop.create_future()
+                self.rec_chat.set_result(("raised", str(e)))
+
+    async def _rec_chat_outcome(self):
+        """The chat line's outcome, waited for at most REC_NOTICE_TEXT_WAIT s:
+        ("off" | "posted" | "refused" | "raised" | "unconfirmed", detail). The wait
+        never cancels the post: a post still running may land."""
+        if self.rec_chat is None:
+            return ("off", "")
+        try:
+            return await asyncio.wait_for(asyncio.shield(self.rec_chat),
+                                          timeout=REC_NOTICE_TEXT_WAIT)
+        except asyncio.TimeoutError:
+            return ("unconfirmed", "")
+        except Exception as e:                  # post() returns; this is only a guard
+            return ("raised", str(e))
+
+    async def _rec_notice_as_text(self):
+        """Post the notice ONCE as chat text, through the chat line's own path
+        (channels.txt asks). Waits at most REC_NOTICE_TEXT_WAIT s. -> the log's tail."""
+        text = self.rec_notice_text or recording.SPOKEN_NOTICE
+        try:
+            loop = asyncio.get_running_loop()
+            fut = _keep(loop.run_in_executor(None, post_to_chat, self.account, self.chat_id,
+                                             text, "recording notice"))
+            sent = await asyncio.wait_for(asyncio.shield(fut), timeout=REC_NOTICE_TEXT_WAIT)
+        except asyncio.TimeoutError:
+            return f"text not confirmed within {REC_NOTICE_TEXT_WAIT:g} s; the call is still kept"
+        except Exception as e:
+            return f"NOT delivered: the text could not be sent: {e}; the call is still kept"
+        if not sent:
+            return "NOT delivered: the text was refused by channels.txt; the call is still kept"
+        return "delivered as text"
 
     async def _rec_notice_speak(self):
-        """Once a call, before the greeting: the spoken notice, only when this call
-        is kept and record_spoken_notice is on. A TTS failure is logged and the
-        greeting goes on; it is never sent as chat text (the chat line, when
-        record_notice is on, already says it)."""
+        """Once a call, before the greeting, only on a kept call: the notice, told
+        once. If record_spoken_notice is on, the spoken notice is said. If it was not
+        delivered (TTS failed, speak() raised, or a barge-in cut it) or is off, the
+        chat line's outcome decides: posted, the caller was told; off or raised, the
+        notice is posted once as chat text; refused by channels.txt or not confirmed
+        in time, no text is sent (it would be refused too, or could duplicate). Each
+        case where a notice did not get through logs ONE line. Both notices off by
+        setting: nothing, the operator's choice. The call stays kept either way."""
         if self.rec_spoken:
             return
         self.rec_spoken = True
         st = self._rec_start()
-        if not st.keep or not rec_switch().spoken_notice().on:
+        if not st.keep:
             return
-        try:
-            await self.speak(recording.SPOKEN_NOTICE, fallback=False)
-        except Exception as e:
-            log(f"recording notice: the spoken notice failed: {e}")
+        spoken_on = rec_switch().spoken_notice().on
+        why = None
+        if spoken_on:
+            try:
+                out = await self.speak(recording.SPOKEN_NOTICE, fallback=False)
+                if out["failed"]:
+                    why = out["error"] or "tts failed"
+                elif out["cut"]:
+                    why = "cut short"         # a one-sentence notice cut part-way is not a notice
+            except Exception as e:
+                why = str(e) or type(e).__name__
+            if why is None:
+                return                          # said: told
+        elif self.rec_chat is None:
+            return                              # both off: the operator's choice
+        head = f"the spoken notice failed: {why}" if spoken_on else "the spoken notice is off"
+        chat, detail = await self._rec_chat_outcome()
+        if chat == "posted":
+            if spoken_on:
+                log(f"recording notice: {head}; told by the chat line")
+            return
+        if chat == "refused":
+            log(f"recording notice: {head}; NOT delivered: the chat line was refused by "
+                "channels.txt, so no text was sent; the call is still kept")
+            return
+        if chat == "unconfirmed":
+            log(f"recording notice: {head}; the chat line was not confirmed within "
+                f"{REC_NOTICE_TEXT_WAIT:g} s, so no text was sent; the call is still kept")
+            return
+        lead = f"the chat line could not be sent: {detail}; " if chat == "raised" else ""
+        log(f"recording notice: {head}; {lead}{await self._rec_notice_as_text()}")
     # <<< recording-notice
 
     def _rec_keep(self, names):
@@ -3034,6 +3268,7 @@ class CallManager:
             mode += f" - {bad}"
         log(f"incoming calls answer: {mode}")
         log(f"no-reply watchdog: {NO_REPLY_S:g}s" if NO_REPLY_S > 0 else "no-reply watchdog: off")
+        log(Floor(lambda: False, FLOOR_GAP, FLOOR_CAP).line())
         MailLeg(self).start()          # the inbound leg: mail -> a live call
         # >>> mouth-leg: the mouth speaks into a live call (call:<N>)
         from sessionphone.bridge import mouthleg
@@ -3053,11 +3288,10 @@ class CallManager:
         # allowlist of approved callers. Until then a call was refused
         # only on a named profile and only from a contact request - so any accepted chat, or
         # anyone at all on the default profile, got a Claude Code with a shell on the line.
-        who = caller_address(account, msg_id)
-        ok = approved_callers()
-        if not who or who not in ok:
-            log(f"REFUSED incoming call from {who or 'an unknown sender'} (chat {chat_id}): "
-                f"not an approved caller ({len(ok)} approved; {CALLERS_HELP})")
+        # A caller is the KEY a callers.txt line is pinned to, not the address (keygate).
+        v = keygate.caller(account, msg_id, CALLERS_FILE, log)
+        if not v:
+            log(f"REFUSED incoming call from {v.reason} (chat {chat_id}; {CALLERS_HELP})")
             return
         if PROFILE:
             # a public relay: a STRANGER's call is never answered. Only a
@@ -3189,6 +3423,47 @@ class CallManager:
     def forget(self, s):
         self.sessions.pop(s.msg_id, None)
 
+    # >>> stop: the bot is being stopped (SIGTERM, launchd's stop)
+    def stop(self, why, budget=None):
+        """End every call this bot holds, for a bot that is going away: each
+        call is ended (end_call, so the phone hangs up too) and its live file
+        removed, then closed as a hang-up closes it, best-effort. The file goes
+        first and on this thread: neither a stuck end_call nor a close() that
+        raises can keep it. Bounded: returns within about BUDGET seconds,
+        whatever the account or the calls loop does. -> how many calls."""
+        budget = STOP_S if budget is None else budget
+        sessions = list(self.sessions.values())
+        if not sessions:
+            return 0
+        for s in sessions:
+            s._live_clear()             # >>> call-id: first, owned-by-call-id, as close() clears it
+
+        def end(s):
+            try:
+                s.account.get_message_by_id(s.msg_id).end_call()
+                log(f"ENDED msg {s.msg_id}: {why}")
+            except Exception as e:
+                log(f"end_call failed for msg {s.msg_id}: {e}")
+        # daemon threads, so an end_call that never returns cannot hold the exit
+        enders = [threading.Thread(target=end, args=(s,), daemon=True, name=f"stop-{s.msg_id}")
+                  for s in sessions if s.msg_id]
+        for t in enders:
+            t.start()
+        log(f"stopping ({why}): ending {len(sessions)} call(s)")
+        deadline = time.monotonic() + budget
+        for t in enders:
+            t.join(max(0.0, deadline - time.monotonic()))
+        if self.thread.is_alive():
+            futs = [asyncio.run_coroutine_threadsafe(s.close(why), self.loop) for s in sessions]
+            done, waiting = concurrent.futures.wait(futs, timeout=max(0.0, deadline - time.monotonic()))
+            for f in done:
+                if f.exception() is not None:
+                    log(f"close on stop failed: {f.exception()!r}")
+            if waiting:
+                log(f"stopping: {len(waiting)} call(s) still closing at the {budget:g} s limit")
+        return len(sessions)
+    # <<< stop
+
     def live_for_chat(self, chat_id):
         return [s for s in self.sessions.values() if s.chat_id == int(chat_id) and s.pc]
 
@@ -3209,12 +3484,14 @@ class CallManager:
         return bool(live)
 
     def speak_if_live(self, chat_id, text, voice=None, who=None):
-        """Called from the outbox loop: a dc-say into a chat with a live call."""
-        live = self.live_for_chat(chat_id)
+        """Called from the outbox loop: a dc-say into a chat with a live call.
+        Returns one future per live call, each with speak()'s result: an
+        empty list (falsy) when no call is live."""
+        live, futs = self.live_for_chat(chat_id), []
         for s in live:
             reply_seen(self.loop, s, "dc-say")   # >>> turn-log: before speak, FIFO
-            asyncio.run_coroutine_threadsafe(s.speak(text, voice, who), self.loop)
-        return bool(live)
+            futs.append(asyncio.run_coroutine_threadsafe(s.speak(text, voice, who, floor=True), self.loop))
+        return futs
 
 
 _manager = CallManager()
@@ -3223,3 +3500,4 @@ invite = _manager.invite
 live_call_id = _manager.live_call_id            # >>> call-id
 place, accepted, hangup = _manager.place, _manager.accepted, _manager.hangup
 answer = _manager.answer                        # >>> ring-first
+stop = _manager.stop                            # >>> stop

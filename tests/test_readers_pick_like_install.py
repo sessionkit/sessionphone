@@ -221,7 +221,7 @@ def test_the_agent_is_bound_on_first_use_not_at_import(monkeypatch, bound):
     monkeypatch.delenv("DC_ADDR", raising=False)
     monkeypatch.delenv("DC_MAILTO", raising=False)
     assert "AGENT" not in vars(dc_env)
-    assert dc_env.MAILTO == f"fay@{dc_env.HOST}"
+    assert dc_env.MAILTO == "fay"                    # bare (PHONE-248)
     assert (dc_env.AGENT, dc_env.AGENT_NAME, dc_env.ADDR) == ("fay", "Fay", f"fay-chat@{dc_env.HOST}")
     assert dc_env.GREETING == "Fay here. Go ahead."
 
@@ -229,8 +229,8 @@ def test_the_agent_is_bound_on_first_use_not_at_import(monkeypatch, bound):
 def test_mailto_picks_as_install_does(monkeypatch, bound, tmp_path):
     monkeypatch.setattr(settings, "FILE", str(tmp_path / "phone.json"))
     (tmp_path / "phone.json").write_text(json.dumps({"bots": {"bo": {}}}))
-    assert dc_env.mailto({"DC_HOST": "h.example", "PATH": "/usr/bin"}) == "bo@h.example"
-    assert dc_env.mailto({"DC_HOST": "h.example", "DC_AGENT": "Cy"}) == "cy@h.example"
+    assert dc_env.mailto({"DC_HOST": "h.example", "PATH": "/usr/bin"}) == "bo"    # DC_HOST: not in the To
+    assert dc_env.mailto({"DC_HOST": "h.example", "DC_AGENT": "Cy"}) == "cy"
 
 
 # ---- bot run ------------------------------------------------------------------------
@@ -262,7 +262,7 @@ def test_bot_run_from_a_plain_shell_is_the_bot_install_recorded(run_rig):
     run_rig.records({"bo": {}})
     r, seen = run_rig()
     assert r.exit_code == 0, r.output
-    assert seen == {"env": "bo", "agent": "bo", "mailto": f"bo@{dc_env.HOST}"}
+    assert seen == {"env": "bo", "agent": "bo", "mailto": "bo"}           # bare (PHONE-248)
     assert r.output.splitlines()[0] == (f"bot:     bo ({settings.shown(settings.file_path())}, "
                                         "the one bot it records)")
 

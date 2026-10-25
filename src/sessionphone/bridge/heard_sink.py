@@ -16,8 +16,8 @@ implementations of a lock protocol drift. ``heard.py`` is stdlib-only, and
 OFF unless ``DC_HEARD=1``, and then ONLY for the chat ids in
 ``DC_HEARD_CHATS`` (comma-separated). What lands in this log lands in
 every agent's context on its next tool call, so a stranger's call must
-never reach it: list the owner's own verified 1:1 chat, where only their key can
-speak. The public relay's contact-request refusal is not enough on its own.
+never reach it: list the owner's own 1:1 chat, the one listed in ``channels.txt``
+with the owner's pinned key. The public relay's contact-request refusal is not enough on its own.
 
 Never raises into the call: a sink that cannot write says so once in the
 bridge log and goes quiet, and the call carries on.

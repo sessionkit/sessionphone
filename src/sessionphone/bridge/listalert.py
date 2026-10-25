@@ -4,8 +4,8 @@ On one install a bot root had no channels.txt after the allow-list landed. Every
 dc-* send exited 3 at the tools' pre-check, so no job ever reached the bot, and
 nobody was told for 3.5 h. Now the BOT judges its own list at start and once
 per outbox pass, jobs or not, and when the list is missing, unreadable or loose
-it MAILS the owner's agent (dc_env.MAILTO: DC_MAILTO, else
-<agent>@<host>). The alert is a mail, never a Delta send, so the closed gate
+it MAILS the owner's agent (dc_env.MAILTO: DC_MAILTO, else the bare
+<agent>). The alert is a mail, never a Delta send, so the closed gate
 cannot block it. It goes by `message send`, signed by the bot's own seat,
 which mints its Message-ID: the record keeps the id it printed.
 

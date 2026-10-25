@@ -1,7 +1,7 @@
 """The skill's how-to for a bot's picture and name runs as written.
 
 SKILL.md's "The bot's picture and name" gives four lines: the picture and the
-name, for this bot and for another agent's (`DC_AGENT=<agent>`). These tests
+name, for this bot and for another agent's (`DC_AGENT=AGENT`). These tests
 pin the lines in SKILL.md and references/profile.md, and run the picture line
 through the CLI with two bots recorded on two roots: `DC_AGENT` picks the bot,
 and the account opened (or the outbox a held account's job goes to) is under
@@ -29,9 +29,9 @@ SECTION = SKILL.split("\n## The bot's picture and name\n", 1)[1].split("\n## ", 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
 
 PICTURE = "sessionphone avatar /path/to/face.png"
-OTHER_PICTURE = "DC_AGENT=<agent> sessionphone avatar /path/to/face.png"
+OTHER_PICTURE = "DC_AGENT=AGENT sessionphone avatar /path/to/face.png"
 NAME = "DC_NAME='Name' sessionphone bot install"
-OTHER_NAME = "DC_AGENT=<agent> DC_NAME='Name' sessionphone bot install"
+OTHER_NAME = "DC_AGENT=AGENT DC_NAME='Name' sessionphone bot install"
 
 
 def _lines(text: str) -> list[str]:

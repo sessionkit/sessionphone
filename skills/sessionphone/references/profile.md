@@ -33,12 +33,16 @@ and the command acts on the root that bot's install kept (in
 `~/.sessionkit/phone/settings/phone.json`):
 
 ```bash
-DC_AGENT=<agent> sessionphone avatar /path/to/face.png
-DC_AGENT=<agent> DC_NAME='Name' sessionphone bot install   # its name (below)
+DC_AGENT=AGENT sessionphone avatar /path/to/face.png
+DC_AGENT=AGENT DC_NAME='Name' sessionphone bot install
 ```
 
+AGENT is the agent's name. The first line sets its bot's picture, the second
+its bot's name (below).
+
 Without `DC_AGENT` the bot is this session's, else the one bot the file
-records, else `claude`. With two or more recorded and none named, the command
+records, else the harness vendor's word (`session agent default`), else
+`claude`. With two or more recorded and none named, the command
 refuses (exit 1) and changes nothing, so name one, `claude` included.
 `SESSIONPHONE_ROOT=DIR` points at a root directly, and wins over the file.
 

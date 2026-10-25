@@ -182,6 +182,10 @@ def test_skill_step_7_and_the_hearing_line_agree_under_the_kit():
     kit = step7.split("**Standalone**", 1)[0].split("**Under the kit,**", 1)[1]
     assert f"`command -v {hearing.KIT_COMMAND}`" in step7
     assert f"`{hearing.KIT_STATUS}`" in kit and f"`{hearing.KIT_INSTALL}`" in kit
+    # both forms the line gives, each with the Mac it fits; the bare one is refused
+    assert f"`{hearing.KIT_INSTALL_PHONE}` on a Mac that only runs the bot" in kit
+    assert f"`{hearing.KIT_INSTALL_AGENT}` where ears should wake an agent seat" in kit
+    assert "A bare install that names no seat to wake is refused" in kit
     assert ("The `hearing:` line agrees: it finds the same `sessionkit` on PATH, points at "
             f"`{hearing.KIT_STATUS}`, and does not name VoiceMode's command.") in kit
     assert "even though the `hearing:` line names it" not in step7

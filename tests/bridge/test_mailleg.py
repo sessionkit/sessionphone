@@ -26,7 +26,7 @@ class Account:
     def get_chat_by_id(self, i): return Chat()
 class Session:
     pc, chat_id, root_id, account = object(), 12, "call-12-1789@example.org", Account()
-    async def speak(self, text, voice="carol", who="Carol"):
+    async def speak(self, text, voice="carol", who="Carol", floor=False):
         said.append((who, voice, text))
 class Loop:
     pass

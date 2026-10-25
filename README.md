@@ -22,8 +22,22 @@ Then say "set up Delta". The skill (`skills/sessionphone/SKILL.md`) walks
 the agent through it: it makes its own Delta Chat profile
 (`sessionphone setup`), shows you a QR code (`sessionphone qr`), links your
 phone (`sessionphone link`), starts the bot (`sessionphone bot install`) and
-rings you. "Status" at the end of this page says what works and what does
+rings you. Before your phone is linked, `setup` checks the speech-to-text
+server the bot will hear you through, and when it does not answer, says what
+to install. "Status" at the end of this page says what works and what does
 not.
+
+**Where Delta text lands.** The bot mails each Delta message, and each call
+turn, to its agent's box, named after the agent: box `claude`, unless
+`DC_AGENT` names another agent or the session running install was started as
+one ([Which agent install picks](#the-bots-seat)); install's `box:` line names
+it. A Claude session hears that box only when it
+was started as that agent (`session start claude`); a plain `claude` gets no
+copy, and nothing tells it so. `bot install` asks sessionmail whether the
+session running it hears the box, and says so on its `hear:` line. Set
+`DC_MAILTO` to send the text to another box instead: install again with it
+set, and the `hear:` line then tells you about that box.
+[Hearing Delta text in Claude](#hearing-delta-text-in-claude) has the rest.
 
 ## Installation
 
@@ -76,6 +90,16 @@ macOS 14 or later, read from `uv.lock`.
   pack.
 - **sessionkit:** the kit asks for `sessionphone[media]` (0.2.1 or later),
   so a kit install already has the pack, and `bot install` fetches nothing.
+
+## Requirements
+
+- [x] macOS (tested on macOS 27, Apple silicon)
+- [ ] Linux
+- [ ] WSL
+- [ ] Windows
+
+What sessionphone depends on, what needs each one, and how to upgrade it:
+[dependencies][dependencies].
 
 ## Usage
 
@@ -130,8 +154,9 @@ install` line that changes it. `DC_NAME` always wins.
 agent's name to a file, `name-replaced`, under the root. The bot reads it at
 its start and removes it once the name is settled. Nothing older is
 remembered. `DC_NAME` is saved in `phone.json` like every `DC_*`.
-`DC_AGENT_NAME` is a different setting: the name the bot says in greetings
-and puts in its mail's From.
+The bot greets a call by its display name, the name people see in their
+chat list. `DC_AGENT_NAME` is a different setting: the agent's name, which the
+bot puts in its mail's From. Set, it is also the name in the greetings.
 
 ### The invite, as a QR on the terminal: `sessionphone invite`
 
@@ -206,7 +231,7 @@ The mail's shape:
 
 | Field | Value |
 |---|---|
-| To | `DC_MAILTO`, else `<agent>@<host>` |
+| To | `DC_MAILTO`, else `<agent>`, a bare box name: sessionmail adds this host |
 | From | `<Name>'s Delta Chat bridge <<agent>-chat@...>`. The seat is `<agent>-chat`, the local part of `DC_ADDR`; sessionmail sets the domain |
 | Subject | `[<room> <chat_id>] <tail>`. `<room>` is the chat name cut to 14 characters, after `DC_PROFILE` when one is set. `<tail>` is `<sender>: <text>` or the kind's own words (`REQUEST ...`). ASCII, 69 characters at most. A backtick becomes `'` and `$(` becomes `$ (`, because `message send` refuses a subject that could execute |
 | Body | the text, with any quoted (`>`) lines, then a `---` footer: `chat:`, `from:` and how to answer. The mail leg stops reading aloud at `---` |
@@ -221,9 +246,17 @@ rule, a page rule):
 | `X-Delta-Chat-Profile` | the profile, when not the default | every mail |
 | `X-Delta-Chat-Kind` | `message`, `request`, `reaction`, `webxdc` or `call` | M1-M5 |
 | `X-Delta-Chat-Msg-Id` | the Delta message id, which `dc-react --msg` takes. For a reaction, the message reacted to | M1-M3 only |
-| `X-Delta-Chat-Sender` | the Delta contact's **address**: the key Delta verified. The display name is only a claim | M1-M3. A tap has no sender |
-| `X-Delta-Chat-Channel` | the channel NAME the chat is listed as in `channels.txt` | M1-M4, only when the chat is listed |
+| `X-Delta-Chat-Sender` | the address the sender's message carries, **as a label for people**. It is not the sender's key, and it is not an identity: the display name is only a claim, and so is the address. Use `X-Delta-Chat-Channel` to know who it is | M1-M3. A tap has no sender |
+| `X-Delta-Chat-Channel` | the channel NAME the chat is listed as in `channels.txt`. For an address line it is set only while the chat's contact holds the key pinned on that line; `chat:N` lines are by chat id | M1-M4, only when the chat is listed |
 | `Medium: voice`, `X-Call-Preview` | as before | call mails |
+
+**Who sent it.** On the private profile every sender's message reaches the
+agent, listed or not, so an agent must not treat `X-Delta-Chat-Sender` as
+who the sender is. The identity the bot checks is a key fingerprint, and
+the one header that carries a checked answer is `X-Delta-Chat-Channel`: it
+is there only for a chat the owner listed, and for an address line only
+while that chat's contact holds the key pinned to the line (see "Channels"
+and "Callers" below).
 
 **The reply hint names the channel.** The footer's hint is asked of
 `channels.txt` exactly as the outbox asks before a send. A listed chat
@@ -260,11 +293,14 @@ and the fence is what keeps it from acting as instructions.
 ### The bot's seat
 
 The bot sends as its own sessionmail seat, never as a Claude session. The
-agent is `claude` unless `DC_AGENT` is set, or the Claude session running
+agent is the harness vendor's word (`session agent default`, `claude`
+today; `claude` too when sessiontools has no such verb, as 0.3.0 has not,
+or gives no single word within a few seconds) unless `DC_AGENT` is set, or the Claude session running
 `sessionphone bot install` was started as another agent, so the seat is
-`claude-chat` and Delta text goes to `claude@<host>`. `<host>` is
-sessionmail's own host for this machine: `SESSIONMAIL_HOST`, else the first
-part of the machine's name.
+`claude-chat` and Delta text goes to the box `claude`. The name is bare, with
+no host: sessionmail adds this machine's host when it delivers, so the box
+still works after the machine is renamed. Name a host (`DC_MAILTO=box@host`)
+only for a box on another host.
 
 **Which agent install picks**, when `DC_AGENT` is not set: it asks
 sessionmail what reaches the session it runs in (`message subscription
@@ -273,12 +309,12 @@ be started as (`session start ada` gives the seat `ada`), the bot is
 named after it. A plain `claude` session has only its session id, and a
 seat that a task tool starts has a `+` address (its `CLAUDE_CODE_AGENT` is a
 role, such as `worker`): neither names the bot, because neither is there in
-a new session. Then install takes the one bot it has recorded, else
-`claude`. Only when sessionmail gives no answer does install take
-`CLAUDE_CODE_AGENT` instead. `bot status`, `bot uninstall`, `bot run` and
-every `dc-*` tool pick the bot the same way, and say which they picked when
-your shell names none (`bot:     ada (...)`, or `dc-say: bot ada (...)` on
-stderr).
+a new session. Then install takes the one bot it has recorded, else the
+harness vendor's word, else `claude`. Only when sessionmail gives no
+answer does install take `CLAUDE_CODE_AGENT` instead. `bot status`,
+`bot uninstall`, `bot run` and every `dc-*` tool pick the bot the same
+way, and say which they picked when your shell names none
+(`bot:     ada (...)`, or `dc-say: bot ada (...)` on stderr).
 
 **One bot to a root.** A root is one Delta Chat account, so two bots on it
 is a broken state: the old one keeps mailing its own box, and its calls and
@@ -414,7 +450,7 @@ needed. If you want one, set it in sessionmail's settings key
 | Setting | What it is, and what the child `message send` gets |
 |---|---|
 | `DC_ADDR` | the bot's own From seat, `<agent>-chat`; its local part is the seat the key signs as. The child gets `TM_AGENT_ADDRESS` and `EMAIL` = that local part, so an `EMAIL` inherited from whoever ran install never becomes the From |
-| `DC_MAILTO` | where Delta text goes: the agent's box, `<agent>@<host>` by default |
+| `DC_MAILTO` | where Delta text goes: the agent's box, the bare `<agent>` by default; kept as given, so `box@host` names a box on another host |
 | `DC_SIGNER_SOCK` | `CLAUDE_SESSION_AGENT_SOCK`: the seat agent's socket (`SEAT_SOCKET`) |
 | `DC_SIGNER_PUB` | `CLAUDE_SESSION_PUB`: the seat's `.pub` (`SEAT_PUB`), or a copy of it kept apart from the key |
 | `DC_MESSAGE` | the `message` binary, resolved to an absolute path at start (launchd's `PATH` is short). Else `message` on `PATH` |
@@ -427,7 +463,7 @@ text somewhere else, set `DC_MAILTO`.
 
 ### Hearing Delta text in Claude
 
-Delta text lands in the agent's box, `claude@<host>`. Mail to that box
+Delta text lands in the agent's box, `claude`. Mail to that box
 reaches a session only through the pager's doorbell, and the doorbell rings
 only for a session started as that agent. `bot install` (and
 `sessionphone setup`) asks sessionmail what reaches the session it runs in
@@ -438,17 +474,20 @@ When the session will not hear it, the line says so first, and it is the
 first line `bot install` prints, ahead of `installed:`:
 
 ```text
-hear:      this session will NOT hear Delta messages or calls: they go to box <agent>, and this session hears only its own session box. Ways out: start Claude with `session start <agent>` (only a session started as <agent> hears that box, today and in later sessions); or install again with DC_AGENT=NAME (the agent a session is started as) or DC_MAILTO=ADDR (a box a session hears); or `sessionphone bot install --hear-here`, which lets this session hear box <agent> until this session ends.
+hear:      this session will NOT hear Delta messages or calls: they go to box <agent>, and this session hears only its own session box. Ways out: start Claude with `session start <agent>` (only a session started as <agent> hears that box, today and in later sessions); or install again with DC_AGENT=NAME (the agent a session is started as) or DC_MAILTO=BOX (a box a session hears); or `sessionphone bot install --hear-here`, which lets this session hear box <agent> until this session ends.
 ```
 
 This is a warning, not a refusal: the bot is installed either way, and the
 exit code is 0. When the session does hear the box, the line says
 `this session hears box <agent> (its seat <agent>): Delta messages and calls
-reach it, while it runs`. From a shell that is not a Claude session (a
-Terminal), nothing can be measured, so the line gives the advice:
+reach it, while it runs`. When `DC_MAILTO` names the session's own box, its
+session id, the line says `(its own session box)` instead. That box lasts
+only as long as the session: a later session has another id, and does not
+hear it. From a shell that is not a Claude session (a Terminal), nothing can
+be measured, so the line gives the advice:
 
 ```text
-hear:      To hear Delta messages, start Claude with: session start <agent> (it runs `claude --agent <agent>`: only a session started as <agent> hears the box; a plain `claude` gets no copy of its mail, and nothing says so). To send Delta text to another box, install again with DC_AGENT=NAME (the agent a session is started as) or DC_MAILTO=ADDR (a box a session hears).
+hear:      To hear Delta messages, start Claude with: session start <agent> (it runs `claude --agent <agent>`: only a session started as <agent> hears the box; a plain `claude` gets no copy of its mail, and nothing says so). To send Delta text to another box, install again with DC_AGENT=NAME (the agent a session is started as) or DC_MAILTO=BOX (a box a session hears).
 ```
 
 The bot gives the same advice at every start, on the `agent box:` line of
@@ -466,11 +505,23 @@ installed it.
   Install never does this unless asked. Its `hear-here:` line, before
   `hear:`, says what it did, or why not. When it did not take, the session
   still will not hear the box, so the warning leads and `hear-here:` follows it.
+- When the bot's name came from the default (no `DC_AGENT`, no seat, no
+  bot recorded) and nothing hears its box, the `hear:` line is followed by
+  one more line, which names the fix:
+
+  ```text
+  default:   no seat owns box claude: the bot's name came from the default, so nothing hears its mail yet. Start a bare `session start` first; it becomes claude.
+  ```
+
+  Install asks sessionmail who hears the box (`message subscription list
+  <agent>`, read only). It prints the line only when the answer is plainly
+  "nobody": no such box, or `0 hear it` with no live listener. When this
+  session hears the box, or the answer cannot be read, there is no line.
 - Two windows started as `session start <agent>` share one box, and both get
   each Delta message. The second launch needs `--allow-second-holder`;
   without it, it exits 3.
 - A Claude session started any other way (plain `claude`) does not hear
-  `<agent>@<host>`: it gets no copy of the mail, and nothing tells it so.
+  the box `<agent>`: it gets no copy of the mail, and nothing tells it so.
 - When sessionmail cannot be asked (an older one without `message
   subscription list`), the line gives the advice and says that nothing was
   measured. It never says the session hears the box.
@@ -568,7 +619,7 @@ A send that `message send` refuses is never lost:
   timeout at most.
 - **A possible duplicate.** Kind `mta` with `sent: unknown` may have gone.
   It is retried anyway, and logged `sent=unknown`, because a duplicate beats
-  a loss.
+  a loss. Not a call mail: its box is checked first (below).
 
 **What goes to `undelivered/dead/`.** Nothing is ever deleted from `dead/`:
 
@@ -586,14 +637,33 @@ BRIDGE MAIL FAILED <error>; NOT KEPT, the mail is lost: <why>
 BRIDGE MAIL RETRY <n> FAILED <error>; next try in <s>s: <path>
 BRIDGE MAIL HELD <n> more not tried this pass: <name> got kind <kind>, ...
 BRIDGE MAIL SENT on try <n> (first failed HH:MM:SS, last sent=<sent>): <name> <Message-ID>
+BRIDGE MAIL ALREADY THERE on try <n>: <Message-ID> is in <box>'s box; not sent again: <name>
 BRIDGE MAIL DEAD <path>: <why>
 ```
 
 `NOT KEPT` means the spool itself could not be written (a full disk, say).
 `dc-live` prints `undelivered mail to the agent: N waiting, M dead` on
 stderr whenever either count is not zero. `bin/bridge-check` reports the
-same two counts, and they never fail its gate. The channels alert keeps its
-own retry, and the call mails are not spooled (part 2b).
+same two counts, and they never fail its gate. `sessionphone bot status`
+prints `undelivered: N waiting, M dead (<dir>)`, from the spool its installed
+job names (`DC_UNDELIVERED`, else `undelivered` in the bot's home). The
+channels alert keeps its own retry.
+
+The call mails are spooled too, all but a call's preview: the turn
+supersedes it and carries its whole text. A call mail goes under a
+Message-ID the bridge made, and sessionmail has no duplicate check: a send
+under an id already in the box lands twice. So before the spool retries a
+mail that carries its own `--message-id`, it reads the target box for that
+id, read-only (`message path <box>`, then the header of each file in `new/`
+and `cur/`):
+
+- The id is there: the mail went. The record is removed and nothing is sent
+  (`BRIDGE MAIL ALREADY THERE`).
+- The id is not there: the mail is retried.
+- The box cannot be checked from here (a box on another host, behind an
+  MTA): the mail is retried only if every try so far said `sent=no`. One
+  that may have gone (`sent=unknown`) goes to `dead/` instead, and is
+  counted there. It is never sent twice.
 
 ### App taps: `DC_XDC_IN` is the integration point
 
@@ -756,7 +826,8 @@ log (`heard_<day>.jsonl`, in `$EARS_HEARD_DIR`, else
 | F3 | `kind: saying` by this agent (`DC_AGENT`) | `{"lines": [{"who": "agent", "name": DC_AGENT_NAME, "text": TEXT}]}` |
 
 Call lines (`source: call`), other agents' sayings and noise turns are not
-fed. Text is one line, at most 4000 characters.
+fed. Text is one line, at most 4000 characters. That cut is display only: no
+agent reads this feed, and the heard log it reads keeps every word.
 
 - **Two consents.** The msg's chat must pass the channels list, as every
   send does, **and** be listed in `DC_XDC_FEED_CHATS` (comma-separated chat
@@ -856,12 +927,19 @@ message send DC_MAILTO -s SUBJECT -f - --raw --no-shorten --json \
   call's Reply-To.
 - **`-r <root>`** writes In-Reply-To and References. Cc, Supersedes and the
   ids are never raw `--header`s: `message send` owns them.
+- **A turn arrives whole.** The body of a turn mail and of a preview carries
+  every word heard, however long the turn, flattened to one line and never
+  cut. The heard log's turn and partial lines, and the call's transcript,
+  hold the whole text too. Only display is cut: the Subject (the first 44
+  characters of the turn, 34 of a preview) and the bridge's own log lines.
 - **The From** keeps its display name and the seat, `<agent>-chat`. Its
   domain is sessionmail's, as for every other mail.
-- **A call mail that fails is logged, never kept.** sessionmail has no
-  duplicate check, so a retried call mail could land twice under one id.
-  The Delta call path makes one try. A web call's turn is tried again only
-  when nothing was sent, for a reason in the world, not in the mail.
+- **A call mail that fails is kept and retried**, all but a preview (see
+  the undelivered spool above). sessionmail has no duplicate check, so the
+  spool reads the box for the mail's id before each retry, and never sends
+  it twice. The Delta call path makes one try itself; the spool makes the
+  rest. A web call's turn is tried again only when nothing was sent, for a
+  reason in the world, not in the mail.
 - **The bot refuses to start (exit 2)** when the installed `message` has no
   `--message-id`. At start it runs one probe that sends nothing,
   `message send probe@invalid -s probe --no-body --message-id '<x>' --json`,
@@ -886,9 +964,10 @@ or `$DC_ROOT/channels.txt`); `DC_CHANNELS_FILE` overrides the path. Keep it 0600
 One entry per line, `#` starts a comment:
 
 ```text
-# NAME    TARGET                    # note
-owner     owner@relay.example        # owner, joined 2030-06-09
-family    chat:42                    # the family group
+# sessionphone keys v1: an address line without key: is refused until pinned
+# NAME    TARGET                    KEY                                      # note
+owner     owner@relay.example       key:4E4D1E1E160E2C8D034A91AFDCF4D1301E82234F  # owner, joined 2030-06-09
+family    chat:42                                                            # the family group
 ```
 
 - **NAME** is lowercase `[a-z0-9_-]+`, unique, may not start with `-`, and
@@ -897,9 +976,30 @@ family    chat:42                    # the family group
 - **TARGET** is an address, meaning the 1:1 chat with that contact (never a
   group they are in), or `chat:N`, one chat by id, the only way to list a
   group.
-- `sessionphone channels` lists it; `sessionphone channels add NAME TARGET
-  [--note TEXT]` adds a line. You can edit the file by hand. The bot re-reads
-  it on every job, so an edit needs no restart, and it logs what changed.
+- **An address line is bound to a key.** `key:FPR` is the fingerprint of the
+  key the contact holds: 40 hex digits (or 64 for a newer key), as the phone
+  shows it under the contact's profile, Encryption. Spaces and colons in what
+  you type are dropped. The bot sends to, and on the public profile takes in,
+  that contact's 1:1 chat only while the contact holds that key. **The key is
+  the identity; the address is the label.** If the contact's address changes
+  but the key is the same, the chat still passes and the bot logs `now
+  writes`. A different key at the same address does not pass. `chat:N` lines
+  take no key (a chat id already belongs to one contact), and a `key:` on one
+  is a bad line.
+- **An address line with no `key:` is refused** until a key is pinned to it.
+  The refusal names the command: `sessionphone channels pin NAME`.
+- `sessionphone channels` lists it, each address line with its key or
+  `UNPINNED`. `sessionphone channels add NAME TARGET [--key FPR] [--note
+  TEXT]` adds a line, and `sessionphone channels pin NAME [--key FPR]` pins
+  (or re-pins) a listed one. With `--key` they only write the file, so they
+  work while the bot runs. Without `--key` they open the account to find the
+  one key contact with that address, so the bot must be stopped; they pin only
+  when exactly one key contact has the address, print its fingerprint to
+  compare with the phone, and otherwise write nothing and say why. You can
+  edit the file by hand. The bot re-reads it on every job, so an edit needs
+  no restart, and it logs what changed, a key change included.
+- **A key that rotates is a new contact.** When someone's key changes, their
+  chats are refused until you pin the new key.
 
 **A tool takes a NAME where it takes a chat.** `dc-say owner 'hi'`,
 `dc-call family`, `dc-send-file`, `dc-invite`, `dc-hangup`, `dc-answer`. A
@@ -933,7 +1033,7 @@ variable that turned the gate off is exactly what an agent would flip.
 **When the list refuses every send, the bot mails its agent once.** At
 start, and once a second whether or not a job came in, the bot reads its
 list. If it is missing, unreadable, or writable by group or world, the bot
-sends ONE mail to the agent's box (`DC_MAILTO`, else `<agent>@<host>`) by
+sends ONE mail to the agent's box (`DC_MAILTO`, else `<agent>`) by
 `message send`, signed by the bot's seat, never by Delta, so the closed
 list cannot block it. The subject
 reads `[channels] REFUSING EVERY SEND: no channels.txt`, and the body names
@@ -968,10 +1068,12 @@ resend; the message says so). Before, it said `queued` and exited 0.
 only a number: a NAME cannot resolve, so it is refused.
 
 **The list is seeded for you.** `sessionphone link` lists the first joiner as
-`owner` before it greets them, so even that first send goes to a listed chat.
+`owner`, bound to the key of the contact that joined by the invite, before it
+greets them, so even that first send goes to a listed chat.
 `sessionphone bot install --owner ADDR` seeds `owner` if the list has no
-channel yet; without `--owner` it takes the callers file's owner line. ADDR
-is the owner's Delta Chat address, as their Delta Chat profile shows it, not
+channel yet, with the key from `--owner-key FPR` or the one the callers file
+already pins to ADDR; without `--owner` it takes the callers file's owner
+line, key and all. ADDR is the owner's Delta Chat address, as their Delta Chat profile shows it, not
 their mail address. If there is neither, install refuses (exit 2, before it
 touches launchd), names the file, and gives the two ways forward: link the
 phone (the first to join becomes the owner), or `--owner` with the owner's
@@ -1020,6 +1122,34 @@ at its next job. Not governed: mail to a guest (`dc-invite ... ADDRESS` mails
 the guest, which is not a Delta send), and call signalling and voice into a
 call that already passed a gate.
 
+**Before you upgrade, check the owner line.** In `channels.txt` the owner
+line is the one named `owner`, or one whose note starts `owner`. `link`,
+`bot install` and `channels seed` write it named `owner`. If the owner's line
+has another NAME and no such note, add `# owner` to it before you upgrade.
+Otherwise every send to the owner is refused until a key is pinned by hand.
+The list must be 0600, and a list shared by two bots needs the same care as
+a shared `callers.txt`: see "Before you upgrade, check each list" under
+Callers below.
+
+**Upgrading a list that has address lines.** A `channels.txt` from an older
+version has address lines with no key. The first time the new bot starts it
+migrates the file once (a marker line on top says it has run): it pins the
+`owner` line to the one key contact with that address, keeps the original as
+`channels.txt.pre-keys` (0600, written once), and logs a summary, `keys:
+<file>: N pinned, N unpinned, N ambiguous`. Every other address line stays
+unpinned, because nobody was there to compare its key. Each unpinned or
+ambiguous line is logged, `UNPINNED` or `AMBIGUOUS`, with the command that
+fixes it; if no address line is pinned the log says so in a `WARNING`. What
+you see is a refused send, `no key is pinned to it`, until you run
+`sessionphone channels pin NAME`, which prints the key it found so you can
+compare it with the phone. **An ambiguous line** is one where two or more key
+contacts share the address (the log lists each contact id and fingerprint). The
+bot pins none of them. Choose the key the phone shows for the person you mean
+and run `sessionphone channels pin NAME --key FPR`; a line with no key
+contact yet is pinned the same way once they have written to the bot, or by
+`--key` straight away. Later starts do not pin anything: only the commands
+above do.
+
 **Upgrading breaks every send until the list exists.** See the CHANGELOG:
 write `channels.txt` first. The upgrade step, per bot root, with that bot's
 `DC_*` in the shell: `sessionphone channels seed` (or `sessionphone bot
@@ -1044,6 +1174,167 @@ allow-list reads. A send to a chat **number** still goes. A channel NAME
 the first (`KeyError: 'chat_id'`) and silently sends the second as a plain
 file. One restart writes the stamp. A program that writes its own jobs into
 the outbox is not checked: only the tools are.
+
+## Callers: who may ring the bot, bound to a key
+
+The bot answers a call only from a contact that holds a key the owner
+approved. The list is `callers.txt` in the bot's root (`DC_CALLERS_FILE`
+overrides the path), 0600, one line per caller, `#` starts a comment:
+
+```text
+# sessionphone keys v1: a line without key: is refused until pinned
+owner@relay.example  key:4E4D1E1E160E2C8D034A91AFDCF4D1301E82234F  # owner, joined 2030-06-09
+bob@relay.example                                                   # no key yet: refused
+```
+
+- **The key is the identity; the address is the label.** `key:FPR` is the
+  fingerprint of the key the caller's contact holds: 40 hex digits (64 for a
+  newer key), as the phone shows it under the contact's profile, Encryption.
+  Case, spaces and colons in what you type do not matter. A call passes when
+  its contact holds that key. If the contact's address has changed, the call
+  still passes and the log says `listed as X, now writes Y`. A call from a
+  contact that holds a different key is refused, whatever address it
+  carries, and so is a call from a contact with no key.
+- **A line with no `key:` is refused**, and the log names the command:
+  `sessionphone callers pin ADDR --key FPR`. The first line is a marker
+  comment; it only records that the one-time upgrade below has run.
+- **`sessionphone link`** writes the owner bound to the key of the contact
+  that joined by the invite, the one moment the bot can trust.
+  `sessionphone bot install --owner ADDR --owner-key FPR` writes the same
+  line from what you type. `--owner` alone on a list with no marker writes an
+  address-only line, which the first start pins (below). On a list that has
+  the marker, install refuses (exit 2), writes nothing and names `--owner-key`.
+- **`sessionphone callers`** lists each line with its key or `UNPINNED`.
+  `sessionphone callers add ADDR [--key FPR] [--note TEXT]` approves a caller,
+  and `sessionphone callers pin ADDR [--key FPR]` pins, or re-pins, a listed
+  one. With `--key` they only write the file, so they work while the bot
+  runs. Without `--key` they open the account and pin only when exactly one
+  key contact has ADDR, which needs the bot stopped; they print the
+  fingerprint they found so you can compare it with the phone, and otherwise
+  write nothing, exit 1, and say why (`--key` is the way out).
+- **They touch the bot's own file and account.** `link`, `callers`,
+  `callers add` and `callers pin` resolve the callers file and the account
+  exactly as the bot does, from the shell's environment: `DC_CALLERS_FILE`,
+  else `<home>/callers.txt`, and `DC_ACCOUNTS`, else `<home>/accounts`, where
+  `<home>` is `DC_ROOT` (else `SESSIONPHONE_ROOT`, else the kept root) plus
+  `/<DC_PROFILE>` when one is set. Run them with the bot's settings in front
+  (`DC_PROFILE=public sessionphone callers pin ADDR --key FPR`) to reach that
+  bot. Each says which file it read or wrote (`callers: <file>`, or `in
+  <file>` on its result line), and `link` and a pin without `--key` say which
+  account they opened (`account: <folder>`). The bot's own hints (no owner,
+  `DC_CALLERS` ignored) name the command with the settings it needs.
+- **Reading is unchanged.** Every other reader of the file still takes the
+  first word of a line as the address. An older sessionphone reading a keyed
+  file finds no address it recognises and refuses the line: it never passes a
+  caller the new bot would refuse.
+- **A key that rotates is a new contact.** When someone's key changes, their
+  calls are refused until you pin the new key.
+
+**On 0.3.0, upgrade now.** Its caller check trusted the sender's address,
+which could be faked. Upgrade to 0.3.1 after the checks below; until you
+can, stop the bot.
+
+**Before you upgrade, check each list.** The first start pins only the owner
+line, and only in a list it can migrate. Three things lock the owner
+out. Fix each one before the upgrade:
+
+- **The owner line needs its note.** The migration pins only the line whose
+  note starts `owner`. `sessionphone link` writes that note, and so does
+  `bot install --owner`. A line written by hand, or by `callers add` with no
+  `--note`, has none. Then after the upgrade nobody can ring until a key is
+  pinned by hand. Add `# owner` to the owner's line before you upgrade:
+
+  ```text
+  owner@relay.example  # owner
+  ```
+
+- **The list must be 0600.** The migration skips a list that group or
+  others can write (`mode & 022`, such as 0664). It adds no marker, and every
+  address line in it stays refused, the owner's included. The log says
+  `NOT migrated: mode 0664 lets others write it`. 0.3.0 never checked the
+  mode of `callers.txt`, so a loose one that rings today stops ringing after
+  the upgrade. Check the mode, on macOS:
+
+  ```bash
+  stat -f '%Lp %N' callers.txt channels.txt
+  ```
+
+  On Linux:
+
+  ```bash
+  stat -c '%a %n' callers.txt channels.txt
+  ```
+
+  Then make both lists 0600 before you upgrade:
+
+  ```bash
+  chmod 600 callers.txt channels.txt
+  ```
+
+- **One `callers.txt` shared by two bots** (both name it in
+  `DC_CALLERS_FILE`). The first bot to start migrates it, counting key
+  contacts in its own account only. The second sees the marker and skips the
+  file, with no log line. So an owner line that only the second bot's account
+  knows stays unpinned, and that owner cannot ring the second bot. There is
+  no lock between the two bots, so do not rely on which starts first. Give
+  each bot its own file. Or, with both bots stopped and already upgraded,
+  write each owner's `key:FPR` on its line yourself, before the first start:
+
+  ```text
+  owner@relay.example  key:4E4D1E1E160E2C8D034A91AFDCF4D1301E82234F  # owner
+  ```
+
+  Write a key only after the upgrade. An older version reads a keyed line as
+  no address it knows, and refuses the owner until the new bot runs.
+
+**Which lines will stay unpinned.** Read the list itself; that changes
+nothing:
+
+```bash
+cat callers.txt channels.txt
+```
+
+At the first start:
+
+- a line that already has `key:` is unchanged;
+- the owner line is pinned when exactly one key contact in this bot's
+  account has its address. With none it stays unpinned, and with two or more
+  it is ambiguous;
+- every other address line stays unpinned, whatever the count.
+
+**Upgrading a list from an older version.** The first time the new bot
+starts it migrates `callers.txt` once, so the owner is not locked out:
+
+1. It keeps the original as `callers.txt.pre-keys` (0600, written once, never
+   overwritten). Copying it back is the rollback.
+2. It pins the **owner line** (the one whose note starts `owner`, as `link`
+   writes it) when exactly one key contact has that address, and adds the
+   marker line on top. Comments, notes and order are kept.
+3. It logs one summary, `keys: <file>: N pinned, N unpinned, N ambiguous`,
+   and one line per entry it did not pin. Every other address stays
+   unpinned, because nobody was there to compare its key.
+4. A list it cannot write, or one group or others can write, is left exactly
+   as it was, with no marker, and the log says why; its address-only lines
+   stay refused.
+
+After that first start nothing pins on its own: the marker means it has run.
+Only `link`, `callers add`, `callers pin` and `bot install --owner-key` write
+a key, because a key chosen at the moment a call arrives would be the
+caller's own choice.
+
+**What you see, and how to fix it.** A caller whose line is not pinned is
+refused, with `listed, but no key is pinned to it`. If no line is pinned the
+start log says `NOBODY may ring this agent`. Chat is not gated by this list,
+so you can still reach your agent while you pin. For each line:
+
+| the log says | meaning | do |
+|---|---|---|
+| `UNPINNED ADDR: no key contact with this address yet` | nobody with that address has written to the bot | `callers pin ADDR --key FPR` with the key their phone shows |
+| `UNPINNED ADDR: one key contact has this address (ID FPR), not pinned unattended` | one candidate, but only the owner line is pinned unattended | compare `FPR` with their phone, then `callers pin ADDR --key FPR` |
+| `AMBIGUOUS ADDR: N key contacts share this address (ID FPR, ID FPR, ...)` | two or more keys write from that address; the bot will not choose | ask the person which key is theirs (their phone shows it), then `callers pin ADDR --key FPR` with that one. Do not pin one you cannot tell apart |
+
+The same marker, `.pre-keys` backup and log lines apply to `channels.txt`
+(above).
 
 ## Voice messages: `dc-send-file --voice-message`
 
@@ -1379,6 +1670,13 @@ The chat line follows the call's recording switch:
 - The spoken notice is never said on a call that is not kept. If speech fails,
   `bot.log` says so and the greeting goes on; the chat line, when it is on,
   still tells the caller.
+- If neither the spoken notice nor the chat line reaches the caller on a kept
+  call (speech fails or is cut short, and the chat line is off or could not be
+  sent), the notice is posted once as chat text before the greeting, and
+  `bot.log` says so in one line: `recording notice: ...; delivered as text`.
+  A chat that `channels.txt` refuses is not retried, and a chat line not
+  confirmed within 5 seconds is not sent again; `bot.log` says the caller was
+  not told and the call is still kept.
 - The chat line goes through the profile's `channels.txt` like every in-call
   post. Each call logs what it did:
   `CALL recording notice: chat line on (default), spoken notice on (default)`.
@@ -1434,11 +1732,22 @@ only while recording is on, `full-in.wav` and `full-out.wav` (see
 line carries an IP address, a port, or the relay's TURN username or
 credential.
 
+**A call that is over, still reported live.** The bot writes
+`<home>/call-live.json` (`DC_LIVE`) when a call connects, and removes it when
+the call ends; `dc-live` and `dc-say --call` read it. When launchd stops the
+bot (SIGTERM: a bootout, or an install over a running bot), the bot ends each
+call it holds, so the phone hangs up too, and removes the file before it
+exits. A bot that died with no chance to (a SIGKILL, a crash) can still leave
+the file. The next bot removes it at start, once it holds the account, and
+says so once in `bot.log`. Until then, `dc-live` does not believe a file whose
+call began before the running bot started: it says no call is live (exit 1,
+and the reason on stderr), and `--id` prints nothing.
+
 ### Where a turn is mailed
 
 A turn is what the caller says between pauses. Each one is mailed:
 
-- **To** the agent's box, `DC_MAILTO`, else `<agent>@<host>`.
+- **To** the agent's box, `DC_MAILTO`, else the bare `<agent>`.
 - **Cc** the call's guests: `call-guests.txt` in the root, plus anyone added
   with `dc-invite`.
 - **Threaded** under the call's root mail, whose subject is
@@ -1455,12 +1764,23 @@ CALL TURN <n> mailed to <box>: msg <msgid>, taken=pending
 CALL TURN <n> mailed to <box> cc <guest>,<guest>: msg <msgid>, taken=pending
 ```
 
-A turn the mail system refused was never sent:
+A turn the mail system refused was not sent then. It is kept in the
+undelivered spool and retried, never twice under its id:
 
 ```text
-BRIDGE MAIL FAILED rc=<rc> kind=<kind>: ...; a call mail, not kept
+BRIDGE MAIL FAILED rc=<rc> kind=<kind>: ..., kept at <path>
 CALL TURN <n> NOT mailed to <box>: rc=<rc> kind=<kind>: ..., taken=no
 CALL TURN <n> NOT mailed to <box>: <ExcType>: ..., taken=no
+```
+
+On a live call (voicemail too), the caller is told: the call says "I
+couldn't reach the agent." once for that turn. A turn is one mail however
+many chunks it joined, so the line is never said per chunk, and the spool's
+later retries say nothing. A call that is closing says nothing. The log
+line:
+
+```text
+CALL UNDELIVERED box=<box> turn=<n>: said on the call
 ```
 
 ### Did anyone take it?
@@ -1512,7 +1832,8 @@ CALL NO-REPLY box=<box> turn=<n> after=<w>s: caller talking, no holding line
 first. The window starts at the `mailed to` line. A newer turn replaces the
 timer, so two quick turns get one holding line. A reply after the window
 still plays. Voicemail never gets the holding line, and neither does a turn
-whose mail failed. The holding line is never mailed.
+whose mail failed: that turn gets "I couldn't reach the agent." instead (see
+above). The holding line is never mailed.
 
 ### The first call: a wait while the speech models download
 
@@ -1564,6 +1885,32 @@ Put it in the bot's root, or point `DC_WAIT_MUSIC` at it and run
 `sessionphone bot install` again. The bot decodes it once and reads it again
 when the file changes.
 
+### A missed call
+
+The bot logs every ring the moment it sees it, before it decides whether to
+answer, refuse or ignore the call. A ring the bot answers then gets its
+own first line, once the call's session has started:
+
+```text
+CALL EVENT IncomingCall msg <id> chat <chat_id> video=<False|True>
+CALL INCOMING msg <id> chat <chat_id> ...
+```
+
+Neither line carries the caller's address. When the phone shows a missed
+call, look for the call's `msg` id:
+
+- **No `CALL EVENT ...` line, and a `RECV` line for that chat reading
+  `Missed call`**: the call reached the bot only after the phone had stopped
+  ringing. Delta Chat delivered it late, as a missed call, so the bot never
+  saw it ring. Look at delivery: the bot's connection to its relay, and
+  whether the bot was running.
+- **A `CALL EVENT ...` line, then a `REFUSED` or `CALL event ignored ...`
+  line**: the bot heard the ring and did not answer, for the reason that
+  line gives.
+- **A `CALL EVENT ...` line and no `CALL INCOMING ...` line**: the bot heard
+  the ring, but the call's session stalled before its first line. That is a
+  bug in the bot: report it with the `bot.log` lines around the ring.
+
 ### A call that never connects
 
 ```text
@@ -1608,6 +1955,38 @@ from the call goes in, and `bot.log` says so once:
 ```text
 CALL heard: chat <chat_id> is not in DC_HEARD_CHATS ...
 ```
+
+### What a `dc-say` ack says about the call
+
+When a call is live in the chat, a `dc-say` is also spoken into the call.
+Its ack (the line `dc-say` prints) ends with what happened to the speech:
+
+| ack ends with | means |
+|---|---|
+| `; spoken into the call` | every sentence was rendered and handed to the call |
+| `; NOT spoken: tts failed: <reason>` | the speech failed, for example `No such file or directory: 'ffmpeg'` or the speech server down; the words are in the chat as text |
+| `; NOT spoken in full: <k> of <n> sentences failed, tts failed: <reason>` | some sentences were said, some were not |
+| `; NOT spoken in full: cut off on the call` | a barge-in cut the line before all of it was said |
+| `; queued to speak` | the speech was still rendering when the ack was due |
+| `; NOT spoken (chat only)` | the line went to the chat only and was never sent to the speech: `dc-say --text-only` |
+
+**`dc-say --text-only CHAT "text"` posts to the chat and never speaks it**,
+even with a call live there. Use it for anything addressed to the chat and
+not to the person on the call: a report, a log, a status. A plain `dc-say`
+(no flag) is read aloud into a live call, so a long report sent that way is
+read out into their call. `--text-only` sets `"no_speak": true` on the job;
+without the flag the job has no such key. It contradicts `--call` (say this
+into the call), so both together exit 1 and nothing is queued.
+
+The bot waits up to 3 s for the speech before it writes the ack. Those 3 s
+are shared by every speaking `dc-say` the bot takes in one pass of its outbox,
+so a burst of them is acked within about 3 s in all, not 3 s each. A long line,
+a speech server's first render, or a line late in a burst can take longer, and
+then the ack says `queued to speak`. If that line then fails, the bot mails the agent one line
+that starts `NOT spoken` and names the chat, the chat message and the reason.
+Nothing is mailed when it is spoken. The mail goes to the bridge's agent
+(`DC_MAILTO`), also for a `dc-say --who NAME`. An ack never says `spoken`
+before the speech was rendered.
 
 ## Mail into a call: who is known
 
@@ -1718,6 +2097,27 @@ every line waiting behind it, whoever's they are. A reply that is cut says
 no more of its sentences. A mouth that stops before its line ends is a cut.
 Sounds are not lines: they play over whatever is playing, at once.
 
+### A reply waits for the caller to finish
+
+A reply does not start while the caller is speaking. A reply is a mouth
+line, a `dc-say` or a mail into the call. When it is next to play, it waits
+until the caller has been quiet for `DC_FLOOR_GAP` seconds (0.8 by default),
+then plays. It waits `DC_FLOOR_CAP` seconds at most (6 by default), so noise
+on the line cannot keep the agent silent. Lines still play one at a time and
+in the order they arrived; a reply that waits holds the lines behind it. The
+bridge's own lines, such as the greeting, the holding line and the notices,
+do not wait. `DC_FLOOR_GAP=0` turns this off. At start, the bot logs the
+setting, and each reply that waited logs one line as it starts:
+
+```text
+CALL floor control: a reply waits for <gap>s of caller quiet, <cap>s at most
+CALL floor control: off (a reply may start while the caller speaks)
+CALL FLOOR <who> line held <s>s, released by quiet
+CALL FLOOR <who> line held <s>s, released by cap
+```
+
+A reply that never had to wait logs no `FLOOR` line.
+
 ## A browser tab as a call: `sessionphone web`
 
 `sessionphone web` serves one page and its WebSocket, so a browser tab
@@ -1796,8 +2196,9 @@ above): without one it exits 2 before any of this.
   the `host` in sessionmail's `mail.json`, else the first part of this
   machine's name. A reverse-DNS name (`….ip6.arpa`) or an unrelated DNS
   name is never used.
-- **To** is the seat: `--mail-to ADDR`, else `$DC_MAILTO`, else
-  `$DC_AGENT@HOST`. There is no further fallback.
+- **To** is the seat: `--mail-to BOX`, else `$DC_MAILTO`, else the bare
+  `$DC_AGENT`. There is no further fallback. A bare box is on this host
+  (sessionmail adds the host); `box@host` is kept as given.
 - **Reply-To** is the call's box, `calls+web-<N>@HOST`. A plain reply is
   spoken into the call.
 - **From** is the web seat, the local part of `$DC_ADDR`, else
@@ -1810,7 +2211,8 @@ above): without one it exits 2 before any of this.
   `X-Delta-Chat-Kind: call` and `Medium: voice`. There is no
   `X-Delta-Chat-Id`, because a web call has no chat.
 - **The subject** is `[web <N>] <caller>: <words>`, and the body says
-  `from: <caller>`. The caller is `--caller-name`, else `$DC_CALLER_NAME`,
+  `from: <caller>`. The body carries the whole turn, never cut; only the
+  subject's words are cut, for display. The caller is `--caller-name`, else `$DC_CALLER_NAME`,
   else `owner`.
 - **The body** ends with how to answer: `mouth say --device call:N "text"`,
   or reply to the mail.
@@ -1946,8 +2348,8 @@ given in the phone tool's host settings file,
 | What | Where it lives |
 | --- | --- |
 | the root, mode 0700: account, outbox, call dirs | `$SESSIONPHONE_ROOT`, else the one `bot install` keeps, else `~/.sessionphone`; the bot's own can be `$DC_ROOT` |
-| who may ring the bot | `<root>/callers.txt`, or `$DC_CALLERS_FILE` |
-| where the bot may send | `<root>/channels.txt`, or `$DC_CHANNELS_FILE` |
+| who may ring the bot, each caller bound to a key | `<root>/callers.txt`, or `$DC_CALLERS_FILE` |
+| where the bot may send, each address bound to a key | `<root>/channels.txt`, or `$DC_CHANNELS_FILE` |
 | call recording: `record`, `record_days` and the two notices | `~/.sessionkit/voice/settings/ears.json`; `$EARS_CONF` moves it only for a bot run by hand (the launchd job does not carry it, so it reads `~/.sessionkit/voice/settings/ears.json`) |
 | the bot's launchd job | `~/Library/LaunchAgents/dev.sessionkit.phone.bot.<agent>.plist` |
 | what `bot install` remembers, one map per bot | `~/.sessionkit/phone/settings/phone.json`, then `phone.d/*.json` |
@@ -2004,7 +2406,17 @@ Every key, with its type and default:
 - **Health:** `sessionphone bot status`. It names the job (and, when your
   shell names no bot, which bot and where from), says whether the bot is
   running (with its pid) and where its log is, and exits 0 only when the
-  bot is running.
+  bot is running. With the job installed, its `hearing:` line says, in one
+  line, whether the speech-to-text server at the job's `DC_STT_URL` answers
+  a half-second test clip. The check is capped at 5 s, so a server still
+  loading its model reads `not confirmed`, and a `NO` names the URL that did
+  not answer and points at `sessionphone bot install`, which says how to fix
+  it. It never changes the exit code. Its `speaking:` line says whether
+  the bot can speak its replies (the ffmpeg `bot install` looks for, judged
+  on the job's environment). A `NO` there never changes the exit code.
+  Its `undelivered:` line counts the mail to the agent waiting in the bot's
+  spool and dead there, call turns included; it never changes the exit
+  code either.
 - **Is a bot running for this root?** `dc-live` asks the bot's own pid file,
   `<root>/bot.pid` (`DC_PID_FILE`). The bot writes it once it holds the
   account: its pid, its start time and command line as `ps` gives them, and
@@ -2017,6 +2429,16 @@ Every key, with its type and default:
   `sessionphone bot run` counts. For a launchd bot, the pid `bot status`
   reads from launchd and the pid in `bot.pid` are the same process. A bot
   started before its version wrote `bot.pid` has none: restart it.
+- **A live call holds back install and uninstall.** `bot install` and
+  `bot uninstall` stop the bot, and a call cannot outlive it. While a call is
+  up they refuse, exit 2, with `a call is live; hang up or pass --force`,
+  then the call as `dc-live` names it. Nothing is written or booted out.
+  Hang up and run it again, or pass `--force` to restart the bot anyway: the
+  call drops. A call counts only while the bot that wrote `call-live.json`
+  still runs, judged as `dc-live` judges it, and only when the call began
+  after that bot started. A file left by a bot stopped mid-call is no call.
+  The files are the ones the installed job's plist names, so a reinstall
+  that changes the root still sees the call on the old one.
 
 ## Development
 
@@ -2032,9 +2454,11 @@ Test on a fresh macOS in a tart VM, not on the machine you develop on.
 
 ## Status
 
-sessionphone runs today, on macOS. Its version is in `pyproject.toml`, and
-what changed since the last release is under `[Unreleased]` in
-`CHANGELOG.md`.
+sessionphone runs today, on macOS. Its version is in `pyproject.toml`.
+Each change writes its changelog entry to `changelog.d/`, one file each, and
+the release moves them into `CHANGELOG.md`. `make changelog` prints what
+changed since the last release, as the next release will write it under
+`[Unreleased]`.
 
 **What works on master.** `uv run pytest -q` passes. The tests named below
 use fakes: no real account, relay, launchd job or speech server.
@@ -2059,13 +2483,16 @@ use fakes: no real account, relay, launchd job or speech server.
   listed in `channels.txt` (`tests/test_seatmail.py`,
   `tests/test_contract_headers.py`, `tests/test_channels.py`,
   `tests/test_dc_channels.py`).
-- **Calls.** Only approved callers may ring. A call is answered at once, or
+- **Calls.** Only approved callers may ring: a contact that holds the key
+  pinned to a line of `callers.txt`. A call is answered at once, or
   rings first with `DC_ANSWER=ring` and falls back to voicemail. What the
   caller says is mailed to the agent turn by turn. With `DC_NO_REPLY_S` set
   (off by default), a turn with no reply hears the holding line
   (`tests/bridge/test_callers.py`,
   `tests/bridge/test_ringfirst.py`, `tests/bridge/test_call_turn_log.py`,
   `tests/bridge/test_noreply.py`).
+  A reply waits for the caller to finish speaking
+  (`tests/bridge/test_floor.py`).
 - **Voice messages** with `dc-send-file --voice-message`
   (`tests/test_voicemsg.py`).
 - **A browser tab as a call**, `sessionphone web` (`tests/web/`). The
@@ -2093,8 +2520,24 @@ default, and without ears a call is still heard and answered.
 - **macOS only.** `bot install` writes a launchd job. There is no systemd
   unit, and the `say` fallback is macOS's.
 - **No hearing without an STT server.** With nothing at `DC_STT_URL`, a call
-  connects but the agent does not hear the caller. `bot install` ends with a
-  `hearing:` line that says so (`tests/test_hearing.py`).
+  connects but the agent does not hear the caller. `sessionphone setup` asks
+  that server before the phone is linked, while there is time to install
+  it: its last lines, `hearing:`, say whether it answered a half-second test
+  clip and, when not, name the install step (under Session Kit,
+  `ears services install --only speech`; standalone, VoiceMode's). Its exit
+  code does not change. `bot install` ends with the same `hearing:` check, and
+  `bot status` gives it in one line (`tests/test_hearing.py`,
+  `tests/test_stt_before_link.py`).
+- **No spoken replies without ffmpeg.** When the speech server answers, the
+  bot turns each spoken reply into call audio with `ffmpeg`. With none,
+  every spoken reply fails and goes to the caller as chat text. The bot
+  looks for it in `DC_FFMPEG`, then on the job's `PATH`, then at
+  `/opt/homebrew/bin/ffmpeg` and `/usr/local/bin/ffmpeg`. `bot install`
+  ends with a `speaking:` line that says whether it found one, and when it
+  did not, gives the fix (`brew install ffmpeg`, then `bot install` again,
+  so the running bot picks it up). `bot status` says the same.
+  `DC_TTS=apple` speaks by macOS `say` and needs no ffmpeg
+  (`tests/test_speaking.py`).
 - **The bot needs sessionmail, and a key only on an MTA.** On the mail drop,
   sessionmail's default, it sends unsigned and needs no seat step. On an MTA
   it must sign: give it a key with `sessionphone bot install --registry DIR`
@@ -2104,3 +2547,4 @@ default, and without ears a call is still heard and answered.
   it on a fresh macOS in a tart VM.
 
 [bot-mail-signing]: docs/bot-mail-signing.md
+[dependencies]: docs/dependencies.md

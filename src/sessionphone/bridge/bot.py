@@ -19,7 +19,10 @@ What it does:
 """
 # subprocess: no call here (every mail goes by seatmail's `message send`), but the test
 # rigs stub bot.subprocess.run, which is the shared module's run: keep the name.
-import atexit, json, os, pathlib, shlex, subprocess, sys, threading, time, traceback, typing  # noqa: F401
+import atexit, concurrent.futures, json, os, pathlib, shlex, signal, subprocess, sys, threading, time, traceback, typing  # noqa: F401
+# when this process started, as near as it can know: a call of this bot can
+# be no older, so a call-live.json older than this was left by an earlier bot
+STARTED = time.time()
 from deltachat_rpc_client import Rpc, DeltaChat, EventType
 from deltachat_rpc_client.const import ViewType   # Voice for a voice-message file job
 # The agent may be NAMED IN ARGV - the launchd job passes it:
@@ -29,7 +32,7 @@ from deltachat_rpc_client.const import ViewType   # Voice for a voice-message fi
 # still wins; this only fills it in.
 # It runs BEFORE every sessionphone import: dc_env freezes AGENT, ADDR and
 # MAILTO at import, and `account` imports dc_env, so a fill below it would
-# never reach dc_env and an argv-only bot would mail as `claude`.
+# never reach dc_env and an argv-only bot would mail as the default bot, not AGENT.
 # tests/test_bot_argv_agent.py pins the order.
 # The recording switch's CLI layer rides the same argv: --record / --no-record
 # (the last one wins; bridge/recording.py). It is taken out FIRST, so
@@ -44,6 +47,7 @@ from sessionphone.account import address, read_owner, server_choice   # the venv
 # address: the account's own address, read the way setup reads it
 from sessionphone.procname import named_python   # runs as libexec/session-phone
 from sessionphone import channels       # where the bot may send
+from sessionphone import keygate        # approved callers bound to a key; the one-time pin
 from sessionphone import seat           # the agent's box, made before the first send
 from sessionphone import jobs           # the job keys this bot reads, stamped for the tools
 from sessionphone import avatar         # the default picture, set at start when the account has none
@@ -66,7 +70,8 @@ from sessionphone.bridge import dc_env                  # >>> identity: who this
 # <root>/<profile>/ (dc_env.home): its accounts dir (the lock), its outbox
 # (chat ids are per account: chat 12 here is not chat 12 there), its list,
 # callers, log and seen-file. The default profile's home is the root itself.
-ACCOUNTS = dc_env.path("ACCOUNTS", "accounts")
+# The one resolver the CLI shares (link, setup, callers add|pin without --key).
+ACCOUNTS = dc_env.accounts_dir(root=dc_env.ROOT)
 XDC_SEEN: dict = {}   # webxdc msg id -> highest status-update serial mailed
 XDC_SENT: dict = {}   # webxdc msg id -> payloads WE pushed, awaiting their echo
 XDC_SENT_KEEP = 50    # per message; an echo that never comes is not a leak
@@ -429,6 +434,7 @@ OUTBOX = dc_env.path("OUTBOX", "outbox")
 LOG = dc_env.path("LOG", "bot.log")
 SEEN = dc_env.path("SEEN", "bridged-ids.txt")
 PID_FILE = dc_env.PID_FILE   # bot.pid: dc-live's answer to "is the bot running?"
+LIVE_FILE = dc_env.LIVE_FILE   # the live call: calls.py writes it there, and removes it
 INVITE = dc_env.env("INVITE")          # write the live invite link here
 PROFILE = dc_env.PROFILE    # "" = the default profile, whose home is the root
 # A public relay means STRANGERS can write. A contact request is NOT accepted
@@ -599,7 +605,13 @@ def check_stt():
 
 def log(msg):
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except RuntimeError:
+        # a signal handler (on_sigterm) that logs while this thread is inside
+        # its own print gets "reentrant call": a stop must not die of its own
+        # log line, and the file below still has it
+        pass
     with LOG.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
@@ -689,9 +701,11 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
     drop with no signer). A Cc the send could not deliver is left off
     (seatmail.guard_cc), and said once per run. A call mail (M5: msgid, in_reply_to or
     supersedes, ids the bot minted itself) carries them as `--message-id`,
-    `-r` and `--supersedes`. The one difference is a failure: M1-M4 are kept
-    in the spool and retried, an M5 NEVER is. sessionmail has no duplicate
-    check, so a retried M5 could land twice under one id."""
+    `-r` and `--supersedes`. A failure is kept in the spool and retried, an M5
+    too, all but a call's PREVIEW (X-Call-Preview): the turn
+    supersedes it and carries its whole text. sessionmail has no duplicate
+    check, so the spool reads the box for an M5's id before it retries it, and
+    never sends it twice (bridge/spool.py)."""
     # FLATTEN. A transcript carries newlines, and a newline in a Subject is
     # HEADER INJECTION: once one split the header block and my own
     # X-Delta-Chat-* headers were delivered as body text. Also ASCII-only.
@@ -744,11 +758,13 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
                          msgid=msgid, in_reply_to=in_reply_to, supersedes=supersedes)
     if sent.ok:
         log(f"bridged to mail: {subject}" + (f" {sent.id}" if sent.id else ""))
-    elif m5:
-        # NEVER spooled: the id is ours and sessionmail has no duplicate check
-        log(f"BRIDGE MAIL FAILED {sent.error}; a call mail, not kept")
+    elif m5 and "X-Call-Preview" in hdrs:
+        # a preview is superseded by the turn, which carries the whole text: a
+        # late preview, after its turn, is only noise
+        log(f"BRIDGE MAIL FAILED {sent.error}; a call preview, not kept: the turn carries the whole text")
     else:
-        # kept, not lost: the spool retries it by its kind
+        # kept, not lost: the spool retries it by its kind. An M5 too: the spool
+        # reads its box for its id before a retry, so it never lands twice
         try:
             SPOOL.keep(sent, body)          # logs BRIDGE MAIL FAILED ..., kept at PATH
         except OSError as e:
@@ -785,7 +801,7 @@ def say_once(key, line) -> bool:
 #   X-Delta-Chat-Kind     message | request | reaction | webxdc | call
 #   X-Delta-Chat-Msg-Id   the Delta message id (what dc-react --msg takes);
 #                         message, request and reaction only
-#   X-Delta-Chat-Sender   the Delta contact's ADDRESS (the display name is a claim)
+#   X-Delta-Chat-Sender   the address the message carries: a label for people, not a key
 #   X-Delta-Chat-Channel  the channel NAME the chat is listed as
 # A chat that is not listed gets no Channel header, and its reply hint says so
 # instead of naming a dc-say the outbox would refuse (channels.check, every profile).
@@ -858,6 +874,108 @@ def send_alert(subject, body, headers):
     every non-call mail. -> (accepted, error, Message-ID)."""
     sent = seatmail.send(dc_env.MAILTO, subject, body, headers=headers)
     return sent.ok, sent.error, sent.id
+
+
+# >>> speech-truth: a dc-say's ack says "spoken into the call" only after the
+# words were rendered and handed to the call. The calls side's speak_if_live
+# returns one future per live call, each with CallSession.speak()'s result. The ack
+# waits for them, then says spoken, NOT spoken with the reason, or "queued to
+# speak". The outbox loop is serial, so the wait is ONE budget per pass, not
+# one per job: every speaking job in a pass shares one deadline, SPEAK_WAIT
+# after the first of them. A burst of N speaking jobs holds the pass SPEAK_WAIT
+# in all, not N x SPEAK_WAIT, so each ack stays inside dc-say --call's 8 s and
+# each take inside dc_taken's 10 s. A job reached once the budget is spent is
+# judged as it stands (done: its outcome; not done: "queued to speak"). A queued line that
+# fails later is mailed to the agent (MAILTO) by speech_sweep(). With
+# dc-say --who that is the bridge's own agent, not the proxied one.
+SPEAK_WAIT = 3.0            # s the ack waits for the speech
+SPEAK_LATE_MAX = 600.0      # s a queued line is watched for a late failure
+_SPEECH_PENDING = []        # [(futures, chat id, msg id, watch until)]
+
+
+def _flat(x, cap=200):
+    return " ".join(str(x).split())[:cap]
+
+
+def speech_note(r):
+    """One speak() result (or what it raised) -> (ok, note).
+    ok: True spoken, False not, None not known (not a speak() result)."""
+    if isinstance(r, BaseException):
+        return False, f"NOT spoken: {type(r).__name__}: {_flat(r)}"
+    if not isinstance(r, dict):
+        return None, "queued to speak"
+    n, failed, why = r.get("n", 0), r.get("failed", 0), _flat(r.get("error"))
+    if failed and failed >= n:
+        return False, f"NOT spoken: tts failed: {why}"
+    if failed:
+        return False, f"NOT spoken in full: {failed} of {n} sentences failed, tts failed: {why}"
+    if r.get("cut"):
+        return False, "NOT spoken in full: cut off on the call"
+    if not n:
+        return False, "NOT spoken: nothing to say"
+    return True, "spoken into the call"
+
+
+def speech_outcome(futs):
+    """Finished speak() futures -> (ok, note): the first failure wins, then
+    an unknown, else spoken."""
+    notes = []
+    for f in futs:
+        try:
+            notes.append(speech_note(f.result(timeout=0)))
+        except BaseException as e:     # speak() raised, or the future was cancelled
+            notes.append(speech_note(e))
+    for want in (False, None):
+        for ok, note in notes:
+            if ok is want:
+                return ok, note
+    return True, "spoken into the call"
+
+
+def speech_ack(futs, cid, msg_id, until=None):
+    """The ack's word on a dc-say's speech. Waits until `until` (a
+    time.monotonic() deadline: the outbox pass's shared one; None = SPEAK_WAIT
+    from now). A deadline already past waits not at all. A line still
+    rendering is "queued to speak" and watched by speech_sweep()."""
+    if not isinstance(futs, (list, tuple)):     # not futures: queued, outcome unknown
+        return "queued to speak"
+    if until is None:
+        until = time.monotonic() + SPEAK_WAIT
+    concurrent.futures.wait(futs, timeout=max(0.0, until - time.monotonic()))
+    if all(f.done() for f in futs):
+        ok, note = speech_outcome(futs)
+        if ok is False:
+            log(f"dc-say chat {cid}, msg {msg_id}: {note}")
+        return note
+    _SPEECH_PENDING.append((list(futs), cid, msg_id, time.monotonic() + SPEAK_LATE_MAX))
+    log(f"dc-say chat {cid}, msg {msg_id}: queued to speak, not done "
+        f"in this pass's {SPEAK_WAIT:.0f}s speech wait")
+    return "queued to speak"
+
+
+def speech_sweep():
+    """Once per outbox pass: a queued line that has since failed is mailed
+    to the agent, one line. A line spoken in full is only logged."""
+    keep = []
+    for futs, cid, msg_id, until in _SPEECH_PENDING:
+        if all(f.done() for f in futs):
+            ok, note = speech_outcome(futs)
+            log(f"dc-say chat {cid}, msg {msg_id}: {note} (after the ack)")
+            if ok is False:
+                try:
+                    mail_in("call", cid, "call",
+                            f"{note}. The dc-say text is in chat {cid} as msg {msg_id}; "
+                            "the ack said only \"queued to speak\".",
+                            subject=f"{note}, msg {msg_id}", kind="call")
+                except Exception:
+                    log("late speech-failure mail failed:\n" + traceback.format_exc())
+        elif time.monotonic() > until:
+            log(f"dc-say chat {cid}, msg {msg_id}: no speech outcome in "
+                f"{SPEAK_LATE_MAX:.0f}s; not watched any more")
+        else:
+            keep.append((futs, cid, msg_id, until))
+    _SPEECH_PENDING[:] = keep
+# <<< speech-truth
 
 
 # >>> inbound-gate
@@ -1217,6 +1335,15 @@ def xdc_rt_in(account, event) -> None:
 # <<< xdc-rt-in
 
 
+def call_event_line(event):
+    """The one line handle_events logs for every INCOMING_CALL, whatever
+    happens to the call next. Only the event's own fields, read with getattr
+    so a short event never stops the loop: no rpc read, and no caller
+    address (bot.log never carries one)."""
+    return (f"CALL EVENT IncomingCall msg {getattr(event, 'msg_id', '?')} "
+            f"chat {getattr(event, 'chat_id', '?')} video={getattr(event, 'has_video', '?')}")
+
+
 def handle_events(account):
     """Blocking event loop. wait_for_event() takes NO timeout - passing one
     raises TypeError, which in the first version was swallowed by a bare
@@ -1225,6 +1352,15 @@ def handle_events(account):
     while True:
         event = account.wait_for_event()
         kind = getattr(event, "kind", None)
+        if kind == EventType.INCOMING_CALL:
+            # Every ring, logged FIRST: before the chain below picks calls
+            # off, refused, no media pack or answer, and before any rpc read
+            # or await. The answer path's own first line, CALL INCOMING,
+            # comes only after the session has read the names, so without
+            # this a missed call with no line could not tell "core never
+            # raised IncomingCall" from "the session stalled before its first
+            # line". The event's own fields only; never the caller's address.
+            log(call_event_line(event))
         if kind == EventType.INCOMING_MSG:
             try:
                 msg = account.get_message_by_id(event.msg_id).get_snapshot()
@@ -1492,11 +1628,13 @@ class ChannelsWatch:
 
 
 def channels_diff(old: dict, new: dict) -> list:
-    """What changed between two reads, by NAME: added, removed, retargeted."""
+    """What changed between two reads, by NAME: added, removed, retargeted, re-keyed."""
     out = [f"added {n} ({new[n].target})" for n in new if n not in old]
     out += [f"removed {n} ({old[n].target})" for n in old if n not in new]
     out += [f"changed {n} ({old[n].target} -> {new[n].target})"
             for n in new if n in old and old[n].target != new[n].target]
+    out += [f"key of {n} {old[n].key or 'unpinned'} -> {new[n].key or 'unpinned'}"
+            for n in new if n in old and old[n].target == new[n].target and old[n].key != new[n].key]
     return out
 
 
@@ -1534,13 +1672,31 @@ def resolve_chat(account, ref, listing) -> int:
 
 
 def listed_contact(account, name, entry):
-    """The contact an address entry NAME names. Refused if this profile never met it."""
-    contact = account.get_contact_by_addr(entry.address)
-    if contact is None:
-        refuse(f"REFUSED send to channel {name!r}: {entry.address} is not a contact of this profile",
-               f"REFUSED: channel {name!r} is {entry.address}, who is not a contact of this profile; "
-               "nothing was sent.")
-    return contact
+    """The contact an address entry NAME names: the one holding the key the
+    entry is pinned to (keygate.candidates by its address first, else every
+    contact of this profile, for a contact whose address moved). Refused if
+    the entry is unpinned, or no contact of this profile holds that key."""
+    if entry.key is None:
+        how = channels.PIN_HOW.format(name=name)
+        refuse(f"REFUSED send to channel {name!r}: {entry.address} is listed, but no key is pinned to it",
+               f"REFUSED: channel {name!r} is {entry.address}, listed but with no key pinned to it "
+               f"({how}; {keygate.SHOWS}); nothing was sent.")
+    found = next((c for c, fpr in keygate.candidates(account, entry.address) if fpr == entry.key), None)
+    if found is None:
+        found = next((c for c in account.get_contacts() if _holds(c, entry.key)), None)
+    if found is None:
+        refuse(f"REFUSED send to channel {name!r}: no contact of this profile holds its key {entry.key}",
+               f"REFUSED: channel {name!r} is {entry.address}, and no contact of this profile holds "
+               f"the key it is pinned to ({entry.key}); nothing was sent.")
+    return found
+
+
+def _holds(contact, key) -> bool:
+    """True if CONTACT holds the key KEY. A contact that cannot be read does not."""
+    try:
+        return keygate.contact_fingerprint(contact) == key
+    except Exception:   # noqa: BLE001 - an unreadable contact is never the one
+        return False
 
 
 def gate(account, chat_id, listing, what):
@@ -1624,6 +1780,111 @@ def relink():
         log(f"relink {exe} failed, running on as is: {e}")
 
 
+# >>> stale-live: a bot stopped mid-call (launchd's SIGTERM, a watchdog exit)
+# never closed its call, so its call-live.json stayed, and dc-live and
+# `dc-say --call` took a dead call for a live one until the next call.
+def clear_stale_live(path=None, started=None):
+    """At start, once this bot holds the account and before it can take a
+    call: remove a call-live.json older than this process (its `since` before
+    STARTED), or one that cannot be read, since no call of this bot exists yet.
+    Logs it ONCE, naming the call. A file newer than this process is left
+    alone: not this bot's, and not provably stale. Never raises. -> removed?"""
+    path = LIVE_FILE if path is None else pathlib.Path(path)
+    started = STARTED if started is None else started
+    _sweep_live_parts(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        log(f"{path.name}: could not read it at start ({e}); left as it is")
+        return False
+    try:
+        d = json.loads(text)
+        since = float(d["since"])
+        what = f"call msg {d.get('call_id')} from {time.time() - since:.0f} s ago"
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        since, what = None, f"unreadable: {type(e).__name__}"
+    if since is not None and since >= started:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        log(f"{path.name}: left by an earlier bot ({what}), and NOT removed: {e}")
+        return False
+    log(f"removed {path.name} left by an earlier bot stopped mid-call ({what}): no call is live")
+    return True
+
+
+def _sweep_live_parts(path):
+    """The calls write the live file through a temp sibling,
+    `.<name>.<pid>.part`, renamed in. A bot killed between the write and the
+    rename leaves that part behind. At start no call of this bot has written
+    one yet, so every part beside the file is an earlier bot's: remove them,
+    one line for all. Never raises. -> how many were removed"""
+    head, tail = f".{path.name}.", ".part"
+    try:
+        parts = [p for p in path.parent.iterdir()
+                 if p.name.startswith(head) and p.name.endswith(tail)
+                 and p.name[len(head):-len(tail)].isdigit()]
+    except OSError:
+        return 0
+    gone, kept = 0, []
+    for p in parts:
+        try:
+            p.unlink()
+            gone += 1
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            kept.append(f"{p.name}: {e}")
+    if gone:
+        log(f"removed {gone} temp file(s) of {path.name} left by an earlier bot stopped mid-write")
+    if kept:
+        log(f"temp file(s) of {path.name} left by an earlier bot, NOT removed: {'; '.join(kept)}")
+    return gone
+
+
+_STOPPING = False
+
+
+def on_sigterm(signum, frame):
+    """launchd stops the bot with SIGTERM (a bootout, an install over it, a
+    kickstart -k) and SIGKILLs it ExitTimeOut later (20 s by default). Python's
+    default dies at once: no close(), no atexit, the call never ended and its
+    live file kept. So: end each call and remove its file (calls.stop, bounded
+    to calls.STOP_S), then exit 128+15 through the normal unwinding, so atexit
+    takes bot.pid back. A backstop ends the process if anything after hangs."""
+    global _STOPPING
+    if _STOPPING:
+        return              # a second SIGTERM while stopping: the first one finishes
+    _STOPPING = True
+    code = 128 + signum
+    stop_s = calls.STOP_S if calls is not None else 0.0
+    backstop = threading.Timer(stop_s + 6.0, os._exit, args=(code,))
+    backstop.daemon = True
+    backstop.start()
+    try:
+        log("SIGTERM: stopping")
+        if calls is not None:
+            calls.stop("the bot was stopped (SIGTERM)")
+    except Exception:
+        log("SIGTERM: stopping the calls failed:\n" + traceback.format_exc())
+    sys.exit(code)
+
+
+def stop_on_sigterm():
+    """Install on_sigterm. Only the main thread may; elsewhere (a test that
+    runs main() on a thread) the default stays, and the log says so."""
+    try:
+        signal.signal(signal.SIGTERM, on_sigterm)
+    except ValueError as e:
+        log(f"SIGTERM handler not installed: {e}")
+# <<< stale-live
+
+
 def main():
     # FIRST: the mail host in sessionmail's full order, its mail.json included
     # (dc_env's import took the environment only), so every address and id
@@ -1635,7 +1896,7 @@ def main():
     if why:
         print(f"sessionphone bot: {why}", file=sys.stderr)
         sys.exit(2)
-    # >>> junk-host: refuse rather than mail <agent>@<junk>
+    # >>> junk-host: refuse rather than build the bot's own <agent>-chat@<junk>
     if dc_env.HOST_PROBLEM:
         why = f"REFUSED to start: {dc_env.HOST_PROBLEM}"
         print(f"sessionphone bot: {why}", file=sys.stderr)
@@ -1698,7 +1959,18 @@ def main():
         if pidfile.write(PID_FILE, dc_env.ROOT, log):
             atexit.register(pidfile.clear, PID_FILE, os.getpid())
         # <<< bot-pid
+        # >>> stale-live: this bot holds the account and has no call yet, so a
+        # live file from before it is a dead call; and from here a SIGTERM ends
+        # this bot's calls and removes their file before it goes
+        clear_stale_live()
+        stop_on_sigterm()
+        # <<< stale-live
         account.start_io()
+        # >>> caller-keys: a callers file from an older version is pinned to
+        # keys once, here (keygate.migrate: owner line only, backup kept).
+        keygate.migrate(account, dc_env.callers_file(), log)
+        channels.migrate(account, channels.channels_path(), log)   # the same, for channels.txt
+        # <<< caller-keys
         # the address as setup reads it: the first transport, else the legacy
         # "addr" key, which core 2.62 sets only through the deprecated
         # configure(), never through setup's init_transports (else the log
@@ -1721,6 +1993,8 @@ def main():
         if said:
             log(said)
         display = account.get_config("displayname")
+        if calls is not None:       # a call greets by the name people see in their chat list
+            calls.settle_greetings(display)
         log(f"online as {f'{display} <{addr}>' if display else addr} - listening"
             + (f" (profile {PROFILE}, requests {'accepted' if ACCEPT_REQUESTS else 'HELD'}, "
                f"calls {'on' if CALLS else 'off'}, inbound only from listed chats)" if PROFILE else ""))
@@ -1774,6 +2048,8 @@ def main():
         while True:
             alert.judge(watch.refresh())    # list-alert: once per pass (logs only a change)
             SPOOL.drain()                   # undelivered mail that is due, oldest first
+            speech_sweep()                  # >>> speech-truth: a queued line that failed since
+            speak_until = None              # >>> speech-truth: this pass's one speech wait, set by its first speaking job
             for f in sorted(OUTBOX.glob("*.json")):
                 # >>> send-ack
                 # Every job answers its writer: ok with what was done, or not
@@ -2009,16 +2285,22 @@ def main():
                         log(f"SENT to chat {cid}{' +html' if job.get('html') else ''}: {text[:60]}")
                         done = f"sent to chat {cid}, msg {sent.id}"   # set before speaking: it went
                         # a live call in that chat hears it too - unless the
-                        # job is a TTS-failure fallback (no_speak), which
-                        # must never be voiced back into the call
+                        # job is no_speak: a TTS-failure fallback, which must
+                        # never be voiced back into the call, or dc-say
+                        # --text-only
                         spoke = CALLS and calls is not None and not job.get("no_speak") and calls.speak_if_live(
                             cid, job["text"],
                             job.get("voice") or dc_env.VOICE, who)
                         if spoke:
                             log(f"SPEAKING into call, chat {cid} as {who}")
-                        if spoke:
-                            done += "; spoken into the call"
-                        elif want is not None:
+                            # >>> speech-truth: "spoken" only once it was;
+                            # one SPEAK_WAIT per pass, shared by its speaking jobs
+                            if speak_until is None:
+                                speak_until = time.monotonic() + SPEAK_WAIT
+                            done += "; " + speech_ack(spoke, cid, sent.id, speak_until)
+                        elif want is not None or job.get("no_speak"):
+                            # --call refused nowhere else; dc-say --text-only
+                            # (no_speak) asked for chat only: say so
                             done += "; NOT spoken (chat only)"
                     # >>> send-ack
                     ack.write(job.get("ack"), True, done or "done", log=log)

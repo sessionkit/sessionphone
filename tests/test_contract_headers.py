@@ -19,6 +19,7 @@ import email.policy
 import json
 import types
 
+import _keyfakes
 import pytest
 
 from sessionphone.bridge import bot, calls, dc_env
@@ -26,7 +27,7 @@ from sessionphone.bridge import bot, calls, dc_env
 OWNER = "alice@relay.example"
 STRANGER = "bob@relay.example"
 # family is a listed group, owner is the owner's 1:1 (an address entry)
-LIST = f"family  chat:12   # the family group\nowner   {OWNER}   # owner\n"
+LIST = f"family  chat:12   # the family group\nowner   {OWNER}  key:{_keyfakes.FPR_K1}   # owner\n"
 NEW = ("X-Delta-Chat-Kind", "X-Delta-Chat-Msg-Id", "X-Delta-Chat-Sender", "X-Delta-Chat-Channel")
 
 
@@ -44,7 +45,10 @@ class FakeContact:
         self.addr, self.name = addr, name
 
     def get_snapshot(self):
-        return Obj(address=self.addr, display_name=self.name, name="")
+        return Obj(address=self.addr, display_name=self.name, name="", is_key_contact=True)
+
+    def make_vcard(self):           # the owner holds K1, anyone else K2
+        return _keyfakes.vcard(self.addr, _keyfakes.K1 if self.addr == OWNER else _keyfakes.K2)
 
 
 CONTACTS = {OWNER: FakeContact(OWNER, "Alice"), STRANGER: FakeContact(STRANGER, "Bob")}

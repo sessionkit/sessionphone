@@ -18,7 +18,7 @@ ADDR = "ada-chat@ms5.elsewhere.example"         # another host than every From b
 class Session:
     pc, chat_id, root_id, account = object(), 12, ROOT, None
 
-    async def speak(self, text, voice, who):
+    async def speak(self, text, voice, who, floor=False):
         return None
 
 

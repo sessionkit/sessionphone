@@ -17,6 +17,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import _changelog  # CHANGELOG.md plus the pending fragments in changelog.d/
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -39,8 +41,10 @@ def test_requires_python_is_the_measured_range():
 
 
 def test_docs_no_longer_say_a_mac_without_313_fetches_python():
-    for rel in ("README.md", "skills/sessionphone/SKILL.md", "CHANGELOG.md"):
-        text = _flat((ROOT / rel).read_text(encoding="utf-8"))
+    docs = [ROOT / "README.md", ROOT / "skills" / "sessionphone" / "SKILL.md", *_changelog.paths()]
+    for path in docs:
+        rel = path.relative_to(ROOT).as_posix()
+        text = _flat(path.read_text(encoding="utf-8"))
         assert "no Python 3.13" not in text, f"{rel} still says a Mac with no Python 3.13 fetches Python"
         assert "Python 3.13 (about 25 MB)" not in text, rel
 

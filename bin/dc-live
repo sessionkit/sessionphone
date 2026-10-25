@@ -13,6 +13,8 @@
 #
 # It reads a file the bot writes on connect and removes on close, so it never
 # touches the account lock and is safe to run mid-call, in a loop, anywhere.
+# A file whose call began before the running bot started is stale (a bot
+# stopped mid-call left it): no call is live, exit 1, the reason on stderr.
 #
 # Undelivered agent mail: when the bot holds mail it could not send
 # (DC_UNDELIVERED, <DC_ROOT>/undelivered), dc-live says how many are waiting
@@ -76,12 +78,31 @@ if [ ! -f "$DC_LIVE" ]; then
   [ -n "$IDONLY" ] || echo "no call is live"
   exit 1
 fi
-python3 - "$DC_LIVE" "${IDONLY:-}" "$DC_CALLS_DIR" <<'PY'
-import json, sys, time
+# >>> stale-live: the bot's start (bot.pid's second line, ps lstart in UTC and
+# C's words). A live file whose call began before this bot started was left by
+# an earlier bot stopped mid-call: no call is live. One second allowed: ps
+# gives the start to the second.
+started=""
+{ read -r _; read -r started; } < "$DC_PID_FILE" || true
+# <<< stale-live
+python3 - "$DC_LIVE" "${IDONLY:-}" "$DC_CALLS_DIR" "$started" <<'PY'
+import calendar, json, sys, time
 try:
     d = json.load(open(sys.argv[1]))
 except Exception as e:
     print(f"dc-live: live file unreadable: {e}", file=sys.stderr); sys.exit(2)
+try:   # a day under 10 is space-padded
+    start = calendar.timegm(time.strptime(" ".join(sys.argv[4].split()), "%a %b %d %H:%M:%S %Y"))
+    since = float(d["since"])
+except (ValueError, TypeError, KeyError):
+    start = since = None        # cannot judge its age: the file is believed, as before
+if start is not None and since < start - 1:
+    if not sys.argv[2]:
+        print("no call is live")
+        print(f"dc-live: {sys.argv[1]} is stale: call msg {d.get('call_id')} began "
+              f"{(start - since) / 60:.0f} min before the running bot started, so an earlier bot "
+              f"left it (stopped mid-call); this bot removes it when it next starts", file=sys.stderr)
+    sys.exit(1)
 if sys.argv[2]:
     print(d.get("call_id", "")); sys.exit(0)
 mins = (time.time() - d.get("since", time.time())) / 60

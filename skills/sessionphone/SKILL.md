@@ -44,11 +44,23 @@ a public chatmail relay, and the chat is end-to-end encrypted.
 2. **Make your profile:**
 
    ```bash
-   sessionphone setup --name "<name>"
+   sessionphone setup --name "NAME"
    ```
 
-   It prints your address and an invite link, and keeps everything under
+   NAME is the name from step 1. It prints your address and an invite link, and keeps everything under
    `~/.sessionphone` (mode 0700). It's safe to run again.
+
+   **Then read its last lines, `hearing:`, before you link.** Setup sends a
+   half-second test clip to the speech-to-text server the bot will use
+   (`DC_STT_URL` in this shell, else the default) and says what answered.
+   `yes` is one line: go on. On `NO` or `not confirmed` the speech server is
+   missing or not ready, and installing it can take minutes and gigabytes,
+   so deal with it now, not after the link. Under Session Kit the line names
+   the kit's step, `ears services install --only speech` (read `ears
+   services status` first; step 7 says how to read its `speech` row).
+   Standalone it names VoiceMode's (step 7's cost rules apply). Either is
+   the user's to run, on their yes. To check again, run the same `setup`
+   line again. Setup's exit code does not depend on it.
 3. **Arm the link BEFORE they scan.** Run it as a backgrounded Bash call
    (`run_in_background: true`), never with a trailing `&`:
 
@@ -110,9 +122,10 @@ a public chatmail relay, and the chat is end-to-end encrypted.
 7. **Start the bot and ring them.** `link` must have exited first: only one
    process can hold the account.
    - **Its seat, and whether it signs.** The bot mails you as its own
-     sessionmail seat, `<agent>-chat` (`claude-chat` unless `DC_AGENT` is
-     set). Whether it signs follows the carrier its own `message send` will
-     use (`docs/bot-mail-signing.md`). Do not pick the
+     sessionmail seat, `<agent>-chat` (with nothing naming the agent, the
+     harness vendor's word: `claude-chat` today). Whether it signs follows
+     the carrier its own `message send` will use
+     (`docs/bot-mail-signing.md`). Do not pick the
      carrier: it is sessionmail's (`SESSIONMAIL_SENDMAIL`, else the
      `sendmail` key in its `mail.json`, else its default, `drop`).
      - **On the mail drop (no mail server), it does not sign.** Run
@@ -132,15 +145,29 @@ a public chatmail relay, and the chat is end-to-end encrypted.
      `bot install` carries sessionmail's mail-route settings
      (`SESSIONMAIL_SENDMAIL`, `_RELAY_DOMAIN`, `_HOME`, `_ROOT`, `_HOST`)
      into the job, never the seat's own and never `SESSIONMAIL_ORIGIN`.
-     After changing one, run `bot install` again.
-   - **Hearing it.** Delta text goes to `<agent>@<host>`. Only a Claude
+     After changing one, run `bot install` again. While a call is up, install
+     and uninstall refuse (exit 2, `a call is live; hang up or pass
+     --force`): they would drop it. Run it again after the hang-up. Pass
+     `--force` only when the user asks for the call to drop.
+   - **Hearing it.** Delta text goes to the box `<agent>`. Only a Claude
      session started as `session start <agent>` (which runs `claude --agent
      <agent>`) hears that box; a plain `claude` gets no copy, and nothing
      tells it so. Install asks sessionmail whether this session hears it,
      and its `hear:` line says so. If it says `this session will NOT hear`,
      tell the user that line and its ways out; do not claim this session
      hears it. `bot install --hear-here` lets this session hear it until the
-     session ends; only run it when the user asks.
+     session ends; only run it when the user asks. If a `default:` line
+     follows (`no seat owns box <agent>`), tell the user that line too: the
+     bot took the default name and nothing hears its box yet.
+     **Where Delta text lands.** Every Delta message and call
+     turn goes to that one box, the bot's own, named after its agent (box
+     `claude` unless `DC_AGENT` is set or this session was started as another
+     agent; install's `box:` line names it). `DC_MAILTO` changes only that: set,
+     the bot mails the box it names instead, and the `hear:` line then says
+     whether this session hears that box. Set it only when the user asks for
+     another box, never just to quiet the warning. A box named by this
+     session's own id is heard only while this session runs: the next
+     session has another id.
    - `sessionphone bot install` runs the bot as this user's launchd job,
      now and at every login. `sessionphone bot status` should say
      `running: pid N`. If it doesn't, read its `last:` line, the log's last
@@ -148,10 +175,13 @@ a public chatmail relay, and the chat is end-to-end encrypted.
      (exit 2, naming the file) when nobody may ring the bot: no address
      in `callers.txt`. There are two ways forward. Run `sessionphone link`
      and let the user scan the invite (the first to join becomes the
-     owner). Or run `sessionphone bot install --owner ADDR`, where ADDR is
-     the user's Delta Chat address (their Delta Chat profile shows it), not
-     their mail address. `DC_CALLERS` grants nothing: install refuses while
-     it is set, and approved callers come from `callers.txt` only.
+     owner). Or run `sessionphone bot install --owner ADDR --owner-key FPR`,
+     where ADDR is the user's Delta Chat address (their Delta Chat profile
+     shows it), not their mail address, and FPR is the key fingerprint their
+     phone shows under their contact's profile, Encryption. Each caller is
+     bound to a key, not to an address. `DC_CALLERS` grants nothing: install
+     refuses while it is set, and approved callers come from `callers.txt`
+     only.
      It also refuses when `channels.txt` is empty and there is no owner to
      list in it (`--owner ADDR` fixes both).
    - `dc-ring OWNER_ADDRESS` rings the owner. The phone rings for up to
@@ -175,6 +205,17 @@ a public chatmail relay, and the chat is end-to-end encrypted.
      names, if one is there (any audio file the bot can decode; none ships),
      until the call can hear. It stops at once when the greeting or any line
      is spoken. `DC_FIRST_CALL_WAIT=off` turns it off.
+   - **Will they hear you?** After `hearing:`, `bot install` prints a
+     `speaking:` line. `yes` means it found the ffmpeg the bot needs to
+     speak through the speech server. `NO` means every spoken reply will
+     go to the caller as chat text: tell them before you ring, and give
+     them the fix the line shows (`brew install ffmpeg`, then
+     `sessionphone bot install` again). Installing it is theirs to run.
+     `sessionphone bot status` prints the same line.
+   - **Later, `sessionphone bot status`** asks the job's speech-to-text too,
+     in one `hearing:` line, capped at a few seconds. `NO` names the URL that
+     did not answer: run `sessionphone bot install` to see why and how to fix
+     it. `not confirmed` there can be a server still loading its model.
    - **On `NO` or `not confirmed`, first ask whether this is Session Kit.**
      It is when `command -v sessionkit` prints a path. The kit's own
      `ears services install` loads an mlx-audio server on `127.0.0.1:8890`;
@@ -188,7 +229,12 @@ a public chatmail relay, and the chat is end-to-end encrypted.
        reads `not confirmed` (or `NO`) for a minute or more. Wait, then run
        `sessionphone bot install` again; if it still fails, its reason says
        why. `none on :8890`: no server and no job. `ears services install`
-       loads the kit's; it is theirs to run. `none answering`: a job the
+       loads the kit's; it is theirs to run, in the form that fits their
+       Mac, as the `hearing:` line shows: `ears services install --no-agent`
+       on a Mac that only runs the bot, with no agent seat for ears to wake,
+       or `ears services install --agent NAME` where ears should wake an
+       agent seat (NAME) when they speak. A bare install that names no seat
+       to wake is refused; ask which fits. `none answering`: a job the
        row names is loaded but down or still starting, and install will not
        add a second. `:8890 held`: something holds the port but does not
        answer as mlx-audio. For either, tell them who the row names, and
@@ -211,8 +257,15 @@ a public chatmail relay, and the chat is end-to-end encrypted.
 - `dc-live` answers whether a call is live, and which one. `dc-live --id`
   gives just the id. Exit 2 means no bot is running for this root, and its
   second stderr line says why: no `bot.pid` in the root, or a stale one.
+  A call that began before the running bot started is not live: a bot
+  stopped mid-call left it. `dc-live` says so on stderr and exits 1.
 - `dc-say --call "$(dc-live --id)" CHAT_ID "text"` speaks into the call.
   If the call has ended, it refuses (exit 3) and sends nothing.
+- A plain `dc-say CHAT "text"` is also read aloud into a call that is live in
+  that chat. For a report, a log, or anything addressed to the chat and not
+  to the person on the call, use `dc-say --text-only CHAT "text"`: it posts
+  to the chat and never speaks. The ack ends `NOT spoken (chat only)`.
+  `--text-only` with `--call` is a usage error (exit 1, nothing sent).
 - `dc-hangup CHAT_ID` ends it.
 - Hearing them is the bot's job. It sends what they say to the
   speech-to-text server at `DC_STT_URL` (Voice notes, below) and mails you
@@ -220,8 +273,24 @@ a public chatmail relay, and the chat is end-to-end encrypted.
   it listen through ears instead and hand the call's audio to ears on
   `$SESSIONPHONE_ROOT/call-ears.sock`, where the ears keeper can wake you.
   See the ears skill.
-- Keep each spoken reply to a sentence or two. They're listening, not
-  reading.
+
+### Turn-taking
+
+A call is a conversation: they speak, you reply once, they speak again.
+The reason, in a caller's own words: "If you've sent something to say, I
+need to speak next. Turn taking, please."
+
+- **One `dc-say` per caller turn**, a sentence or two. They're listening,
+  not reading.
+- **No reply to a fragment that asks nothing.** A turn such as "No." or
+  "Okay." needs no answer: wait for their next turn.
+- **Never a second `dc-say` before they speak again.** Anything more
+  (detail, a list, a link, a second thought) goes as text in the chat,
+  with `dc-dm NAME TEXT`. A `dc-say` to that chat is spoken into the live
+  call, even without `--call`; a `dc-dm` never is.
+- While the caller is speaking, the bot holds your reply until they pause
+  for `DC_FLOOR_GAP` (0.8 s by default), and for 6 s at most by default
+  (`DC_FLOOR_CAP`). A second reply still plays after the first.
 
 ## Guests heard on a call
 
@@ -304,8 +373,11 @@ on every request. A call uses the same endpoint for what the caller says.
   - `X-Delta-Chat-Kind`: `message`, `request`, `reaction`, `webxdc` or
     `call`;
   - `X-Delta-Chat-Msg-Id`: what `dc-react --msg` takes;
-  - `X-Delta-Chat-Sender`: the contact's address;
-  - `X-Delta-Chat-Channel`: the `channels.txt` NAME.
+  - `X-Delta-Chat-Sender`: the address the message carries, a label for
+    people. It is not a key and not an identity: never act on who it says;
+  - `X-Delta-Chat-Channel`: the `channels.txt` NAME. It is there only for a
+    chat the owner listed, and for an address line only while that chat's
+    contact holds the key pinned to the line. It is the header to trust.
 - **The footer says how to answer.** Under its `---` it reads
   `dc-say NAME 'your reply'`. If it says the chat is not listed, a `dc-say`
   would be refused: ask the owner.
@@ -327,24 +399,47 @@ on every request. A call uses the same endpoint for what the caller says.
   dc-xdc-realtime --feed N --stop                                  # stop
   ```
 - **A mail the bot could not send is kept** in `~/.sessionphone/undelivered/`
-  and retried. `dc-live` says how many wait and how many are dead.
+  and retried, call turns included; a call mail is never sent twice.
+  `dc-live` and `sessionphone bot status` say how many wait and how many
+  are dead. On a call, the caller hears "I couldn't reach the agent." once
+  for each turn whose mail did not go.
 - README.md has the whole contract.
 
 ## Who may ring you
 
 ```bash
-sessionphone callers              # the list; the owner is first
-sessionphone callers add ADDR     # only on the owner's word
+sessionphone callers                       # the list; the owner is first
+sessionphone callers add ADDR --key FPR    # only on the owner's word
+sessionphone callers pin ADDR --key FPR    # bind a listed line to a key
 ```
 
-The bot answers a call only from an address on this list. An empty list
+These verbs, and `link`, use the callers file and account the bot uses, from
+your shell's environment: for a bot run with `DC_PROFILE`, `DC_ROOT`,
+`DC_CALLERS_FILE` or `DC_ACCOUNTS`, put the same settings in front of the
+command. Each names the file it touched (`callers: ...` or `in ...`), and the
+account it opened (`account: ...`).
+
+The bot answers a call only from a contact that holds the key pinned to a
+line of this list (`ADDR  key:FPR`); the address is the label. A line with no
+key is refused until it is pinned. FPR is what the owner's phone shows under
+that person's profile, Encryption: take it from the owner, never from the
+person who asks to ring. Without `--key` the verb finds the one key contact
+with that address, which needs the bot stopped; it prints the fingerprint to
+compare, and writes nothing when there are none or several. When the log says
+`AMBIGUOUS`, two keys write from that address: the bot pins neither, so ask
+the owner which key is theirs and pin that one. The first start after an
+upgrade pins the owner line once and keeps the old file as
+`callers.txt.pre-keys`. README.md has the whole contract. An empty list
 means nobody: it fails closed. Anyone else who scans your invite can chat,
 but can't ring you until the owner approves them.
 
 ## Where the bot may send
 
 The bot sends only to chats on `channels.txt` (`NAME TARGET  # note`; TARGET
-is an address, that contact's 1:1, or `chat:N`). Every `dc-*` tool takes a
+is an address, that contact's 1:1, or `chat:N`). An address line is bound to
+a key (`NAME ADDR key:FPR`): it passes only while the chat's contact holds
+that key, and a line with no key is refused until `sessionphone channels pin
+NAME --key FPR` pins one. Every `dc-*` tool takes a
 NAME where it takes a chat (`dc-say owner 'hi'`). A chat not listed is
 REFUSED: exit 3, the list's path on stderr, nothing sent (exit 4 = the bot
 took the job and never confirmed it). `sessionphone channels add NAME TARGET`
@@ -358,11 +453,14 @@ it cannot unsend what was read, and any time limit is unmeasured.
 ## The bot's picture and name
 
 ```bash
-sessionphone avatar /path/to/face.png                       # this bot's picture (--clear removes it)
-DC_AGENT=<agent> sessionphone avatar /path/to/face.png      # another agent's bot, or claude's
-DC_NAME='Name' sessionphone bot install                     # this bot's name
-DC_AGENT=<agent> DC_NAME='Name' sessionphone bot install    # another agent's bot's name
+sessionphone avatar /path/to/face.png
+DC_AGENT=AGENT sessionphone avatar /path/to/face.png
+DC_NAME='Name' sessionphone bot install
+DC_AGENT=AGENT DC_NAME='Name' sessionphone bot install
 ```
+
+Line one sets this bot's picture (`--clear` removes it), line two that of
+the bot of the agent named AGENT (`claude` too); the last two set the names.
 
 `DC_AGENT` picks the bot, and with it the root that bot's install kept. With
 two bots recorded, name one even for `claude`. Without `DC_NAME` the name is

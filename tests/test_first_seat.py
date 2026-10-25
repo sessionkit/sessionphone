@@ -74,6 +74,9 @@ if a[:2] == ["setup", "--box"]:
     out("setup")
 if a[:1] == ["path"]:
     out("path")
+if a[:2] == ["subscription", "list"] and len(a) > 2:
+    # the BOX form, who hears one box: sub_list_box, when the test gives it
+    out("sub_list_box" if "sub_list_box" in ans else "no_box_form")
 if a[:2] == ["subscription", "list"]:
     # after a `subscription add` this session hears the box: sub_list_after, when given
     out("sub_list_after" if (d / "subscribed").exists() and "sub_list_after" in ans else "sub_list")
@@ -123,6 +126,8 @@ class Fake:
             "sub_list": [2, "", ("message subscription list: no session id and no seat in the "
                                  "environment (looked for CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID)\n")],
             "sub_add": [0, "row: claude -> 11111111-2222-3333-4444-555555555555\n", ""],
+            # the BOX form, unless a test gives sub_list_box: a sessionmail that cannot read it
+            "no_box_form": [64, "", "unexpected: subscription list BOX\n"],
         }
         self._write()
 
@@ -257,9 +262,9 @@ def test_t1_the_agent_runs_before_install_writes_anything_of_its_own(rig, monkey
     seen = []
     real = service.add_owner
 
-    def add_owner(addr, path):
+    def add_owner(addr, path, key=None):
         seen.append(_installs(rig))
-        return real(addr, path)
+        return real(addr, path, key)
     monkeypatch.setattr(service, "add_owner", add_owner)
     r = _install("--owner", OWNER)
     assert r.exit_code == 0, r.output
@@ -676,11 +681,14 @@ def test_t11_dc_log_in_the_plist_names_the_bots_log(rig, status_rig, tmp_path):
 
 # ---- T12: no DC_HOST on a Mac whose DNS name is reverse-DNS ------------------------
 
-def test_t12_the_default_to_is_the_short_host_and_install_passes(rig, monkeypatch):
+def test_t12_the_default_to_is_the_bare_agent_and_install_passes(rig, monkeypatch):
+    """PHONE-248: the box install prints is bare, never claude@<host> (the line a
+    user copied into DC_MAILTO, which a host rename then broke)."""
     monkeypatch.setattr(dc_env.socket, "getfqdn", lambda: "1.0.0.0.ip6.arpa")
     r = _install()
     assert r.exit_code == 0, r.output
-    assert "box:       Delta text goes to claude@stranger, box " in r.output
+    assert "box:       Delta text goes to claude, box " in r.output
+    assert "claude@" not in r.output
 
 
 # ---- T13: the box Delta text goes to -----------------------------------------------
@@ -690,7 +698,7 @@ def test_t13_install_makes_the_box_and_believes_only_message_path(rig):
     assert r.exit_code == 0, r.output
     argvs = rig.argvs()
     assert argvs.index(["setup", "--box", "claude"]) < argvs.index(["path", "claude"])
-    assert f"box:       Delta text goes to claude@stranger, box {rig.tmp}/mail/agents/claude" in r.output
+    assert f"box:       Delta text goes to claude, box {rig.tmp}/mail/agents/claude" in r.output
 
 
 def test_t13_no_box_after_setup_is_exit_2_naming_the_step(rig):
@@ -729,7 +737,7 @@ def test_t13_setup_makes_the_box_too(rig, monkeypatch):
     r = CliRunner().invoke(cli, ["setup", "--name", "Claude"])
     assert r.exit_code == 0, r.output
     assert ["setup", "--box", "claude"] in rig.argvs()
-    assert "box:     Delta text goes to claude@stranger, box " in r.output
+    assert "box:     Delta text goes to claude, box " in r.output
     assert f"hear:    {HEAR_CLAUDE}{UNASKED}" in r.output
     rig.answer("path", 2, "", "no such box\n")
     r = CliRunner().invoke(cli, ["setup", "--name", "Claude"])
@@ -744,7 +752,7 @@ HEAR_CLAUDE = ("To hear Delta messages, start Claude with: session start claude 
                "(it runs `claude --agent claude`: only a session started as claude hears the box; "
                "a plain `claude` gets no copy of its mail, and nothing says so). To send Delta "
                "text to another box, install again with DC_AGENT=NAME (the agent a session is "
-               "started as) or DC_MAILTO=ADDR (a box a session hears).")
+               "started as) or DC_MAILTO=BOX (a box a session hears).")
 # conftest's sessionmail gives no answer, so the hear line says nothing was measured
 UNASKED = (" Whether this session hears it was not measured: `message subscription list` "
            "gave no answer (not asked in the tests).")

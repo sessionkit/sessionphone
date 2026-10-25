@@ -1072,3 +1072,37 @@ def test_the_changelog_names_the_feed_under_unreleased_added():
     unreleased = log[at:log.index("\n## [", at + 5)]
     added = unreleased[unreleased.index("### Added"):]
     assert "`dc-xdc-realtime --feed MSG_ID`" in added and "DC_XDC_FEED_CHATS" in added
+
+
+# --- a long heard turn: what the feed carries, and what it drops ---------------
+
+LONG_WORDS = [f"w{i:04d}" for i in range(2500)]
+LONG = " ".join(LONG_WORDS)                  # 14,999 characters
+
+
+def _words(payloads):
+    text = " ".join(p["partial"] if "partial" in p else p["final"] for p in payloads)
+    return re.findall(r"\bw\d{4}\b", text)
+
+
+def test_a_long_run_of_partial_chunks_is_carried_whole_across_sends():
+    """The queue keeps what does not fit for the next send: no chunk is lost."""
+    q = xdc_feed.Pending()
+    for i in range(25):
+        q.add("partial", " ".join(LONG_WORDS[i * 100:(i + 1) * 100]))
+    sent = []
+    while (p := q.take()) is not None:
+        sent.append(p)
+    assert len(sent) > 1 and _words(sent) == LONG_WORDS and q.dropped == 0
+
+
+def test_a_long_final_is_cut_for_display_only():
+    """The feed's cut is a display cap: the app's live line is bounded at
+    MAX_TEXT, in order, and the heard record it came from (what agents read)
+    is left whole."""
+    rec = turn(LONG)
+    kind, payload = xdc_feed.payload_for(rec, "probe", "Probe")
+    shown = _words([payload])
+    assert kind == "final" and len(payload["final"]) == xdc_feed.MAX_TEXT
+    assert 0 < len(shown) < len(LONG_WORDS) and shown == LONG_WORDS[:len(shown)]
+    assert rec["text"] == LONG

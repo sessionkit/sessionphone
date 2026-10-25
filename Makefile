@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 BUMP ?= patch
 # every tracked *.sh, and every tracked file whose FIRST line is a sh/bash shebang
 SHELLSCRIPTS := $(shell { git ls-files -z | xargs -0 awk 'FNR==1 && /^\#!\/(usr\/bin\/env )?(ba)?sh/ {print FILENAME}'; git ls-files '*.sh'; } | sort -u)
-.PHONY: help install test test-vision bridge lint format check browser build release push publish
+.PHONY: help install test test-vision bridge lint format check browser build changelog release push publish
 
 help:  ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -42,8 +42,13 @@ browser:  ## the web page in headless Chrome: scratch HTTPS localhost, virtual p
 build:  ## wheel + sdist into dist/
 	@uv build
 
+changelog:  ## print [Unreleased] as the next release will write it, changelog.d/ collated in; writes nothing
+	@python3 scripts/release.py --preview
+
+# release.py is stdlib-only, so python3 runs it: a plain `uv run` would re-lock
+# the project before the script starts.
 release:  ## bump (BUMP=patch|minor|major) or set (VERSION=X.Y.Z), then mirror, changelog, commit, tag
-	@uv run python scripts/release.py $(or $(VERSION),$(BUMP))
+	@python3 scripts/release.py $(or $(VERSION),$(BUMP))
 
 push:  ## push the branch and the tags to origin (release never pushes; this is the line it printed)
 	@git push origin HEAD && git push origin --tags

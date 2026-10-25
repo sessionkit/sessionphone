@@ -131,16 +131,17 @@ def test_a_dotless_short_host_or_a_dotted_name_is_no_problem(host):
     assert dc_env.host_part_problem(host) is None
 
 
-# --- why HOST, mailto() and id_host stay on mail_host ----------------------------
+# --- why HOST and id_host stay on mail_host (mailto() is bare: PHONE-248) --------
 
 @pytest.mark.parametrize("env", [{"SESSIONMAIL_HOST": " box "}, {"SESSIONMAIL_HOST": " "}])
 def test_short_host_would_change_mail_host_beyond_case_so_host_stays(env, monkeypatch):
     """mail_host is sessionmail's host_of: no strip, and ' ' counts as set. short_host
-    strips, and falls through on ' '. Moving HOST onto it would change these values."""
+    strips, and falls through on ' '. Moving HOST onto it would change these values.
+    The default To carries neither: it is the bare agent (PHONE-248)."""
     monkeypatch.setattr(dc_env.socket, "gethostname", lambda: "stranger")
     today, rule = dc_env.mail_host(env, ask=False), dc_env.short_host(env, ask=False)
     assert today.lower() != rule
-    assert dc_env.mailto({**env, "DC_AGENT": "ada"}) == f"ada@{today}"
+    assert dc_env.mailto({**env, "DC_AGENT": "ada"}) == "ada"
 
 
 @pytest.mark.parametrize("env", [{}, {"SESSIONMAIL_HOST": " box "}, {"SESSIONMAIL_HOST": "Box"},

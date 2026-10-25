@@ -5,8 +5,10 @@ import pytest
 from click.testing import CliRunner
 
 from sessionphone import account, paths
+from sessionphone.bridge import dc_env
 from sessionphone.cli import main
 
+K1 = "753E8B231F10DDFB82D742DE9D43B582A752BA4C"     # tests/fixtures/openpgp/test-v4-key-1.b64
 LINK = "https://i.delta.chat/#ABCDEF0123&v=3&i=x&s=y&a=bot%40relay.example&n=Test%20Agent"
 
 
@@ -19,8 +21,8 @@ def root(tmp_path, monkeypatch):
 
 def test_root_follows_the_environment(root) -> None:
     assert paths.root() == root
-    assert paths.callers_path() == root / "callers.txt"
-    assert paths.accounts_dir() == root / "accounts"
+    assert dc_env.callers_file() == root / "callers.txt"
+    assert dc_env.accounts_dir() == root / "accounts"
 
 
 def test_create_makes_it_private(root) -> None:
@@ -49,13 +51,13 @@ def test_callers_add_is_idempotent_lowercase_and_private(root) -> None:
     assert account.add_caller("Owner@Example.org", "owner") is True
     assert account.add_caller("owner@example.org") is False
     assert account.read_callers() == ["owner@example.org"]
-    assert paths.callers_path().stat().st_mode & 0o777 == 0o600
-    assert paths.callers_path().read_text() == "owner@example.org  # owner\n"
+    assert dc_env.callers_file().stat().st_mode & 0o777 == 0o600
+    assert dc_env.callers_file().read_text() == "owner@example.org  # owner\n"
 
 
 def test_callers_file_comments_and_blank_lines(root) -> None:
     paths.ensure_private(create=True)
-    paths.callers_path().write_text("# who may ring\n\nA@x.org  # owner\nb@y.org\n")
+    dc_env.callers_file().write_text("# who may ring\n\nA@x.org  # owner\nb@y.org\n")
     assert account.read_callers() == ["a@x.org", "b@y.org"]
 
 
@@ -72,7 +74,7 @@ def test_invite_name_decodes_n(root) -> None:
 
 def test_display_name_comes_from_the_saved_invite(root) -> None:
     paths.ensure_private(create=True)
-    paths.invite_path().write_text(LINK + "\n")
+    dc_env.invite_file().write_text(LINK + "\n")
     assert account.display_name() == "Test Agent"
 
 
@@ -100,11 +102,12 @@ def test_cli_callers_before_setup_exits_2(root) -> None:
 def test_cli_callers_add_then_list(root) -> None:
     paths.ensure_private(create=True)
     runner = CliRunner()
-    added = runner.invoke(main, ["callers", "add", "Owner@Example.org", "--note", "owner"])
+    added = runner.invoke(main, ["callers", "add", "Owner@Example.org", "--note", "owner", "--key", K1])
     assert added.exit_code == 0, added.output
-    assert "approved: owner@example.org" in added.output
+    assert f"approved: owner@example.org  key:{K1}" in added.output
     listed = runner.invoke(main, ["callers"])
-    assert listed.output.strip() == "owner@example.org"
+    assert listed.output.splitlines() == [f"callers: {dc_env.callers_file()}",
+                                          f"owner@example.org  key:{K1}"]
 
 
 def test_cli_invite_before_setup_exits_2(root) -> None:

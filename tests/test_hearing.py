@@ -8,7 +8,7 @@ that STT to transcribe a half-second test clip, the bot's own request.
 These pin design.md section 9: the verdict comes from the STT, never from
 `import ears`; the probe sends the bot's request; `probing <url> (read-only)`
 is said first; it is judged on the job's env; each branch; the wording rules
-(ruling (b), S3); `setup` never probes; and the conftest tripwire that keeps
+(ruling (b), S3); and the conftest tripwire that keeps
 every test off a live STT. No test here reaches a live STT: the runner is a
 fake, or curl runs against a stub server on an ephemeral loopback port, or
 against the tripwire's closed port.
@@ -27,7 +27,7 @@ from typing import ClassVar
 import pytest
 from click.testing import CliRunner
 
-from sessionphone import account, hearing, service
+from sessionphone import hearing, service
 from sessionphone.bridge import dc_env, stt
 from sessionphone.cli import main as cli
 
@@ -306,7 +306,7 @@ def test_no_under_the_kit_points_at_ears_services_never_voicemode(env, kit_path)
     assert "Do not install VoiceMode's mlx-audio beside it: one of the two would crash-loop" in text
     # status first, read-only; the installer only for `none on :8890`
     status = lines.index(f"{hearing.INDENT}  {hearing.KIT_STATUS}")
-    install = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL}")
+    install = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL_PHONE}")
     assert status < install
     assert "(read-only):" in lines[status - 1]
     assert "`none on :8890`: no server and no job" in _flat(lines[status + 1:install])
@@ -314,7 +314,8 @@ def test_no_under_the_kit_points_at_ears_services_never_voicemode(env, kit_path)
     # the first-run download belongs to the `mlx-audio on :8890` row (as in
     # SKILL.md step 7), so its wait-and-retry comes before the other rows
     again = lines.index(f"{hearing.INDENT}  sessionphone bot install")
-    up = _flat(lines[install + 1:again])
+    agent = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL_AGENT}")
+    up = _flat(lines[agent + 1:again])
     assert up.startswith("`mlx-audio on :8890`: it is up, and its first request downloads that model")
     assert "can read `not confirmed` (or NO) for a minute or more. Wait, then check again" in up
     assert "No `speech` row" not in up and "VoiceMode's" not in up
@@ -323,6 +324,32 @@ def test_no_under_the_kit_points_at_ears_services_never_voicemode(env, kit_path)
     assert "No `speech` row: this kit loads no speech server" in rest
     assert rest.endswith("the sessionphone skill offers VoiceMode's.")
     assert not any("DC_STT_URL=" in ln for ln in lines)
+
+
+def test_under_the_kit_the_installer_is_given_in_both_forms_each_with_the_mac_it_fits(kit_path):
+    """A bare `ears services install` that names no seat to wake is refused (exit 2),
+    and which Mac this is cannot be read from here. So the line gives both forms
+    ears accepts, one command line each, each after the line saying which Mac it
+    fits: --no-agent for a Mac that only runs the bot, --agent NAME for a Mac with
+    an agent seat to wake. The bare form is never offered as a command."""
+    lines = _kit_lines({}, FakeCurl(rc=7), kit_path)
+    cmds = [ln.strip() for ln in lines if ln.startswith(f"{hearing.INDENT}  ")]
+    assert hearing.KIT_INSTALL not in cmds
+    assert hearing.KIT_INSTALL_PHONE == "ears services install --no-agent"
+    assert hearing.KIT_INSTALL_AGENT == "ears services install --agent NAME"
+    phone = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL_PHONE}")
+    agent = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL_AGENT}")
+    assert phone < agent
+    status = lines.index(f"{hearing.INDENT}  {hearing.KIT_STATUS}")
+    # the phone-only case: its fit comes right before its command
+    before_phone = _flat(lines[status + 1:phone])
+    assert before_phone.startswith("`none on :8890`: no server and no job")
+    assert "a bare install that names no seat to wake is refused" in before_phone
+    assert before_phone.endswith(hearing.KIT_FITS_PHONE)
+    assert "only runs the bot, with no agent seat here for ears to wake" in before_phone
+    # the agent-seat case: its own fit, between the two commands
+    assert _flat(lines[phone + 1:agent]) == hearing.KIT_FITS_AGENT
+    assert "agent seat that ears should wake when you speak (NAME is that seat)" in hearing.KIT_FITS_AGENT
 
 
 def test_no_under_the_kit_at_a_default_off_the_route_carries_the_setting(monkeypatch, kit_path):
@@ -443,7 +470,9 @@ def test_install_under_the_kit_points_at_ears_services(rig, monkeypatch, kit_pat
     text = _flat(block)
     assert block[0].startswith("hearing:   NO.") and "This is Session Kit" in text
     assert any(ln.strip() == hearing.KIT_STATUS for ln in block)
-    assert any(ln.strip() == hearing.KIT_INSTALL for ln in block)
+    assert any(ln.strip() == hearing.KIT_INSTALL_PHONE for ln in block)
+    assert any(ln.strip() == hearing.KIT_INSTALL_AGENT for ln in block)
+    assert not any(ln.strip() == hearing.KIT_INSTALL for ln in block)
     assert "voicemode service install" not in r.output
 
 
@@ -636,19 +665,8 @@ def test_the_probe_never_asks_ears_src_or_imports_ears(monkeypatch):
     assert "import ears" not in code and "ears_src()" not in code.split('"""', 2)[2]
 
 
-# ---- setup never probes (review D4) -----------------------------------------
-
-def test_setup_never_probes(monkeypatch):
-    def no(*a, **k):
-        raise AssertionError("setup reached the hearing probe")
-    monkeypatch.setattr(hearing, "probe", no)
-    monkeypatch.setattr(hearing, "RUN", no)
-    monkeypatch.setattr(account, "setup", lambda name, status, relay: {
-        "root": "/r", "addr": "bot@relay.example", "displayname": name, "created": True,
-        "invite_file": "/r/invite.txt", "invite": "https://i.delta.chat/#x"})
-    r = CliRunner().invoke(cli, ["setup", "--name", "Claude"])
-    assert r.exit_code == 0, r.output
-    assert "probing" not in r.output and "hearing" not in r.output
+# ---- setup probes too, before the link: tests/test_stt_before_link.py (PHONE-251)
+# (review D4's "setup never probes" pin is reversed there.)
 
 
 # ---- the tripwire: no test reaches a live STT (conftest stt_tripwire) --------

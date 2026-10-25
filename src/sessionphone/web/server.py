@@ -330,7 +330,7 @@ def run(webdir: Path, *, port: int, host: str, tls: tuple[Path, Path] | None,
     anything is made on disk.
 
     With --legs each finished turn of a web call is mailed to the seat:
-    `mail_to`, else DC_MAILTO, else <DC_AGENT>@HOST, read from the
+    `mail_to`, else DC_MAILTO, else the bare <DC_AGENT>, read from the
     heard log in `heard_dir` (else as ears-mail finds it). --legs is refused
     with no seat named, or on a junk host, after the --legs refusals above it.
     With no --legs, --mail-to and --heard-dir are refused (exit 2), not ignored:

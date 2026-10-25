@@ -68,6 +68,7 @@ def test_claude_md_is_export_ignored():
 @needs_checkout
 @pytest.mark.parametrize("path", ["README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE",
                                   ".claude-plugin/plugin.json",
+                                  "changelog.d/README.md",
                                   "skills/sessionphone/SKILL.md",
                                   "skills/sessionphone/CLAUDE.md",
                                   "skills/sessionphone/design/notes.md",
@@ -110,7 +111,8 @@ def test_the_archive_drops_design_and_nothing_else_new():
     assert shipped - names == set()
 
 
-SHIPPED_DOCS = ["README.md", "AGENTS.md", "CHANGELOG.md", "skills"]
+# changelog.d/ holds the pending entries the release moves into CHANGELOG.md.
+SHIPPED_DOCS = ["README.md", "AGENTS.md", "CHANGELOG.md", "changelog.d", "skills"]
 
 
 def shipped_doc_files():

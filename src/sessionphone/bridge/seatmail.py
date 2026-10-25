@@ -39,9 +39,11 @@ Both are retried.
 
 THE CALL MAILS (M5) go here too. Each carries or threads on a Message-ID the
 bot mints itself, and send() hands it over as `--message-id`, `-r` and
-`--supersedes`, never as a raw header (those are message send's own). An M5 is
-NEVER spooled: sessionmail has no duplicate check, so a retried M5 could land
-twice under one id. Its ids are minted at id_host(), sessionmail's own host,
+`--supersedes`, never as a raw header (those are message send's own). A failed
+M5 is spooled like any other mail, except a call's preview, which
+the turn supersedes. sessionmail has no duplicate check, so before the spool
+retries a mail under its `--message-id`, delivered() reads the target box for
+that id (read-only) and never sends it twice. Its ids are minted at id_host(), sessionmail's own host,
 and child_env pins SESSIONMAIL_HOST to the same value, so the two cannot
 disagree. A web call's turns (web/turns.py) send as the web seat with `seat=`
 and `from_name=`, under the same DC_SIGNER_* key.
@@ -579,8 +581,12 @@ def on_host(address: str, environ: Mapping[str, str] | None = None) -> bool:
     """Is ADDRESS's domain this host, as sessionmail's drop judges it: its mail
     host, or a name under it, and never a reverse-DNS name? The one judgement
     is dc_env.is_this_host; the domain's trailing dot is stripped first, so
-    `x.arpa.` is still a reverse-DNS name."""
+    `x.arpa.` is still a reverse-DNS name. A bare address (no `@`: `claude`,
+    `ada+web`) is on this host: sessionmail adds this host to it, on both
+    carriers. `x@`, with an empty domain, is not."""
     e = os.environ if environ is None else environ
+    if "@" not in address:
+        return bool(address.strip())
     domain = address.rpartition("@")[2].strip().rstrip(".")
     return dc_env.is_this_host(domain, dc_env.mail_host(e) or "")
 
@@ -616,6 +622,102 @@ def box_there(name: str, environ: Mapping[str, str] | None = None) -> bool:
     return there
 
 
+def box_path(name: str, environ: Mapping[str, str] | None = None) -> pathlib.Path | None:
+    """The maildir sessionmail resolves the box NAME to (`message path NAME`,
+    exit 0 and a path on stdout), asked in the send's own environment, never
+    kept; None when it does not resolve, or `message` cannot be run.
+    READ-ONLY: `message path` prints the maildir and does nothing else."""
+    e = os.environ if environ is None else environ
+    exe = MESSAGE or resolve_message(e)
+    if exe is None:
+        return None
+    try:
+        r = subprocess.run([exe, "path", name], capture_output=True, text=True, timeout=TIMEOUT_S,
+                           check=False, stdin=subprocess.DEVNULL, env=root_env(child_env(e)))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (r.stdout or "").strip().splitlines()
+    if r.returncode != 0 or not out or not out[-1].strip():
+        return None
+    return pathlib.Path(out[-1].strip()).expanduser()
+
+
+def _header_id(path: pathlib.Path) -> str | None:
+    """The Message-ID in the header block of the mail file at PATH, bare (no
+    <>); None if it has none or cannot be read. Reads the header block only,
+    with folded lines joined, as sessionmail's own find_messages compares it."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(65536)
+    except OSError:
+        return None
+    lines = head.decode("utf-8", "replace").replace("\r\n", "\n").split("\n")
+    found, grab = None, False
+    for line in lines:
+        if not line.strip():
+            break                                   # the end of the header block
+        if line[:1] in (" ", "\t"):
+            if grab:
+                found = (found or "") + line.strip()
+            continue
+        name, _, value = line.partition(":")
+        grab = name.strip().lower() == "message-id"
+        if grab:
+            found = value.strip()
+    return bare(found) if found else None
+
+
+DELIVERED_SLACK_S = 300.0   # a file delivered this long before the record's first try still counts
+
+
+def delivered(msgid: str, to: str, since: float | None = None,
+              environ: Mapping[str, str] | None = None) -> bool | None:
+    """Is a mail with Message-ID MSGID already in TO's box? True or False;
+    None when the box cannot be checked from here: TO is on another host (a
+    box of the same name here is not where it went; on_host, as guard_cc
+    judges it), or `message path` fails for every name in
+    cc_boxes(local_part(to)).
+
+    READ-ONLY: `message path`, then each file's header block in new/ and cur/
+    (never tmp/, where a delivery is still being written), the Message-ID
+    compared with <> stripped. SINCE: files whose mtime is older than SINCE
+    are skipped (a maildir file's mtime is its delivery time), so a big box
+    is not read whole on every retry. sessionmail has no duplicate check at
+    delivery: a send under the same --message-id lands twice, so the spool
+    asks this before it retries a mail under an id the bot minted."""
+    want = bare(msgid)
+    if not want:
+        return None
+    if "@" in to and not on_host(to, environ):
+        # a box on another host: a box of the same name HERE is not where the
+        # mail went, so reading it could say "not there" of a mail that went
+        return None
+    name = local_part(to).strip().lower()
+    box = None
+    for n in cc_boxes(name):
+        box = box_path(n, environ)
+        if box is not None:
+            break
+    if box is None:
+        return None
+    for sub in ("new", "cur"):
+        try:
+            entries = list(os.scandir(box / sub))
+        except OSError:
+            continue                                # no new/ or cur/: nothing was delivered there
+        for entry in entries:
+            try:
+                if not entry.is_file() or entry.name.startswith("."):
+                    continue
+                if since is not None and entry.stat().st_mtime < since:
+                    continue
+            except OSError:
+                continue
+            if _header_id(pathlib.Path(entry.path)) == want:
+                return True
+    return False
+
+
 def cc_boxes(name: str) -> tuple[str, ...]:
     """The boxes the drop may deliver NAME's mail to, in its order: NAME, then
     for a plus address (`base+tag`) the base box. `message path` does not
@@ -627,9 +729,9 @@ def cc_boxes(name: str) -> tuple[str, ...]:
 
 
 def guard_cc(cc, environ: Mapping[str, str] | None = None) -> tuple[list[str], list[tuple[str, str]]]:
-    """-> (the Cc to send, [(each one left off, why)]). On this host a Cc
-    needs a box sessionmail says is there (its own, or a plus address's base:
-    cc_boxes), on any carrier; off this host it is
+    """-> (the Cc to send, [(each one left off, why)]). On this host (a bare
+    address is: on_host) a Cc needs a box sessionmail says is there (its own,
+    or a plus address's base: cc_boxes), on any carrier; off this host it is
     left off on the mail drop, which delivers locally only, and kept on an MTA."""
     e = os.environ if environ is None else environ
     kept, dropped = [], []

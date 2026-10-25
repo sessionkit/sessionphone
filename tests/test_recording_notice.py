@@ -7,7 +7,9 @@
 2. The spoken notice (`record_spoken_notice`, env EARS_RECORD_SPOKEN_NOTICE):
    "This call is being recorded and kept." said BEFORE the greeting, once,
    only on a call that is kept. Its own setting, independent of the chat line.
-   A TTS failure is logged, never sent as chat text, and the greeting goes on.
+   A TTS failure is logged and the greeting goes on; with the chat line posted
+   it is never also sent as chat text. When neither notice reached the caller,
+   the notice goes once as chat text (tests/test_recording_notice_fails.py).
 
 The resolution of both settings against the shared fixture table is in
 tests/test_recording_switch.py (test_the_contract_case).

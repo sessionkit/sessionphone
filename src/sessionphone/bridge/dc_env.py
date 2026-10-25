@@ -15,10 +15,17 @@ or neither.
 
 The agent is picked as `bot install` picks it (agent_from): DC_AGENT, else
 this session's durable seat as sessionmail names it, else the one bot
-phone.json records, else "claude". AGENT and the values built from it
+phone.json records, else the harness vendor's word (settings.default_agent:
+`session agent default`, else "claude"). AGENT and the values built from it
 (AGENT_NAME, ADDR, MAILTO, the greetings) are bound on first use, not at
 import, so importing this module never asks sessionmail; the bot's job
 always sets DC_AGENT, so the bot never asks either.
+
+MAILTO, the agent's box, is a bare name by default: the agent's, never
+<agent>@<host>. sessionmail adds this host to a bare To on both of its
+carriers, so a bare box still delivers after the host is renamed, where a
+baked `name@<old host>` is refused. A DC_MAILTO is kept exactly as given:
+name a host in it only for a box on another host.
 """
 import os
 import pathlib
@@ -65,9 +72,10 @@ def agent_from(environ=None):
     """-> (the bot a process run with ENVIRON speaks for, where the name came
     from in words), picked as `bot install` picks it (settings.bot_name,
     asking sessionmail): DC_AGENT (or its deprecated alias), else this
-    session's durable seat, else the one bot phone.json records, else
-    "claude". A phone.json that cannot be used, or two bots in it and no
-    name, gives "claude", and BAD says why. bin/dc-env asks this same
+    session's durable seat, else the one bot phone.json records, else the
+    harness vendor's word (settings.default_agent, else "claude"). A
+    phone.json that cannot be used, or two bots in it and no name, gives
+    that same default, and BAD says why. bin/dc-env asks this same
     function, so the dc-* tools and the bot pick one name."""
     e = os.environ if environ is None else environ
     raw = (_get(e, "AGENT") or "").strip().lower()
@@ -76,13 +84,14 @@ def agent_from(environ=None):
     try:
         return settings.bot_name(e, verb=None, ask=True)
     except settings.Bad as exc:
-        BAD.append(f"{exc} Using {settings.DEFAULT_AGENT} for now.")
-        return settings.DEFAULT_AGENT, f"the default ({settings.shown(settings.file_path())} cannot be used)"
+        agent = settings.default_agent(e)
+        BAD.append(f"{exc} Using {agent} for now.")
+        return agent, f"the default ({settings.shown(settings.file_path())} cannot be used)"
 
 
 # Bound on first use (__getattr__), from os.environ then: AGENT and every value built from it.
 _BY_AGENT = ("AGENT", "AGENT_FROM", "AGENT_NAME", "ADDR", "MAILTO",
-             "GREETING", "GREETING_OUT", "GREETING_VOICEMAIL")
+             "GREETING_NAME", "GREETING", "GREETING_OUT", "GREETING_VOICEMAIL")
 for _n in _BY_AGENT:    # a reload binds them afresh
     globals().pop(_n, None)
 
@@ -95,12 +104,41 @@ def bind_agent():
     name = env("AGENT_NAME") or agent.capitalize()
     g.update(AGENT=agent, AGENT_FROM=came, AGENT_NAME=name,
              ADDR=env("ADDR") or f"{agent}-chat@{HOST}",       # the bridge's own mail address
-             MAILTO=env("MAILTO") or f"{agent}@{HOST}",        # the agent's box: where text in lands
-             GREETING=env("GREETING") or f"{name} here. Go ahead.",
-             GREETING_OUT=env("GREETING_OUT") or f"Hi, {name} here, ringing you back.",
-             GREETING_VOICEMAIL=env("GREETING_VOICEMAIL") or (
-                 f"{name} can't pick up right now. Leave a message and it reaches "
-                 f"{name} as mail."))
+             MAILTO=env("MAILTO") or default_mailto(agent))    # the agent's box: where text in lands
+    bind_greetings(greeting_name(agent))
+
+
+def greeting_name(agent, display=None):
+    """-> the name the bot says in its greetings, first match wins:
+    DC_AGENT_NAME, DC_NAME, DISPLAY (the account's display name, once the
+    bot's start has settled it), else the agent's name, capitalised. It is
+    the name people see in their chat list, so a bot set up with
+    `setup --name` greets by that name. AGENT_NAME (the mail's From, the
+    transcript labels) stays the agent's."""
+    return (env("AGENT_NAME") or (env("NAME") or "").strip()
+            or (display or "").strip() or agent.capitalize())
+
+
+def bind_greetings(name):
+    """Bind GREETING_NAME and the three greetings built from NAME. A
+    DC_GREETING, DC_GREETING_OUT or DC_GREETING_VOICEMAIL is a whole line and
+    is used as it is."""
+    globals().update(
+        GREETING_NAME=name,
+        GREETING=env("GREETING") or f"{name} here. Go ahead.",
+        GREETING_OUT=env("GREETING_OUT") or f"Hi, {name} here, ringing you back.",
+        GREETING_VOICEMAIL=env("GREETING_VOICEMAIL") or (
+            f"{name} can't pick up right now. Leave a message and it reaches "
+            f"{name} as mail."))
+
+
+def settle_greetings(display):
+    """Bind the greetings again, now the bot's start has settled the
+    account's DISPLAY name (bot.main, after displayname.at_start). An empty
+    DISPLAY keeps the greetings bind_agent made. Opens nothing."""
+    if "AGENT" not in globals():
+        bind_agent()
+    bind_greetings(greeting_name(globals()["AGENT"], display))
 
 
 def __getattr__(name):
@@ -233,23 +271,31 @@ def host_part_problem(host):
     return None
 
 
-# This machine's mail name. It's used only to mint Message-IDs and the default
-# mail addresses below. It's not the Delta Chat relay: that lives in the account.
+# This machine's mail name. It builds ADDR's default below (MAILTO's default is
+# bare: default_mailto); Message-IDs use seatmail.id_host. It's not the Delta
+# Chat relay: that lives in the account.
 # At import, from the environment only (no sessionmail is asked): the bot
 # takes sessionmail's own file into account once, at start (take_mail_host).
 HOST = env("HOST") or mail_host(ask=False) or "localhost"
-# ADDR (the bridge's own mail address) and MAILTO (the agent's box: where text
-# in lands) are built from AGENT and HOST on first use (bind_agent).
+# ADDR (the bridge's own mail address) is built from AGENT and HOST, and MAILTO
+# (the agent's box: where text in lands) from AGENT alone, on first use (bind_agent).
+
+
+def default_mailto(agent):
+    """The agent's box when no DC_MAILTO is set: the bare agent name. No host,
+    not even DC_HOST: sessionmail adds this host to a bare To, so the box
+    survives a rename of the host."""
+    return agent
 
 
 def mailto(environ=None):
-    """Where a bot run with `environ` mails Delta text: DC_MAILTO, else
-    <agent>@<DC_HOST, else mail_host()>. MAILTO's answer, read from `environ`
-    now (the plist's, at install), not frozen at import."""
+    """Where a bot run with `environ` mails Delta text: DC_MAILTO as given,
+    else the bare agent name (default_mailto). MAILTO's answer, read from
+    `environ` now (the plist's, at install), not frozen at import."""
     e = os.environ if environ is None else environ
     if _get(e, "MAILTO"):
         return _get(e, "MAILTO")
-    return f"{agent_from(e)[0]}@{_get(e, 'HOST') or mail_host(e) or 'localhost'}"
+    return default_mailto(agent_from(e)[0])
 
 
 def _junk(host):
@@ -267,7 +313,9 @@ def _junk(host):
 
 def host_problem(environ=None, host=None):
     """-> None, or why the bot must refuse to start: with no DC_HOST, the
-    default addresses are built on mail_host(), and it names no machine.
+    bot's own address (ADDR) is built on mail_host(), and it names no machine.
+    MAILTO is not: its default is the bare agent name (default_mailto), which
+    sessionmail delivers on this host whatever the host is called.
 
     The default host is sessionmail's own (mail_host): the host both of its
     carriers deliver this machine's boxes on. A short name has no dot by
@@ -276,8 +324,7 @@ def host_problem(environ=None, host=None):
     (1.0.0...ip6.arpa), and every incoming chat was once mailed to
     <agent>@<that> while the bot looked healthy (measured live on a user's Mac).
     A DC_HOST the operator named is trusted (DC_HOST=localhost included), and
-    with both DC_ADDR and DC_MAILTO named, HOST only mints Message-IDs: no
-    address is built from it, so nothing is refused.
+    with DC_ADDR named no address is built from HOST, so nothing is refused.
 
     environ is the environment the bot will run with (os.environ, or the
     plist's at install); host stands in for mail_host(environ) in tests.
@@ -287,7 +334,7 @@ def host_problem(environ=None, host=None):
     def get(name):
         return _get(e, name)
 
-    if get("HOST") or (get("ADDR") and get("MAILTO")):
+    if get("HOST") or get("ADDR"):
         return None
     host = (mail_host(e) if host is None else host).strip().lower().rstrip(".")
     if not host:
@@ -297,11 +344,11 @@ def host_problem(environ=None, host=None):
     else:
         return None
     agent = agent_from(e)[0]
-    return (f"no DC_HOST is set and this machine's mail host {what}, so mail to the agent "
-            f"would go to {agent}@{host or 'localhost'}, which nobody reads. Set "
+    return (f"no DC_HOST is set and this machine's mail host {what}, so the bot's own "
+            f"address would be {agent}-chat@{host or 'localhost'}. Set "
             f"SESSIONMAIL_HOST (sessionmail's host for this machine) or DC_HOST to this "
             f"machine's mail domain (DC_HOST=mac.example.net) and run "
-            f"`sessionphone bot install` again, or name both DC_ADDR and DC_MAILTO.")
+            f"`sessionphone bot install` again, or name DC_ADDR.")
 
 
 def fqdn_problem(environ, fqdn):
@@ -329,7 +376,7 @@ def take_mail_host():
         return where
     HOST = env("HOST") or host
     agent = globals().get("AGENT") or __getattr__("AGENT")     # the bound agent, else bind it now
-    globals().update(ADDR=env("ADDR") or f"{agent}-chat@{HOST}", MAILTO=env("MAILTO") or f"{agent}@{HOST}")
+    globals().update(ADDR=env("ADDR") or f"{agent}-chat@{HOST}", MAILTO=env("MAILTO") or default_mailto(agent))
     HOST_PROBLEM = host_problem(host=host)
     return where
 
@@ -386,6 +433,25 @@ def callers_file(environ=None):
     return home(e) / "callers.txt"
 
 
+def accounts_dir(environ=None, root=None):
+    """The Delta Chat accounts folder a bot run with `environ` opens:
+    DC_ACCOUNTS, else <home>/accounts (home as callers_file; ROOT as home()).
+    The one answer: the bot opens it, and so does every CLI verb that opens
+    the account (`setup`, `link`, `callers add|pin` without --key)."""
+    e = os.environ if environ is None else environ
+    v = _get(e, "ACCOUNTS")
+    if v:
+        return pathlib.Path(v).expanduser()
+    return home(e, root) / "accounts"
+
+
+def invite_file(environ=None, root=None):
+    """The invite link saved for the account accounts_dir opens: <home>/invite.txt
+    (home as callers_file). `setup` writes it, `invite` reads it, and the bot
+    rewrites it at its start (displayname.at_start, on its home)."""
+    return home(environ, root) / "invite.txt"
+
+
 def channels_file(environ=None):
     """The allow-list a bot run with `environ` reads: DC_CHANNELS_FILE, else
     <home>/channels.txt (home as callers_file). path("CHANNELS_FILE",
@@ -421,7 +487,8 @@ DELTA_ADDR = ("ADDR is the owner's Delta Chat address, as their Delta Chat profi
 
 def callers_problem(environ=None):
     """-> None, or why NOBODY may ring a bot run with `environ`: calls are on and
-    the callers file holds no address. Every call would be refused, and with
+    the callers file holds no address (or, once keyed, none pinned to a key).
+    Every call would be refused, and with
     no line here nothing would say so. DC_CALLERS counts for nothing: an env
     var never grants the right to ring (callers_ignored says so).
 
@@ -432,21 +499,30 @@ def callers_problem(environ=None):
     e = os.environ if environ is None else environ
     if (_get(e, "CALLS") or "on") == "off":
         return None
-    # one parser, shared with `sessionphone callers`; account is heavy, so imported here
-    from sessionphone.account import read_callers
+    # one parser, shared with `sessionphone callers` and the call gate
+    from sessionphone import keygate
     f = callers_file(e)
     try:
-        if read_callers(f):
+        entries = keygate.read_caller_entries(f)
+        # A file from an older version (no keys marker) is pinned at the bot's
+        # first start (keygate.migrate), so its address lines still count here.
+        if any(x.key for x in entries) or (entries and not keygate.is_marked(f)):
             return None
+        if entries:
+            # `callers pin` reaches f only with this bot's settings in front of it
+            pin = f"{with_env(e)}sessionphone callers pin ADDR"
+            return (f"NOBODY may ring this agent: {f} lists {len(entries)} address(es), none "
+                    f"pinned to a key, so every call would be refused. Pin each one: "
+                    f"`{pin} --key FPR` (the phone shows the key under "
+                    f"the contact's profile, Encryption), or with the bot stopped "
+                    f"`{pin}`.")
         what = "has no address in it" if f.exists() else "does not exist"
     except OSError as exc:
         what = f"cannot be read ({exc.strerror or exc})"
-    # `link` writes only the default file; past a DC_CALLERS_FILE it would not help
-    if f == paths.callers_path():
-        first = ("run `sessionphone link` and scan the invite from the owner's phone "
-                 "(the first to join becomes the owner)")
-    else:
-        first = f"add the owner's Delta Chat address to {f}, one per line"
+    # `link` writes callers_file() for the environment it runs in: with this
+    # bot's settings in front of it, it writes f and opens this bot's account
+    first = (f"run `{with_env(e)}sessionphone link` and scan the invite from the owner's "
+             f"phone (the first to join becomes the owner)")
     return (f"NOBODY may ring this agent: {f} {what}, so every call would be refused. "
             f"Name the owner, one of two ways: {first}; or run "
             f"`sessionphone bot install --owner ADDR` (writes ADDR into {f}), where {DELTA_ADDR}.")
@@ -463,9 +539,27 @@ def callers_ignored(environ=None):
     if name is None:
         return None
     f = callers_file(e)
-    how = ("with `sessionphone callers add ADDR`" if f == paths.callers_path()
-           else f"to {f}, one per line")
-    return f"{name} is set and IGNORED: approved callers come from {f} only; add each {how}."
+    return (f"{name} is set and IGNORED: approved callers come from {f} only; add each "
+            f"with `{with_env(e)}sessionphone callers add ADDR`.")
+
+
+# The settings that move a bot's callers file or account away from the CLI
+# root's: a CLI verb run with them in front of it touches that bot's own.
+WHERE = ("ROOT", "PROFILE", "ACCOUNTS", "CALLERS_FILE")
+
+
+def with_env(environ=None):
+    """The `DC_<NAME>=value ` prefix (shell-quoted, one per WHERE name set in
+    `environ`) that makes a CLI verb resolve this bot's callers file and
+    account; "" when none is set, the CLI's own answer then being the bot's."""
+    import shlex
+    e = os.environ if environ is None else environ
+    out = []
+    for n in WHERE:
+        v = _get(e, n)
+        if v:
+            out.append(f"DC_{n}={shlex.quote(v)} ")
+    return "".join(out)
 
 
 def _root():
@@ -492,7 +586,8 @@ def home_dir():
 # The voice the bridge speaks in when nobody names one: a kokoro id (af_sky),
 # or a clone dir under ~/.voicemode/voices.
 VOICE = env("VOICE") or "af_sky"
-# GREETING and GREETING_OUT: built from AGENT_NAME on first use (bind_agent).
+# GREETING and GREETING_OUT: built from GREETING_NAME on first use (bind_agent),
+# and again once the bot's start has settled its display name (settle_greetings).
 SAY = env("SAY") or "dc-say"                      # the reply hint in bridged mail
 # How an incoming call from an approved caller is answered:
 #   auto - the bot answers at once and greets in the agent's voice. Cheap:
@@ -520,7 +615,12 @@ RING_WAIT = number("RING_WAIT", 25.0)
 # DC_NO_REPLY_S above 0 to turn it on.
 NO_REPLY_S = number("NO_REPLY_S", 0.0)
 HOLDING_LINE = env("HOLDING_LINE") or "I heard you, give me a moment."
-# GREETING_VOICEMAIL: built from AGENT_NAME on first use (bind_agent).
+# Floor control (bridge/floor.py): a reply line does not start while the caller
+# is speaking. It waits for FLOOR_GAP seconds of his quiet, FLOOR_CAP at most,
+# then plays. FLOOR_GAP=0 turns it off: a reply starts the moment it arrives.
+FLOOR_GAP = number("FLOOR_GAP", 0.8)
+FLOOR_CAP = number("FLOOR_CAP", 6.0)
+# GREETING_VOICEMAIL: built from GREETING_NAME, as GREETING is.
 # STT for voice notes, and for what a caller says: any OpenAI-compatible
 # /v1/audio/transcriptions. The default is VoiceMode's mlx-audio on :8890, the
 # server the bot's voice already uses. The bot requests Parakeet from it
@@ -556,6 +656,9 @@ def path(name, *rel):
 # account; dc-live reads it to know the bot runs. bin/dc-env's DC_PID_FILE is
 # this same path: change both or neither.
 PID_FILE = path("PID_FILE", "bot.pid")
+# The live call (calls.py writes it on connect, removes it at hang-up; the bot
+# removes an earlier bot's at start). bin/dc-env's DC_LIVE is this same path.
+LIVE_FILE = path("LIVE", "call-live.json")
 
 
 # The bot's Delta Chat display name (sessionphone/displayname.py). Unset, it is
@@ -598,7 +701,7 @@ if __name__ == "__main__":
     bind_agent()
     for k in ("AGENT", "AGENT_FROM", "AGENT_NAME", "HOST", "ADDR", "MAILTO", "ROOT", "PROFILE",
               "VOICE", "GREETING",
-              "ANSWER", "RING_WAIT", "NO_REPLY_S", "GREETING_VOICEMAIL", "STT_URL", "STUN_RTO",
+              "ANSWER", "RING_WAIT", "NO_REPLY_S", "FLOOR_GAP", "FLOOR_CAP", "GREETING_VOICEMAIL", "STT_URL", "STUN_RTO",
               "XDC_FEED_CHATS", "XDC_FEEDS_MAX", "FIRST_CALL_WAIT", "WAIT_MUSIC", "NAME"):
         print(f"{k:12} {globals()[k]}")
     print(f"{'HOME':12} {home_dir()}")

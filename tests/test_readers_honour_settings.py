@@ -90,21 +90,22 @@ def test_mail_host_is_the_host_sessionmail_keeps_in_mail_json(mail_json):
     assert dc_env.mail_host(env) == "mailhost"
 
 
-def test_the_default_to_is_built_on_the_mail_json_host(mail_json):
+def test_the_default_to_is_bare_whatever_the_mail_json_host(mail_json):
     env = mail_json(host=("mailhost", "host"))
-    assert dc_env.mailto(env) == "ada@mailhost"
+    assert dc_env.mail_host(env) == "mailhost"
+    assert dc_env.mailto(env) == "ada"           # bare (PHONE-248): the host never reaches the To
 
 
 def test_a_mail_host_in_this_shell_wins_over_mail_json(mail_json):
     env = {**mail_json(host=("mailhost", "host")), "SESSIONMAIL_HOST": "shellhost"}
     assert dc_env.mail_host(env) == "shellhost"
-    assert dc_env.mailto(env) == "ada@shellhost"
+    assert dc_env.mailto(env) == "ada"
 
 
 def test_with_no_host_anywhere_the_mail_host_is_this_machines_name(mail_json):
     env = mail_json()
     assert dc_env.mail_host(env) == "othermac"
-    assert dc_env.mailto(env) == "ada@othermac"
+    assert dc_env.mailto(env) == "ada"
 
 
 # ---- (1b) the carrier the bot names ------------------------------------------------

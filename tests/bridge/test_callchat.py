@@ -41,7 +41,7 @@ def session(root, chat_id=12):
     s = object.__new__(calls.CallSession)
     s.pc, s.root_id, s.chat_id = object(), root, chat_id
     s.account = FakeAccount()
-    s.speak = lambda text, voice, who: spoken.append(("voice", who, text))
+    s.speak = lambda text, voice, who, floor=False: spoken.append(("voice", who, text))
     return s
 
 

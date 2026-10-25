@@ -20,7 +20,7 @@ from typing import Any
 
 from deltachat_rpc_client import Account, DeltaChat, Rpc
 
-from sessionphone import channels, paths
+from sessionphone import channels, keygate, paths
 from sessionphone.bridge import dc_env
 from sessionphone.paths import NotConfigured
 
@@ -65,11 +65,19 @@ def server_choice() -> tuple[str, str, str]:
 
 
 def _open(create: bool = False) -> Iterator[Account]:
-    """Yield the account under this root. A generator, so the rpc-server
-    child outlives the caller's work and is shut down after it."""
-    paths.ensure_private(create)
-    paths.accounts_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
-    with Rpc(accounts_dir=str(paths.accounts_dir()), rpc_server_path=server_path()) as rpc:
+    """Yield the account the bot run with this shell's environment opens
+    (dc_env.accounts_dir: DC_ACCOUNTS, else <home>/accounts). A generator, so the
+    rpc-server child outlives the caller's work and is shut down after it.
+    The root it sits in must be private, as for every verb; `setup` makes
+    the CLI's root and the bot's root both 0700 (the invite goes in the bot's
+    home, dc_env.invite_file)."""
+    where = dc_env.accounts_dir()
+    bot_root = dc_env.root_of()
+    if create and bot_root != paths.root():
+        paths.ensure_private(create)
+    paths.ensure_private(create, at=bot_root)
+    where.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with Rpc(accounts_dir=str(where), rpc_server_path=server_path()) as rpc:
         dc = DeltaChat(rpc)
         existing = dc.get_all_accounts()
         if existing:
@@ -77,9 +85,9 @@ def _open(create: bool = False) -> Iterator[Account]:
         elif create:
             account = dc.add_account()
         else:
-            raise NotConfigured(f"no account under {paths.root()} - run `sessionphone setup` first")
+            raise NotConfigured(f"no account in {where} - run `sessionphone setup` first")
         if not create and not account.is_configured():
-            raise NotConfigured(f"the account under {paths.root()} is not configured - run `sessionphone setup`")
+            raise NotConfigured(f"the account in {where} is not configured - run `sessionphone setup`")
         yield account
 
 
@@ -112,12 +120,13 @@ def setup(display_name: str, status: str = "", relay_qr: str | None = None) -> d
             account.set_config("selfstatus", status)
         account.start_io()
         link = account.get_qr_code()
-        paths.invite_path().write_text(link + "\n")
+        saved = dc_env.invite_file()
+        saved.write_text(link + "\n")
         return {
             "addr": address(account),
             "displayname": display_name,
             "invite": link,
-            "invite_file": str(paths.invite_path()),
+            "invite_file": str(saved),
             "root": str(paths.root()),
             "created": fresh,
         }
@@ -125,11 +134,14 @@ def setup(display_name: str, status: str = "", relay_qr: str | None = None) -> d
 
 
 def invite() -> str:
-    """The saved invite link, without starting anything."""
-    paths.ensure_private()
-    if not paths.invite_path().exists():
-        raise NotConfigured(f"no invite at {paths.invite_path()} - run `sessionphone setup` first")
-    return paths.invite_path().read_text().strip()
+    """The saved invite link, without starting anything: the one `setup` saved
+    for the account the bot run with this shell's environment opens
+    (dc_env.invite_file)."""
+    paths.ensure_private(at=dc_env.root_of())
+    f = dc_env.invite_file()
+    if not f.exists():
+        raise NotConfigured(f"no invite at {f} - run `sessionphone setup` first")
+    return f.read_text().strip()
 
 
 def invite_name(link: str) -> str:
@@ -163,46 +175,68 @@ def display_name() -> str:
 # ---- the callers file -------------------------------------------------------
 
 
+def read_caller_entries(path: pathlib.Path | None = None, log=None) -> list[keygate.CallerEntry]:
+    """The callers file's entries (address, pinned key or None, note), in
+    file order: what the call gate reads. No file means nobody. PATH defaults
+    to the file the bot reads (dc_env.callers_file, this shell's environment)."""
+    return keygate.read_caller_entries(path or dc_env.callers_file(), log)
+
+
 def read_callers(path: pathlib.Path | None = None) -> list[str]:
-    """The approved addresses, lowercased, in file order. No file means nobody."""
-    path = path or paths.callers_path()
-    if not paths.exists(path):      # not Path.exists: on 3.14 an unreadable file would read "nobody"
-        return []
+    """The listed addresses, lowercased, in file order, pinned or not (a line
+    `ADDR  key:FPR` gives ADDR). No file means nobody."""
     out = []
-    for line in path.read_text().splitlines():
-        addr = line.split("#", 1)[0].strip().lower()
-        if addr and addr not in out:
-            out.append(addr)
+    for e in read_caller_entries(path):
+        if e.addr not in out:
+            out.append(e.addr)
     return out
 
 
 def read_owner(path: pathlib.Path | None = None) -> str | None:
     """The address on the callers line whose note starts `owner` (what `link`
     and `bot install --owner` write), lowercased; None if there is none."""
-    path = path or paths.callers_path()
-    if not paths.exists(path):      # not Path.exists (see read_callers)
-        return None
-    for line in path.read_text().splitlines():
-        addr, _, note = line.partition("#")
-        addr = addr.strip().lower()
-        if addr and note.strip().lower().startswith("owner"):
-            return addr
+    for e in read_caller_entries(path):
+        if e.note.lower().startswith("owner"):
+            return e.addr
     return None
 
 
-def add_caller(addr: str, note: str = "", path: pathlib.Path | None = None) -> bool:
-    """Approve ADDR to ring this agent. Returns False if it was already there."""
-    path = path or paths.callers_path()
+def add_caller(addr: str, note: str = "", path: pathlib.Path | None = None,
+               key: str | None = None) -> bool:
+    """Approve ADDR to ring this agent, bound to KEY (a fingerprint). Returns
+    False if nothing changed. Without KEY the line is UNPINNED: refused until
+    a key is pinned to it (only `bot install --owner` on a file from an older
+    version writes one, for the bot's first start to pin)."""
+    path = path or dc_env.callers_file()
+    if key is not None:
+        norm = keygate.normalize(key)
+        if norm is None:
+            raise ValueError(f"not a key fingerprint (40 or 64 hex digits): {key!r}")
+        key = norm
+    return keygate.add_entry(path, addr, key, note)
+
+
+class AccountBusy(Exception):
+    """The account could not be opened to read a contact's key (the bot or
+    `link` holds it, or there is none). Its str() says to give --key."""
+
+
+def find_key(addr: str, pin_how: str = keygate.PIN_HOW) -> keygate.Decision:
+    """The attended pin pass for ADDR: open the account and look for the one
+    key contact with that address. -> a Decision: "pinned" with its key only
+    when exactly one has it. Raises AccountBusy, having read nothing."""
     addr = addr.strip().lower()
-    if not addr or "@" not in addr:
-        raise ValueError(f"not an address: {addr!r}")
-    if addr in read_callers(path):
-        return False
-    line = f"{addr}  # {note}\n" if note else f"{addr}\n"
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(line)
-    path.chmod(0o600)
-    return True
+    entry = keygate.CallerEntry(addr, None)
+    try:
+        for acct in _open():
+            return keygate.decide(acct, entry, unattended=False, pin_how=pin_how)
+    except NotConfigured as exc:
+        raise AccountBusy(f"{exc}; give --key FPR ({keygate.SHOWS})") from None
+    except Exception as exc:  # noqa: BLE001 - the lock: the bot holds the account
+        raise AccountBusy(f"could not open the account to read {addr}'s key, most likely because "
+                          f"the bot holds it ({exc}); give --key FPR ({keygate.SHOWS}), or stop "
+                          f"the bot and run this again") from None
+    raise AccountBusy("no account")
 
 
 # ---- link: the person scans, and becomes the owner -------------------------
@@ -220,7 +254,8 @@ def link(timeout: float | None = 600.0, greet: bool = True) -> dict[str, Any]:
     with one). So this blocks, and the guide runs it backgrounded BEFORE the
     person scans.
 
-    The first joiner under an empty callers file is written as `# owner`.
+    The first joiner under an empty callers file is written as `# owner`,
+    bound to the key fingerprint of the contact that completed the join.
     Anyone who joins later is linked for text but NOT approved to call:
     that takes `sessionphone callers add`, by the owner's word.
 
@@ -228,7 +263,12 @@ def link(timeout: float | None = 600.0, greet: bool = True) -> dict[str, Any]:
     so even that first send goes to a listed chat. If the list cannot take
     them (its `owner` NAME is someone else's), no greeting is sent and
     `channels_problem` says why.
+
+    The callers file and the account are the ones the bot run with this
+    shell's environment reads (dc_env.callers_file, dc_env.accounts_dir): the result
+    names both.
     """
+    callers_file = dc_env.callers_file()
     for account in _open():
         account.start_io()
         wake: queue.Queue = queue.Queue(maxsize=1)
@@ -253,12 +293,24 @@ def link(timeout: float | None = 600.0, greet: bool = True) -> dict[str, Any]:
         contact = account.get_contact_by_id(got)
         snap = contact.get_snapshot()
         addr = str(snap.address).lower()
-        was_empty = not read_callers()
+        was_empty = not read_callers(callers_file)
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         owner = False
         note = f"owner, {snap.display_name or 'no name'}, joined {stamp}"
+        # the owner is bound to the key that completed the join, never to the
+        # address alone: the joiner had the invite's secret, and core checked
+        # that key signed the join
+        try:
+            key, key_problem = keygate.contact_fingerprint(contact), None
+        except Exception as exc:  # noqa: BLE001 - no key read: no owner written
+            key, key_problem = None, f"could not read the joiner's key ({exc})"
+        if key is None and key_problem is None:
+            key_problem = "the joiner's contact holds no key the bridge can read"
         if was_empty:
-            owner = add_caller(addr, note)
+            if key:
+                owner = add_caller(addr, note, path=callers_file, key=key)
+            else:
+                key_problem += "; NOT approved to call, nothing written to the callers file"
         listed, tightened, problem, listed_as, loose = False, None, None, None, None
         chans = dc_env.channels_file()
         if owner:
@@ -266,7 +318,7 @@ def link(timeout: float | None = 600.0, greet: bool = True) -> dict[str, Any]:
             before = channels.loose_mode(chans)
             try:
                 chans.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                entry = channels.seed_owner(addr, note, chans)
+                entry = channels.seed_owner(addr, note, chans, key=key)
                 if entry is not None:
                     tightened = before      # add() made it 0600: the CLI says so out loud
                     listed_as = entry.name
@@ -286,7 +338,10 @@ def link(timeout: float | None = 600.0, greet: bool = True) -> dict[str, Any]:
             "addr": addr,
             "name": str(snap.display_name or ""),
             "owner": owner,
-            "callers": str(paths.callers_path()),
+            "key": key,
+            "key_problem": key_problem if was_empty and not owner else None,
+            "callers": str(callers_file),
+            "account": str(dc_env.accounts_dir()),
             "channels": str(chans),
             "listed": listed,
             "listed_as": listed_as,

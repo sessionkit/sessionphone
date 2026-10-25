@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 
+import _keyfakes
 import pytest
 
 from sessionphone.bridge import bot, calls
@@ -33,7 +34,7 @@ from sessionphone.bridge import bot, calls
 OWNER = "alice@relay.example"
 STRANGER = "bob@relay.example"
 OTHER_BOB = "bob@elsewhere.example"
-LIST = f"family  chat:12   # the family group\nowner   {OWNER}   # owner\n"
+LIST = f"family  chat:12   # the family group\nowner   {OWNER}  key:{_keyfakes.FPR_K1}   # owner\n"
 NAME = "Book Club"
 NEW = 50        # the chat id the fake core gives the group it makes
 AGENT_BOX = "agent@host.example"    # DC_MAILTO: where the list alert goes (PHONE-129)
@@ -70,7 +71,10 @@ class FakeContact:
         self.account, self.id, self.addr, self.name, self.chat_id = account, cid, addr, name, chat_id
 
     def get_snapshot(self):
-        return Obj(address=self.addr, display_name=self.name, name="")
+        return Obj(address=self.addr, display_name=self.name, name="", is_key_contact=True)
+
+    def make_vcard(self):           # the owner holds K1, anyone else K2
+        return _keyfakes.vcard(self.addr, _keyfakes.K1 if self.addr == OWNER else _keyfakes.K2)
 
     def create_chat(self):          # opens the 1:1; sends nothing, but is recorded
         self.account.calls.append(("create_chat", self.addr))
@@ -123,8 +127,9 @@ class FakeAccount:
     def get_config(self, key):
         return "bot@test"
 
-    def get_contacts(self):
-        return list(self.contacts.values())
+    def get_contacts(self, query=None):
+        q = (query or "").lower()
+        return [c for c in self.contacts.values() if q in c.addr.lower()]
 
     def get_contact_by_addr(self, addr):
         return self.contacts.get(addr)
