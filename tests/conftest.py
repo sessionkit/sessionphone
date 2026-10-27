@@ -29,14 +29,73 @@ if _early:   # the isolation below would be too late to matter: say so, loudly
 for _k in [k for k in os.environ if k in _SEAT_ENV_NAMES or k.startswith(_SEAT_ENV_PREFIXES)]:
     del os.environ[_k]
 
+# ---- the real home never reaches the suite (PHONE-264) ----------------------
+# Run alone, tests/test_callers_on_install.py and tests/test_avatar.py wrote the
+# REAL ~/.sessionphone/.bot.lock: their first test imports the bot itself and runs
+# bot.main(), after the autouse fixtures below had found no bot loaded to patch,
+# and dc_env.ROOT (bound at import, below) was the real default root. So HOME
+# moves to a tmp dir HERE, before any sessionphone import binds a path from it,
+# and again for every test (home_is_tmp, with SESSIONPHONE_ROOT). The real home's
+# sessionphone paths are snapshotted now and again at the end of the run, and the
+# run FAILS if they changed (tests/_home_guard.py, pytest_sessionfinish below).
+# The real home is measured here, before the move: a child pytest a test runs
+# inherits that test's tmp HOME, so its "real" home is tmp, never ours.
+import tempfile
+
+import _home_guard
+
+REAL_HOME = os.path.expanduser("~")
+_REAL_BEFORE = _home_guard.snapshot(REAL_HOME)
+_REAL_CHANGED: list[str] = []
+# uv finds its cache under HOME: a test that installs the wheel --offline needs
+# the warm one (tests/test_wheel_qr_page.py). Pinned, if this shell does not.
+if not os.environ.get("UV_CACHE_DIR"):
+    os.environ["UV_CACHE_DIR"] = os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.join(REAL_HOME, ".cache"), "uv")
+SUITE_HOME = tempfile.mkdtemp(prefix="suite-home-")
+os.environ["HOME"] = SUITE_HOME
+
+
+# the default root below a home (paths.DEFAULT_ROOT, ~/.sessionkit/phone/state),
+# spelt here: this file runs before any sessionphone import (tests/test_state_root.py
+# pins it to paths.DEFAULT_ROOT)
+DEFAULT_ROOT_UNDER_HOME = os.path.join(".sessionkit", "phone", "state")
+
+
+@pytest.fixture(scope="session")
+def suite_home() -> str:
+    """The tmp HOME every sessionphone import saw: dc_env.ROOT is its default
+    root, .sessionkit/phone/state (paths.DEFAULT_ROOT)."""
+    return SUITE_HOME
+
+
+@pytest.fixture(autouse=True)
+def home_is_tmp(tmp_path_factory, monkeypatch):
+    """Every test has its own tmp HOME, and SESSIONPHONE_ROOT is that home's
+    default root, <HOME>/.sessionkit/phone/state: a path read at run time, and
+    any child process a test starts, lands there, never in the real home
+    (PHONE-264). A test that needs another sets its own. Yields the home."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SESSIONPHONE_ROOT", str(home / DEFAULT_ROOT_UNDER_HOME))
+    yield home
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    """FAIL the run if the real home's sessionphone paths changed during it."""
+    _REAL_CHANGED[:] = _home_guard.changes(_REAL_BEFORE, _home_guard.snapshot(REAL_HOME))
+    if _REAL_CHANGED and session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    shutil.rmtree(SUITE_HOME, ignore_errors=True)
+
+
 # ...and the phone.json `bot install` keeps never reaches it either. paths.root()
 # reads the root that file keeps, and dc_env.ROOT is bound from it AT IMPORT,
 # before phone_settings_in_tmp (below) moves settings.FILE for each test. On a
 # machine where `bot install` has run, the suite would then freeze that live
 # root into dc_env.ROOT. So dc_env is imported here with settings.FILE pointing
 # into an empty directory, then FILE is put back for the tests that read it.
-import tempfile
-
 from sessionphone import settings as _settings
 
 _kept_file = _settings.FILE
@@ -303,9 +362,9 @@ def _message_tripwire_script(tmp_path_factory):
 def _real_messages() -> set[str]:
     """Every path the real `message` is reachable by, on PATH or in uv's tool dir."""
     found = set()
-    for p in (shutil.which("message"),
-              os.path.expanduser("~/.local/share/uv/tools/sessionmail/bin/message"),
-              os.path.expanduser("~/.local/bin/message")):
+    for p in (shutil.which("message"),     # REAL_HOME: HOME is tmp by now (PHONE-264)
+              os.path.join(REAL_HOME, ".local/share/uv/tools/sessionmail/bin/message"),
+              os.path.join(REAL_HOME, ".local/bin/message")):
         if p and os.path.exists(p):
             found.add(os.path.realpath(p))
     return found
@@ -660,17 +719,36 @@ def home_lock_is_tmp(monkeypatch, tmp_path):
     the home, bound at import as above, is the user's REAL default root. So no
     test writes a lock there, or holds it across tests in one process: called
     with no home, take_home_lock locks a fresh tmp home instead. A test of the
-    lock itself passes its own home and is left alone."""
+    lock itself passes its own home and is left alone.
+
+    A test that imports the bot ITSELF (its first import in this process: a
+    file run alone) finds it unpatched here, so it asks for lock_home_in_tmp
+    (PHONE-264). Either way, a lock the test took is let go at teardown."""
     bot = sys.modules.get("sessionphone.bridge.bot")
-    if bot is None:
-        yield
-        return
-    run, spare = bot.take_home_lock, tmp_path / "lock-home"
-    monkeypatch.setattr(bot, "take_home_lock", lambda home=None: run(spare if home is None else home))
+    if bot is not None:
+        _lock_in_tmp(bot, monkeypatch, tmp_path / "lock-home")
     yield
-    if bot._HOME_LOCK is not None:      # the process outlives the test: let the lock go
+    bot = sys.modules.get("sessionphone.bridge.bot")    # a test may have loaded it since
+    if bot is not None and bot._HOME_LOCK is not None:  # the process outlives the test: let the lock go
         os.close(bot._HOME_LOCK)
         bot._HOME_LOCK = bot._HOME_LOCKED = None
+
+
+def _lock_in_tmp(bot, monkeypatch, spare):
+    run = bot.take_home_lock
+    monkeypatch.setattr(bot, "take_home_lock", lambda home=None: run(spare if home is None else home))
+
+
+@pytest.fixture
+def lock_home_in_tmp(monkeypatch, tmp_path):
+    """-> lock(bot): home_lock_is_tmp's patch, for a test or rig that imports the
+    bot itself and then runs bot.main(). Run alone, such a file's first test
+    loads the bot AFTER the autouse fixtures looked for it, and bot.main() then
+    locked the real <root>/.bot.lock (PHONE-264). Returns the bot."""
+    def lock(bot):
+        _lock_in_tmp(bot, monkeypatch, tmp_path / "lock-home")
+        return bot
+    return lock
 
 
 # ---- the STT tripwire (PHONE-18) ----------------------------------------------
@@ -807,6 +885,9 @@ import _scanlist
 
 def pytest_terminal_summary(terminalreporter):
     _scanlist.summary(terminalreporter)
+    if _REAL_CHANGED:      # set by pytest_sessionfinish above, which runs first
+        terminalreporter.write_sep("=", "the real home changed: this run FAILS", red=True)
+        terminalreporter.write_line(_home_guard.report(REAL_HOME, _REAL_CHANGED))
 
 
 @pytest.fixture(autouse=True)

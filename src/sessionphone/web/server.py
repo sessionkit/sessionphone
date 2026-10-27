@@ -411,7 +411,7 @@ def run(webdir: Path, *, port: int, host: str, tls: tuple[Path, Path] | None,
         await desk.start()
         echo(f"  calls: {'LEGS under ' + str(webdir) + (' (DEMO)' if demo else '') if legs else 'echo (no legs: nothing on this host can hear a call)'}")
         if seat is not None:
-            for line in turns.start_lines(seat, heard):
+            for line in turns.start_lines(seat, heard, kept=desk.kept):
                 echo(f"  {line}")
             echo(f"  turns box: {box.path}" if box is not None and box.path is not None else
                  f"  turns box: {seat.to} is not a box on this host: its reader makes the box")

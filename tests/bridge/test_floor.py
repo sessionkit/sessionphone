@@ -219,6 +219,44 @@ def test_a_track_with_no_floor_is_unchanged():
     assert ln.state == "owning"
 
 
+# ---- the call's opening goes first (PHONE-266) -----------------------------------
+
+def test_opening_lines_go_ahead_of_a_waiting_reply_in_their_own_order(logs):
+    r = Rig()
+    r.track.opening = True                      # as CallSession.__init__ sets it
+    reply = r.reply(REPLY)                      # arrived first, while the call connected
+    assert reply.state == "waiting"             # the opening holds it, floor free or not
+    notice = r.track.line("bridge", opening=True)
+    greet = r.track.line("bridge", opening=True)
+    assert r.track.owner is notice and list(r.track.waiting) == [greet, reply]
+    notice.say(tone(BEFORE, 0.1))
+    notice.end()
+    greet.say(tone(BRIDGE, 0.1))
+    greet.end()
+    r.track.end_opening()
+    assert r.frames(1.0) == [BEFORE, BRIDGE, REPLY]
+    assert floor_lines(logs) == []              # waiting for the opening is not a floor hold
+
+
+def test_end_opening_with_nothing_waiting_changes_nothing_else(logs):
+    r = Rig()
+    r.track.opening = True
+    r.track.end_opening()
+    r.track.end_opening()                       # again: a no-op
+    assert r.track.opening is False and r.track.owner is None and not r.track.waiting
+    assert r.reply().state == "done"            # every rule is as it was
+
+
+def test_a_bare_track_has_no_opening():
+    assert calls.PipVoiceTrack().opening is False
+
+
+def test_a_call_session_opens_its_track_with_the_opening_up(monkeypatch):
+    monkeypatch.setattr(calls, "ISSUED", calls.IssuedRoots())
+    s = calls.CallSession(types.SimpleNamespace(sessions={}), None, 12)
+    assert s.voice.opening is True              # up before _build_pc makes the call live
+
+
 def test_a_barge_in_still_drops_a_held_reply(logs):
     r = Rig()
     r.vad.speaking = True

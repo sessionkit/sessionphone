@@ -2,13 +2,14 @@
 
 THE SCRATCH-ROOT GUARD (design §4, Test guard). tests/conftest.py only DELETES
 SESSIONPHONE_ROOT; it sets no scratch root. So without this file, a test here
-resolves `paths.root()` to the REAL ~/.sessionphone, where a host's live call-ears
+resolves `paths.root()` to the REAL default root, where a host's live call-ears
 keeper and the mouth look for `call-ears.sock` / `call-mouth.sock` (sv
 keeper/call-ears globs <root>/call-ears.sock and <root>/*/call-ears.sock). A
 socket there is a live seat's ears within seconds. Hence, for every test here:
 
 - `SESSIONPHONE_ROOT` is a fresh tmp dir (autouse);
-- the real ~/.sessionphone is checked for leg sockets before and after, and a
+- the real default roots, ~/.sessionkit/phone/state and the old ~/.sessionphone
+  (a keeper scans both), are checked for leg sockets before and after, and a
   NEW one fails the test that made it (autouse).
 
 Also a SOFTWARE PASSKEY: a P-256 (or RSA) key from `cryptography` that makes
@@ -20,6 +21,7 @@ import glob
 import hashlib
 import json
 import os
+import pathlib
 import pwd
 import secrets
 
@@ -27,17 +29,21 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
+from sessionphone import paths
 from sessionphone.web.passkeys import ES256, RS256, UP, UV, b64u, rp_of
 
 REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir        # not $HOME: a test may point that elsewhere
-REAL_ROOT = os.path.join(REAL_HOME, ".sessionphone")
+# both default roots, as paths spells them: the new one and the old one
+REAL_ROOTS = tuple(os.path.join(REAL_HOME, *pathlib.PurePosixPath(r).parts[1:])
+                   for r in (paths.DEFAULT_ROOT, paths.OLD_ROOT))
 
 
 def real_leg_sockets() -> set[str]:
-    """Every leg socket under the REAL ~/.sessionphone, where the keeper looks."""
+    """Every leg socket under the REAL default roots, where the keeper looks."""
     out = set()
-    for pat in ("call-*.sock", "*/call-*.sock"):
-        out.update(glob.glob(os.path.join(glob.escape(REAL_ROOT), pat)))
+    for root in REAL_ROOTS:
+        for pat in ("call-*.sock", "*/call-*.sock"):
+            out.update(glob.glob(os.path.join(glob.escape(root), pat)))
     return out
 
 

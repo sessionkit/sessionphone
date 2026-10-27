@@ -210,7 +210,8 @@ def job(name: str | None = None, python: str | None = None, given=None) -> dict:
     if given is None:
         given, root = os.environ, paths.root()
     else:
-        root = pathlib.Path(given.get("SESSIONPHONE_ROOT") or paths.DEFAULT_ROOT).expanduser()
+        r = given.get("SESSIONPHONE_ROOT")
+        root = pathlib.Path(r).expanduser() if r else paths.default_root()
     env = {"PATH": BASE_PATH, "SESSIONPHONE_ROOT": str(root), "DC_AGENT": name,
            "PYTHONUNBUFFERED": "1"}
     env.update(carried_mail(given))
@@ -220,7 +221,8 @@ def job(name: str | None = None, python: str | None = None, given=None) -> dict:
         src = ears_src()
         if src:
             env["DC_EARS_SRC"] = src
-    log = str(root / "bot.launchd.log")
+    # launchd's capture of the bot's output: ~/.sessionkit/phone/log/<bot>[/<profile>]/
+    log = str(paths.launchd_log(name, dc_env.profile(env)))
     return {
         "Label": label(name),
         # the agent in argv, so `ps` tells two bots apart (dc-live reads the bot's bot.pid)
@@ -234,7 +236,8 @@ def job(name: str | None = None, python: str | None = None, given=None) -> dict:
         # launchd's restart is its reconnect. ThrottleInterval keeps a bot that
         # refuses to start (exit 2: no account yet, an unsafe root, a junk mail
         # host) from spinning: one try every 30 s, each one logging its refusal
-        # to bot.log.
+        # to bot.log. launchd makes neither log's folder: install does
+        # (paths.make_log_dir), before the job is loaded.
         "KeepAlive": True,
         "ThrottleInterval": 30,
         "StandardOutPath": log,
@@ -265,6 +268,13 @@ class NoSTTModel(Exception):
     default, and DC_STT_MODEL is unset. The bot would refuse to start
     (bot.check_stt), so install refuses first. Exit code 2, naming both
     settings."""
+
+
+class ProfileFiles(Exception):
+    """A named profile's job would read the default profile's allow-list or
+    callers file (dc_env.profile_files_problem). The bot would refuse to start
+    (bot.check_profile_files), so install refuses first. Exit code 2, naming
+    the file, the setting and the fix in the bot's own words."""
 
 
 class NoCallers(Exception):
@@ -717,6 +727,10 @@ def install(name: str | None = None, owner: str | None = None,
     why = stt.check(dc_env.stt_url(env), dc_env.stt_model(env))
     if why:
         raise NoSTTModel(why)
+    # the bot's own start check (bot.check_profile_files), on the job's env, before any write
+    why = dc_env.profile_files_problem(env)
+    if why:
+        raise ProfileFiles(why)
     why = dc_env.callers_ignored(env)
     if why:     # before anything is written: the job would carry a setting that does nothing
         raise NoCallers(f"{why} `sessionphone bot install` refuses while it is set: unset it, "
@@ -775,6 +789,8 @@ def install(name: str | None = None, owner: str | None = None,
         raise type(exc)(f"{exc} Kept from this run: {'; '.join(wrote)}.") from None
     p = plist_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
+    # launchd opens the log at the job's start and makes no folder for it
+    paths.make_log_dir(pathlib.Path(j["StandardErrorPath"]).parent)
     target = f"{domain()}/{label(name)}"
     _launchctl("bootout", target)      # a reinstall replaces the old job
     tmp = p.with_suffix(".plist.part")
@@ -947,17 +963,27 @@ def _plist(p: pathlib.Path) -> dict:
 
 def log_paths(name: str | None = None) -> tuple[pathlib.Path, pathlib.Path]:
     """(the bot's own log, launchd's log for its job), as the installed plist
-    names them: DC_LOG, else <DC_ROOT, else SESSIONPHONE_ROOT, else the root>/bot.log;
-    and the job's StandardErrorPath, else <root>/bot.launchd.log."""
+    names them. The bot's: DC_LOG, else ~/.sessionkit/phone/log/<bot>[/<DC_PROFILE>]/bot.log
+    (dc_env.log_for_reader), unless only the bot's old log is there (a bot
+    not started on this version yet): <home>/bot.log, the home being <DC_ROOT, else
+    SESSIONPHONE_ROOT, else the root>[/<DC_PROFILE>]. launchd's: the job's
+    StandardErrorPath, which an older plist names in the root
+    (<root>/bot.launchd.log), else paths.launchd_log, unless only
+    <root>/bot.launchd.log is there. Read from the plist, never this shell,
+    so a job not yet installed again is still found where it writes."""
+    name = name or agent()
     j = _plist(plist_path(name))
     env = j.get("EnvironmentVariables") or {}
     env = env if isinstance(env, dict) else {}
     r = dc_env._get(env, "ROOT") or env.get("SESSIONPHONE_ROOT")
     root = pathlib.Path(r).expanduser() if r else paths.root()
-    log = dc_env._get(env, "LOG")
-    bot_log = pathlib.Path(log).expanduser() if log else root / "bot.log"
+    bot_log = dc_env.log_for_reader(env, agent=name, root=root)
     err = j.get("StandardErrorPath")
-    launchd_log = pathlib.Path(err) if isinstance(err, str) and err else paths.root() / "bot.launchd.log"
+    if isinstance(err, str) and err:
+        launchd_log = pathlib.Path(err)
+    else:
+        launchd_log = paths.legacy_or(paths.launchd_log(name, dc_env.profile(env)),
+                                      paths.root() / paths.LAUNCHD_LOG)
     return bot_log, launchd_log
 
 

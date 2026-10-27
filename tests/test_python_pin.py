@@ -41,7 +41,8 @@ def test_requires_python_is_the_measured_range():
 
 
 def test_docs_no_longer_say_a_mac_without_313_fetches_python():
-    docs = [ROOT / "README.md", ROOT / "skills" / "sessionphone" / "SKILL.md", *_changelog.paths()]
+    docs = [ROOT / "README.md", ROOT / "skills" / "sessionphone" / "SKILL.md",
+            ROOT / "docs" / "first-run.md", *_changelog.paths()]
     for path in docs:
         rel = path.relative_to(ROOT).as_posix()
         text = _flat(path.read_text(encoding="utf-8"))
@@ -51,7 +52,8 @@ def test_docs_no_longer_say_a_mac_without_313_fetches_python():
 
 def test_docs_say_python_is_fetched_only_below_the_floor():
     readme = _flat((ROOT / "README.md").read_text(encoding="utf-8"))
-    skill = _flat((ROOT / "skills" / "sessionphone" / "SKILL.md").read_text(encoding="utf-8"))
+    # the skill's fetch facts live in the page it links, docs/first-run.md
+    skill = _flat((ROOT / "docs" / "first-run.md").read_text(encoding="utf-8"))
     assert "uv uses a Python already on the Mac when it is 3.11 to 3.14" in readme
     assert "25.3 MB, measured for CPython 3.13" in readme
     assert "uv uses a Python already on the Mac when it is 3.11 to 3.14" in skill

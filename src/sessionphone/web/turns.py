@@ -13,10 +13,11 @@ Delta turn's headers, To the seat, Reply-To the call's box.
 EXACTLY ONCE: one writer (this process); start at the end (the heard files'
 sizes are taken when the follower is MADE, synchronously, so build the follower
 just before the call registers); key on the heard log's `seq` with a high-water
-mark; a deterministic Message-ID, <call-turn-web-N-SEQ@IDHOST>; and a send that
-may have gone (sent=unknown: a timeout, or an MTA that failed after the
-hand-off) is never retried. A follower that fails logs once and goes quiet: the
-call carries on (heard_sink's rule). It never touches the audio.
+mark; a deterministic Message-ID, <call-turn-web-N-SEQ@IDHOST>; ONE try in
+process; and every retry by the web server's own spool, which asks the seat's
+box first (below), so a turn is never mailed twice. A follower that fails logs
+once and goes quiet: the call carries on (heard_sink's rule). It never touches
+the audio.
 
 ECHO: each turn is checked, whole, against the call's own EchoGuard, at
 the turn line's own time. A hit is logged with the call, the seq and the
@@ -30,15 +31,28 @@ seat's, or when `message` has no --message-id (seatmail.check). The ids are
 minted at seatmail.id_host(), sessionmail's own host; the Reply-To keeps
 Seat.host (DC_HOST, else dc_env.host_part()), the box a reply is spoken from.
 
-RETRY: only a refusal that sent NOTHING (sent=no) of a WORLD kind
-(seatmail.WORLD_KINDS: exec, identity, mta, undeliverable) is tried again, at
-most TRIES times, with the same id. An input kind (usage, subject, address,
-thread-id, body, header, message-id) would only fail again; sent=unknown may
-have gone. Neither is retried.
+KEPT, NOT LOST: a turn is sent ONCE here. Any refusal (sent=no,
+sent=unknown, a send that could not run, an input kind) is KEPT at once, in
+the same executor job as the send, in the web server's own undelivered spool
+(bridge/spool.Spool, under <webdir>/undelivered/, CallDesk.undelivered_dir()),
+with the turn's own args (TurnMail.args(), never the Sent's, which an exec
+failure leaves empty) and so its own Message-ID. The spool makes every retry,
+first after spool.CALL_TURN_FIRST_S, and drains in the web process
+(CallDesk's drain loop), never the bot's: its resend goes From the WEB seat
+(resender(), the same From rule as TurnMail.send), never the bot's. Before a
+retry the spool asks the seat's box, read-only (seatmail.delivered): there,
+nothing is sent; not there, sent once more under the same id; the box cannot be
+checked and the turn may have gone (sent=unknown), buried in dead/, never sent
+twice. An input kind goes to dead/ at once: counted, never retried.
+
+TELL: after a refused send the follower calls `tell(seq)` ONCE for that turn
+(CallDesk._say_undelivered: the mouth says calls.UNDELIVERED_LINE into the
+call). The spool's later retries never tell. Echo mode keeps and tells nothing.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import glob
 import json
 import os
@@ -47,15 +61,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
-from sessionphone.bridge import dc_env, seatmail
+from sessionphone.bridge import dc_env, seatmail, spool
 from sessionphone.bridge.echo import _epoch
 from sessionphone.bridge.seatmail import Sent, clean_subject
 from sessionphone.noise import no_real_word
 
 POLL_S = 0.2              # a plain poll of the heard files
 GRACE_S = 20.0            # the drain's bound after hang-up: ears-mail's LAG_MAX_S (15 s) and a re-decode
-TRIES = 3                 # a send refused by the world (sent=no) is tried at most this often, same id
-BACKOFF_S = (1.0, 2.0, 4.0)   # the wait before each retry; only the first TRIES - 1 are used
 HEARD_GLOB = "heard_????-??-??.jsonl"
 
 
@@ -162,20 +174,43 @@ def named_seat(mail_to: str | None = None, environ: Mapping[str, str] | None = N
     return seat_for(to, host, e), ""
 
 
-def start_lines(seat: Seat, directory: Path, environ: Mapping[str, str] | None = None) -> list[str]:
+def start_lines(seat: Seat, directory: Path, environ: Mapping[str, str] | None = None,
+                kept: spool.Spool | None = None) -> list[str]:
     """What `sessionphone web --legs` says at start about the turns: where they
     go, and whether they are signed and why, as seatmail.signing() rules for
     ENVIRON (the server's own, the one each turn's `message send` gets).
     A heard dir that is not there is marked (missing), never left silent: the
     follower reads nothing from it, and that is the DEMO's failure shape, turns
-    that reach no one. It is still followed, so a dir the ears make later is read."""
+    that reach no one. It is still followed, so a dir the ears make later is read.
+    KEPT, the server's own spool (CallDesk.kept), adds its count: the web
+    server's only gauge of its kept turns (the bot's gauges read the bot's)."""
     mode, reason = seatmail.signing(environ)
     missing = "" if Path(directory).is_dir() else (
         "  (missing: no turn reaches the seat until the ears write here; check --heard-dir)")
     return [(f"turns: each finished turn of a web call mailed to {seat.to} (From seat "
              f"{seatmail.local_part(seat.addr)}), Reply-To calls+web-<N>@{seat.host} "
              f"(M5, {mode} ({reason}))"),
-            f"heard log: {directory}{missing}"]
+            f"heard log: {directory}{missing}"] + (
+        [] if kept is None else ["turns kept: {} waiting, {} dead ({})".format(*kept.counts(), kept.root)])
+
+
+def sender(seat: Seat) -> tuple[str, str]:
+    """-> (the From's seat, its display name) for a web call's mail: the local
+    part of Seat.addr, as "<Name>'s web call". The ONE From rule: the first try
+    (turn_mail) and every retry (resender) go From the same seat."""
+    return seatmail.local_part(seat.addr), f"{seat.name}'s web call"
+
+
+def resender(seat: Seat) -> Callable[[list[str], str], Sent]:
+    """The web spool's send: seatmail.send_args as the WEB seat. Spool._one()
+    resends with no seat, so its default would sign as the BOT's seat; a web
+    turn's retry never goes From the bot. A record kept by one run is resent
+    From the seat of the run that drains it, To the record's own args."""
+    who, name = sender(seat)
+
+    def send(a: list[str], body: str) -> Sent:
+        return seatmail.send_args(a, body, seat=who, from_name=name)
+    return send
 
 
 # ---- the mail -------------------------------------------------------------------
@@ -218,6 +253,14 @@ class TurnMail(NamedTuple):
                              msgid=self.msgid, in_reply_to=self.thread,
                              seat=self.seat, from_name=self.from_name)
 
+    def args(self) -> list[str]:
+        """`message send`'s arguments for this mail (seatmail.args), as send()
+        builds them: what a kept record carries, so its retry is this mail,
+        under this --message-id. Never the Sent's args: a send that could not
+        run answers args=[]."""
+        return seatmail.args(self.to, self.subject, headers=dict(self.headers),
+                             msgid=self.msgid, in_reply_to=self.thread)
+
 
 def turn_mail(n: int, seq: int, text: str, seat: Seat, caller: str) -> TurnMail:
     """One finished web-call turn as an M5 mail. Pure, given the id host.
@@ -248,8 +291,8 @@ def turn_mail(n: int, seq: int, text: str, seat: Seat, caller: str) -> TurnMail:
         ),
         msgid=message_id(n, seq, ids),
         thread=thread_id(n, ids),
-        seat=seatmail.local_part(seat.addr),
-        from_name=f"{seat.name}'s web call",
+        seat=sender(seat)[0],
+        from_name=sender(seat)[1],
         body=body,
     )
 
@@ -266,17 +309,23 @@ class TurnFollower:
     caller is the name each turn's mail gives its speaker (web/names.py, handed
     down by CallDesk). echo is the call's EchoGuard (WebCall.echo), or None for no check.
     send stands in for TurnMail.send (a test's fake; None sends): it takes the
-    TurnMail and answers a seatmail.Sent. clock is time.time."""
+    TurnMail and answers a seatmail.Sent. clock is time.time.
+
+    kept is the web server's undelivered spool (CallDesk.kept), or None: a
+    refused turn is kept there, in the send's own executor job. tell(seq) is
+    called once per refused turn, on the loop (CallDesk._say_undelivered), or
+    None to say nothing. Echo mode has neither."""
 
     def __init__(self, n: int, seat: Seat, directory: Path, *, caller: str, echo=None,
                  log: Callable[[str], None] = print, send: Callable[[TurnMail], Sent] | None = None,
                  clock: Callable[[], float] = time.time, poll: float = POLL_S, grace: float = GRACE_S,
-                 tries: int = TRIES, backoff: tuple[float, ...] = BACKOFF_S,
-                 sleep: Callable[[float], object] = asyncio.sleep):
+                 sleep: Callable[[float], object] = asyncio.sleep, kept: spool.Spool | None = None,
+                 tell: Callable[[int], object] | None = None):
         self.n, self.seat, self.dir, self.echo, self.caller = n, seat, Path(directory), echo, caller
         self.device = f"call:{n}"
         self.log, self.send, self.clock = log, send, clock
-        self.poll, self.grace, self.tries, self.backoff, self.sleep = poll, grace, tries, backoff, sleep
+        self.poll, self.grace, self.sleep = poll, grace, sleep
+        self.kept, self.tell = kept, tell
         # start at the end: every heard file there is now is read from its size
         self.offsets: dict[Path, int] = {}
         for p in sorted(self.dir.glob(HEARD_GLOB)):
@@ -413,46 +462,60 @@ class TurnFollower:
     # ---- sending
 
     async def mail(self, seq: int, text: str) -> None:
+        """ONE try. A refusal is kept by _send (the spool retries it) and the
+        caller is told once (tell); nothing here tries the turn again."""
         mail = turn_mail(self.n, seq, text, self.seat, self.caller)
         mid = mail.msgid
         who = f"TURN {self.device} seq {seq}"
-        loop = asyncio.get_running_loop()
-        for i in range(max(1, self.tries)):
-            fut = loop.run_in_executor(None, self._send, mail)
-            try:
-                sent = await asyncio.shield(fut)
-            except asyncio.CancelledError:
-                fut.add_done_callback(lambda f: self._landed_late(who, mid, f))
-                raise
-            if sent.ok:
-                self.mailed.append(mid)
-                self.log(f"{who} mailed to {self.seat.to} <{mid}>")
-                return
-            if sent.sent != "no":
-                # it may have gone (a timeout, or an MTA that failed after the
-                # hand-off): never twice wins, here only
-                self.log(f"{who} NOT confirmed to {self.seat.to}: {sent.error} <{mid}>")
-                return
-            if sent.kind not in seatmail.WORLD_KINDS:
-                break                   # the input's fault: the same mail would fail again
-            if i + 1 < self.tries:
-                try:
-                    await self.sleep(self.backoff[min(i, len(self.backoff) - 1)])
-                except asyncio.CancelledError:   # stopped between tries: nothing went, and say so
-                    self.log(f"{who} NOT mailed to {self.seat.to}: {sent.error}, taken=no (stopped)")
-                    raise
-        self.log(f"{who} NOT mailed to {self.seat.to}: {sent.error}, taken=no")
+        fut = asyncio.get_running_loop().run_in_executor(None, self._send, mail)
+        try:
+            sent = await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            fut.add_done_callback(lambda f: self._landed_late(who, mid, f))
+            raise
+        if sent.ok:
+            self.mailed.append(mid)
+            self.log(f"{who} mailed to {self.seat.to} <{mid}>")
+            return
+        if sent.sent != "no":
+            # it may have gone (a timeout, or an MTA that failed after the
+            # hand-off): kept, and its retry asks the box first
+            self.log(f"{who} NOT confirmed to {self.seat.to}: {sent.error} <{mid}>")
+        else:
+            self.log(f"{who} NOT mailed to {self.seat.to}: {sent.error}, taken=no")
+        self._tell(seq)
+
+    def _tell(self, seq: int) -> None:
+        """The caller hears the line once for this turn; a tell that fails is
+        logged, never the follower's end."""
+        if self.tell is None:
+            return
+        try:
+            self.tell(seq)
+        except Exception as e:  # noqa: BLE001 - never the call's problem
+            self.log(f"UNDELIVERED {self.device} seq {seq}: not said: {type(e).__name__}: {one_line(str(e), 120)}")
 
     def _send(self, mail: TurnMail) -> Sent:
         """In the executor: `message send` blocks. Never raises: a send that
-        could not even be tried is nothing sent, kind exec, as seatmail says it."""
+        could not even be tried is nothing sent, kind exec, as seatmail says it.
+        A refusal is KEPT here, in the same job, so a turn is kept at most once
+        (mail() runs once per seq) and a send whose waiter was cancelled is
+        still kept by its own thread."""
         try:
-            return self.send(mail) if self.send is not None else mail.send()
+            sent = self.send(mail) if self.send is not None else mail.send()
         except Exception as e:  # noqa: BLE001 - a fake's or our own fault: nothing went
-            return Sent(False, f"rc=- kind=exec: {type(e).__name__}: {one_line(str(e), 120)}", kind="exec")
+            sent = Sent(False, f"rc=- kind=exec: {type(e).__name__}: {one_line(str(e), 120)}", kind="exec")
+        if not sent.ok and self.kept is not None:
+            try:
+                self.kept.keep(dataclasses.replace(sent, args=mail.args()), mail.body)
+            except Exception as e:  # noqa: BLE001 - a full disk is not the call's end: say so
+                self.log(f"TURN {self.device} <{mail.msgid}> NOT KEPT: {type(e).__name__}: "
+                         f"{one_line(str(e), 120)}; the turn is in the heard log only")
+        return sent
 
     def _landed_late(self, who: str, mid: str, f: asyncio.Future) -> None:
-        """A send whose waiter was cancelled has landed: log it as mail() would."""
+        """A send whose waiter was cancelled has landed: log it as mail() would.
+        A refusal was already kept by _send; the call is gone, so nothing is said."""
         if f.cancelled():
             return
         sent = f.result()          # _send never raises

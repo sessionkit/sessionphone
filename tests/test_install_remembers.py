@@ -132,7 +132,7 @@ def test_a_second_install_given_only_name_and_signer_keeps_the_rest(rig, monkeyp
     """The default root, and the second shell re-gives the name and the signer:
     the bot's address, host and speech servers are still kept."""
     monkeypatch.delenv("SESSIONPHONE_ROOT")
-    (pathlib.Path(os.environ["HOME"]) / ".sessionphone").mkdir(mode=0o700)
+    (pathlib.Path(os.environ["HOME"]) / ".sessionkit" / "phone" / "state").mkdir(parents=True, mode=0o700)
     r = _install("--owner", OWNER)
     assert r.exit_code == 0, r.output
     first = _job_env(rig)

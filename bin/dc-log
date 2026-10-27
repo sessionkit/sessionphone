@@ -4,10 +4,16 @@
 One view of a call, to tail or to run once: what was said each way.
 
 Reads the bot's existing log. Nothing to restart, nothing to install.
-The log is DC_LOG, else <root>/bot.log; the root is DC_ROOT, else
-SESSIONPHONE_ROOT, else the root `sessionphone bot install` keeps in its
-phone.json, else ~/.sessionphone (dc-env's contract). If only the old
-default <root>/bot/bot.log exists, it reads that and says so on stderr.
+The log is DC_LOG, else ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log,
+for the bot dc-env picks (DC_AGENT, else the one `sessionphone bot install`
+would pick) and DC_PROFILE (dc-env's contract). A bot not started on this
+version yet still writes <root>/bot.log: while only that one is there, it is
+read. The root is DC_ROOT, else SESSIONPHONE_ROOT, else the root
+`sessionphone bot install` keeps in its phone.json, else the default,
+~/.sessionkit/phone/state (or the old ~/.sessionphone while only that one is
+there, said on stderr; sessionphone.paths.default_root decides).
+If only the older default <root>/bot/bot.log exists, it reads that and says
+so on stderr.
   -f      follow
   -n N    how many raw lines to consider (default 400)
   -w N    elide text past N columns (default 110; 0 = never elide)
@@ -42,38 +48,48 @@ def _env(name):
 
 def root():
     """The bot's root: DC_ROOT, else sessionphone.paths.root() (SESSIONPHONE_ROOT,
-    else the root phone.json keeps, else ~/.sessionphone). The same answer as
-    dc_env.ROOT and bin/dc-env, and as there, a settings file that cannot be
-    read gives ~/.sessionphone. No agent name in it: a stranger's dc-log reads
-    the stranger's own bot."""
+    else the root phone.json keeps, else paths.default_root()). The same answer
+    as dc_env.ROOT and bin/dc-env, and as there, a settings file that cannot be
+    read gives the default root."""
     v = _env("ROOT")
     if v:
         return Path(v).expanduser()
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
-    from sessionphone import paths, settings     # the one root resolver: stdlib only, no DNS lookup
+    _package()
+    from sessionphone import paths, settings     # the one root resolver
     try:
         return paths.root()
     except settings.Bad:
-        return Path(paths.DEFAULT_ROOT).expanduser()
+        return paths.default_root()
+
+
+def _package():
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
 
 
 def log_path():
-    """The bot's log: DC_LOG, else <root>/bot.log. dc_env.path("LOG", "bot.log")."""
+    """The bot's log, as bin/dc-env's DC_LOG names it: DC_LOG, else
+    dc_env.log_for_reader for this shell's bot and profile, with the root
+    above. The package answers; no copy of its rule is kept here."""
     v = _env("LOG")
-    return Path(v).expanduser() if v else root() / "bot.log"
+    if v:
+        return Path(v).expanduser()
+    r = root()
+    _package()
+    from sessionphone.bridge import dc_env       # the one log resolver (paths.log_dir)
+    return dc_env.log_for_reader(root=r)
 
 
 def resolve_log():
     """The log to read, and a note for stderr (or None).
 
     dc-log used to default to <root>/bot/bot.log. If DC_LOG is unset, that old
-    file exists and <root>/bot.log does not, read the old one and say so: an
+    file exists and the log above does not, read the old one and say so: an
     upgrade must never turn a user's dc-log silently empty."""
     log = log_path()
     if _env("LOG") or log.exists():
         return log, None
-    old = log.parent / "bot" / "bot.log"
+    old = root() / "bot" / "bot.log"
     if not old.exists():
         return log, None
     return old, (f"dc-log: no log at {log}; reading the old default {old}. "

@@ -1,6 +1,8 @@
 """The docs say what the code does about hearing (PHONE-18).
 
-SKILL.md, the CHANGELOG's Unreleased part and the pyproject comment must
+The skill's pages (SKILL.md and the docs/ pages it links: docs/call-hearing.md
+for hearing and voice notes, docs/calls.md for a call), the CHANGELOG's
+Unreleased part and the pyproject comment must
 match the code: the default STT URL comes from dc_env.STT_DEFAULT, the
 offered install command from hearing.OFFERED_INSTALL, and the line that
 restores the old default must still mean `ears serve`. These tests hold the
@@ -25,16 +27,23 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+HEARING = ROOT / "docs" / "call-hearing.md"   # the skill's setup step 7 links it
+CALLS = ROOT / "docs" / "calls.md"            # the skill's "On a call" links it
+
+
 def _skill() -> str:
-    return _flat((ROOT / "skills" / "sessionphone" / "SKILL.md").read_text(encoding="utf-8"))
+    """The skill and the hearing and calls pages it links, as one text."""
+    return " ".join(_flat(p.read_text(encoding="utf-8"))
+                    for p in (ROOT / "skills" / "sessionphone" / "SKILL.md", HEARING, CALLS))
 
 
 def _hearing_bullets() -> str:
-    """Step 7's two hearing bullets, raw: from "Will you hear them?" to the next
-    `## ` heading ("On a call"). S3 is about these words, not the whole skill."""
-    text = (ROOT / "skills" / "sessionphone" / "SKILL.md").read_text(encoding="utf-8")
+    """Step 7's hearing bullets, raw: from "Will you hear them?" to the next
+    `## ` heading ("Voice notes"), in docs/call-hearing.md. S3 is about these
+    words, not the whole page."""
+    text = HEARING.read_text(encoding="utf-8")
     m = re.search(r"^ *- \*\*Will you hear them\?\*\*(.*?)(?=^## )", text, re.MULTILINE | re.DOTALL)
-    assert m, "no 'Will you hear them?' bullet in SKILL.md"
+    assert m, "no 'Will you hear them?' bullet in docs/call-hearing.md"
     return m.group(1)
 
 

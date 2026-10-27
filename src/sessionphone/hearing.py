@@ -21,7 +21,7 @@ the environment the launchd job carries:
   and what that means for a call. When it is NO it points to the one route
   offered, an mlx-audio server on :8890, which sessionphone does not
   install. Under Session Kit (`sessionkit` on the PATH `bot install` ran
-  with, the signal the skill's step 7 uses) that server is the kit's own:
+  with, the signal docs/call-hearing.md uses) that server is the kit's own:
   the line points at `ears services status` and `ears services install`,
   in both its forms, one line each with the Mac it fits: `--no-agent` for
   a Mac that only runs the bot, `--agent NAME` for one with an agent seat to
@@ -102,7 +102,7 @@ OFFERED_URL = "mlx-audio+http://127.0.0.1:8890/v1/audio/transcriptions"
 OFFERED_PORT = 8890
 OFFERED_INSTALL = "voicemode service install mlx-audio"   # standalone only, never under the kit
 # Under Session Kit the server on :8890 is the kit's own (ears services install loads it)
-KIT_COMMAND = "sessionkit"         # on PATH: this is Session Kit (SKILL.md step 7's signal)
+KIT_COMMAND = "sessionkit"         # on PATH: this is Session Kit (docs/call-hearing.md's signal)
 KIT_STATUS = "ears services status"
 KIT_INSTALL = "ears services install"
 # A bare install with no wake seat named is refused (exit 2), so the hint gives
@@ -360,7 +360,7 @@ def _cmd(line: str) -> tuple[str, str]:
 
 def under_kit(shell) -> bool:
     """Is this Session Kit? It is when `sessionkit` is on the shell's PATH, as
-    `command -v sessionkit` asks in the skill's step 7. shell is the
+    `command -v sessionkit` asks in docs/call-hearing.md. shell is the
     environment `bot install` ran in; with no PATH there, the answer is no."""
     return shutil.which(KIT_COMMAND, path=shell.get("PATH") or "") is not None
 

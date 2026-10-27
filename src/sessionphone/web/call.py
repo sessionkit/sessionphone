@@ -14,12 +14,13 @@ THE LEGS ARE A SWITCH. With no `--legs` there are no sockets: the
 call is a closed loop that plays the caller back to themselves about 1 s later
 (echo), so sign-in, mic and speaker can be tried with no seat on the line.
 With `--legs` the two sockets are served under `<root>/web/`. A live keeper
-(call-ears) picks up ANY `~/.sessionphone/*/call-ears.sock` within
+(call-ears) picks up ANY `call-ears.sock` one level under the default root,
+`~/.sessionkit/phone/state/*/` or the old `~/.sessionphone/*/`, within
 seconds, so `--legs` on a root a keeper or the mouth scans is the live-seat
 DEMO: refused unless `--demo` names it (`legs_refusal`).
 
 The leg sockets' module defaults (earleg.SOCK, mouthleg.SOCK) are frozen at
-import from dc_env.ROOT, which is the REAL ~/.sessionphone under the test
+import from dc_env.ROOT, which is the REAL default root under the test
 suite. So this module ALWAYS passes an explicit path to their serve().
 
 EACH FINISHED TURN IS MAILED TO THE SEAT. With `--legs`, a web call mails
@@ -31,6 +32,20 @@ log; web/turns.py's TurnFollower, one per call, made just before the call
 registers, reads its own call:N there and mails each turn once. It is M5
 mail, signed, by the ONE path every mail takes: seatmail's `message send
 --message-id`, as the web seat. Echo mode mails no one.
+
+A REFUSED TURN IS KEPT, AND THE CALLER IS TOLD. With `--legs`
+and a seat the desk holds ONE undelivered spool (bridge/spool.Spool) of its
+own, `kept`, under <webdir>/undelivered/ (undelivered_dir(): it follows the
+root, never spool.directory() or DC_UNDELIVERED, so it is never the bot's),
+whose resend goes From the WEB seat (turns.resender). A refused turn is kept
+there at once; a drain loop on the server's loop retries it (start() to
+stop(), each DRAIN_S, the drain itself in the executor), first after
+spool.CALL_TURN_FIRST_S, asking the seat's box before each retry so it never
+lands twice. A web turn is retried only while a `--legs` server runs on that
+root; a later start drains what is left. And the caller hears
+calls.UNDELIVERED_LINE ONCE per lost turn, by the mouth (`mouth say --device
+call:N`, _say_undelivered): the web process has no TTS, and the mouth leg
+tells the call's EchoGuard, so the line is never mailed back as a turn.
 """
 from __future__ import annotations
 
@@ -38,6 +53,7 @@ import asyncio
 import collections
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -50,10 +66,11 @@ from av import AudioResampler
 
 from sessionphone import paths
 from sessionphone.bridge import earleg, mouthleg
-from sessionphone.bridge.calls import OUT_RATE, PipVoiceTrack
+from sessionphone.bridge import spool as undelivered
+from sessionphone.bridge.calls import OUT_RATE, UNDELIVERED_LINE, PipVoiceTrack
 from sessionphone.bridge.echo import SPOOL, VOICEMODE_EVENTS, EchoGuard
 from sessionphone.web import names
-from sessionphone.web.turns import Seat, TurnFollower
+from sessionphone.web.turns import Seat, TurnFollower, resender
 
 IN_RATE = earleg.RATE           # 16 kHz mono: what the ears are fed
 PTIME = 0.020
@@ -61,6 +78,9 @@ IN_SAMPLES = int(IN_RATE * PTIME)
 GAP_S = 0.7                     # no packet this long (Opus DTX): the ears still need time to move
 ECHO_DELAY_S = 1.0              # echo mode: the caller hears themselves this much later
 EARS_SOCK, MOUTH_SOCK = "call-ears.sock", "call-mouth.sock"
+UNDELIVERED_DIR = "undelivered"  # the web spool, under the web dir: <root>/web/undelivered/
+DRAIN_S = 1.0                   # the web spool's drain pass: the bot's own outbox pass
+MOUTH_TIMEOUT_S = 30.0          # a `mouth say` for the undelivered line: killed past this
 
 # The desk's log takes two kinds. A dict is a call's ROW, its start
 # and end, {"call": N, "event": ...}: server.run sends it to the same JSON sink
@@ -77,11 +97,22 @@ def _parts(p: Path) -> list[str]:
     return [x.casefold() for x in p.parts]
 
 
+def _under_home(root: str) -> list[str]:
+    """ROOT, a `~/...` path of paths', as its case-blind parts below home."""
+    return [x.casefold() for x in Path(root).parts[1:]]
+
+
+# the default roots a keeper scans, below home: paths' own two, never respelled
+_SCANNED_ROOTS = (_under_home(paths.DEFAULT_ROOT), _under_home(paths.OLD_ROOT))
+
+
 def scanned_under(root: Path, home: Path | None = None) -> Path | None:
     """The root a keeper or the mouth scans that `root` is, or is inside; else None.
 
-    They look in ~/.sessionphone and every ~/.*/delta-chat, each with its
-    sockets at depth 0 or 1 (sv keeper/call-ears, sources.bot_roots, mouth
+    They look in both default roots, the new one and the old one
+    (paths.DEFAULT_ROOT, ~/.sessionkit/phone/state; paths.OLD_ROOT,
+    ~/.sessionphone), and every ~/.*/delta-chat, each with its sockets at
+    depth 0 or 1 (sv keeper/phone_roots, call-ears, sources.bot_roots, mouth
     output.call_socks). Matched by PATTERN, not by globbing what exists:
     --legs makes its own dirs, so a ~/.x/delta-chat that does not exist yet
     would exist, and be scanned, once the sockets are bound."""
@@ -91,8 +122,10 @@ def scanned_under(root: Path, home: Path | None = None) -> Path | None:
     if rp[:len(hp)] != hp:
         return None
     rel = r.parts[len(hp):]
-    if rel and rel[0].casefold() == ".sessionphone":
-        return h / rel[0]
+    low = [x.casefold() for x in rel]
+    for scanned in _SCANNED_ROOTS:
+        if low[:len(scanned)] == scanned:
+            return h.joinpath(*rel[:len(scanned)])
     if len(rel) >= 2 and rel[0].startswith(".") and rel[1].casefold() == "delta-chat":
         return h / rel[0] / rel[1]
     return None
@@ -287,11 +320,17 @@ class CallDesk:
     With `legs=True` and a `seat`, each call gets a TurnFollower on the heard
     dir `heard`, and its finished turns are mailed to the seat. A desk with the
     legs and NO seat follows no turns (build note 5): the serve path
-    (server.run) refuses --legs with no seat named, so only a test builds one."""
+    (server.run) refuses --legs with no seat named, so only a test builds one.
+
+    `spool` is the ECHO guard's VoiceMode spool (echo.SPOOL), as it always was.
+    The undelivered spool is `kept`: built here with the legs and a seat, else
+    None. clock and sleep drive it and its drain loop (tests pass fakes)."""
 
     def __init__(self, webdir: Path, *, legs: bool = False, seat: Seat | None = None,
                  heard: Path | None = None, voicemode=VOICEMODE_EVENTS, spool=SPOOL,
-                 log: Log = print, caller: str | None = None):
+                 log: Log = print, caller: str | None = None,
+                 clock: Callable[[], float] = time.time,
+                 sleep: Callable[[float], object] = asyncio.sleep):
         self.webdir = Path(webdir)
         self.legs, self.voicemode, self.spool, self.log = legs, voicemode, spool, log
         self.seat, self.heard = seat, heard
@@ -300,6 +339,14 @@ class CallDesk:
         self.servers: list = []
         self.followers: dict[int, TurnFollower] = {}   # still running: live, or draining after the end
         self.dialling = False       # an offer being answered: not in sessions yet, but busy
+        self.sleep = sleep
+        # the web's OWN undelivered spool: an explicit root (never DC_UNDELIVERED,
+        # never the bot's), resent From the web seat (never the bot's)
+        self.kept: undelivered.Spool | None = (
+            undelivered.Spool(self._spool_log, root=self.undelivered_dir(), clock=clock, send=resender(seat))
+            if legs and seat is not None else None)
+        self.drainer: asyncio.Task | None = None
+        self._telling: set[asyncio.Task] = set()   # `mouth say` runs in flight: held, so none is collected
 
     @property
     def sessions(self) -> dict:
@@ -308,21 +355,89 @@ class CallDesk:
     def sock_paths(self) -> tuple[Path, Path]:
         return self.webdir / EARS_SOCK, self.webdir / MOUTH_SOCK
 
+    def undelivered_dir(self) -> Path:
+        """The web server's own undelivered spool: <webdir>/undelivered/. Under
+        the web dir, so it moves with the root (as calls/ and passkeys.json do)."""
+        return self.webdir / UNDELIVERED_DIR
+
+    def _spool_log(self, line: str) -> None:
+        """The spool's log: a str line, to the desk's log (called from the executor too)."""
+        self.log(line)
+
     async def start(self) -> None:
-        """Serve the legs, with --legs only, each at an EXPLICIT path under <root>/web/."""
+        """Serve the legs, with --legs only, each at an EXPLICIT path under <root>/web/;
+        with a seat, start the web spool's drain loop."""
         self.registry.loop = asyncio.get_running_loop()
         if not self.legs:
             return
         ears, mouth = self.sock_paths()
         self.servers = [await earleg.serve(self.registry, path=ears, log=self.log),
                         await mouthleg.serve(self.registry, path=mouth, log=self.log)]
+        if self.kept is not None:
+            self.drainer = asyncio.ensure_future(self._drain_loop())
+
+    async def _drain_loop(self) -> None:
+        """Each DRAIN_S, one drain of the web spool, in the executor: a send blocks
+        for up to seatmail.TIMEOUT_S, and the call's audio loop is never held.
+        One drain at a time: this loop awaits each one."""
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await loop.run_in_executor(None, self.kept.drain)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - drain() catches per record; never stop the loop
+                self.log(f"BRIDGE MAIL RETRY {self.kept.root}: the drain failed: {type(e).__name__}: {e}")
+            await self.sleep(DRAIN_S)
 
     def make_follower(self, call: WebCall) -> TurnFollower | None:
         """The call's turn follower, or None (echo mode, or no seat). Made, not
-        started: the constructor takes the heard files' sizes."""
+        started: the constructor takes the heard files' sizes. A refused turn is
+        kept in the desk's spool, and told once on the call."""
         if not self.legs or self.seat is None or self.heard is None:
             return None
-        return TurnFollower(call.n, self.seat, self.heard, caller=self.caller, echo=call.echo, log=self.log)
+        return TurnFollower(call.n, self.seat, self.heard, caller=self.caller, echo=call.echo, log=self.log,
+                            kept=self.kept, tell=lambda seq, n=call.n: self._say_undelivered(n, seq))
+
+    def _say_undelivered(self, n: int, seq: int) -> None:
+        """The caller hears calls.UNDELIVERED_LINE once for the lost turn SEQ of
+        call N: by the mouth, `mouth say --device call:N LINE`, started and NOT
+        awaited (the loop must keep serving the mouth socket the line comes back
+        on). Only a LIVE call (in the registry, with a peer) is told: a call that
+        has ended says nothing."""
+        who = f"UNDELIVERED call:{n} seq {seq}"
+        c = self.registry.sessions.get(n)
+        if c is None or not getattr(c, "pc", None):
+            self.log(f"{who}: not said: the call has ended")
+            return
+        exe = shutil.which("mouth")
+        if exe is None:
+            self.log(f"{who}: not said: no mouth on PATH")
+            return
+        t = asyncio.ensure_future(self._mouth(exe, n, who))
+        self._telling.add(t)
+        t.add_done_callback(self._telling.discard)
+
+    async def _mouth(self, exe: str, n: int, who: str) -> None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                exe, "say", "--device", f"call:{n}", UNDELIVERED_LINE, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        except OSError as e:
+            self.log(f"{who}: not said: {type(e).__name__}: {e}")
+            return
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), MOUTH_TIMEOUT_S)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            self.log(f"{who}: not said: mouth gave no answer in {MOUTH_TIMEOUT_S:.0f} s")
+            return
+        if proc.returncode != 0:
+            first = next(iter((err or b"").decode("utf-8", "replace").strip().splitlines()), "")
+            self.log(f"{who}: not said: mouth exited {proc.returncode}: {first}".rstrip(": "))
+            return
+        self.log(f"{who}: said on the call")
 
     def _drained(self, f: TurnFollower) -> None:
         if self.followers.get(f.n) is f:
@@ -335,6 +450,15 @@ class CallDesk:
             draining = list(self.followers.values())
             self.log(f"turns: draining {len(draining)} call(s), up to {max(f.grace for f in draining):.0f} s")
             await asyncio.gather(*(f.wait() for f in draining))
+        if self.drainer is not None:        # after the followers: their last keeps are on disk
+            self.drainer.cancel()
+            try:
+                await self.drainer
+            except asyncio.CancelledError:
+                pass
+            self.drainer = None
+        if self._telling:                   # a line in flight: its call is gone, so let it end
+            await asyncio.gather(*list(self._telling), return_exceptions=True)
         for s in self.servers:
             s.close()
             await s.wait_closed()

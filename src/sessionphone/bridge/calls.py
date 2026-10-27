@@ -184,8 +184,9 @@ IN_RATE = 16000                                     # what whisper wants
 IN_SAMPLES = int(IN_RATE * PTIME)
 # The far party's audio in a call dir is named for the role, not a person:
 # caller-NNN.wav per chunk, caller-call.wav for the whole call,
-# caller-call.json for its clock. Calls before this were mike-*; nothing in
-# this repo reads them by name (dc-call-mix reads full-in/full-out.wav).
+# caller-call.json for its clock. Older versions used another name for the
+# same files; nothing in this repo reads them by name (dc-call-mix reads
+# full-in/full-out.wav).
 # Which of them outlive the call is the recording switch's to say
 # (bridge/recording.py): with it off (the default) none do.
 CALLER_CHUNK = "caller-{n:03d}.wav"
@@ -844,11 +845,16 @@ class VoiceLine:
     floor: a REPLY line (a dc-say, a mail into the call, a mouth line). It
     does not start while the caller is speaking (bridge/floor.py): at the
     head of the queue, with the track idle, it waits for the caller's quiet,
-    or the cap. The bridge's own lines are opened without it."""
+    or the cap. The bridge's own lines are opened without it.
 
-    def __init__(self, track, who="", floor=False):
+    opening: a line of the call's opening, the recording notice and the
+    greeting. It goes ahead of every line that is not, and while
+    the opening lasts no other line starts (PipVoiceTrack.opening)."""
+
+    def __init__(self, track, who="", floor=False, opening=False):
         self.track, self.who = track, who
         self.floor = floor
+        self.opening = opening
         self.held_at = None        # when the floor first held it (floor clock)
         self.state = "waiting"
         self.buf = []              # (pcm, on_queue) said while waiting
@@ -871,8 +877,11 @@ class VoiceLine:
         -> False when the line is over (cut or ended) and the PCM was dropped."""
         if not self.said and self.live:
             self.said = True
-            if self.state == "waiting":
-                self.track.said_n += 1     # a waiting line is talking too (firstcall reads said_n)
+            # a waiting line is talking too (firstcall reads said_n), unless the
+            # opening holds it: then the greeting has not been said, and a held
+            # reply must not end the first call's wait (it counts at its grant)
+            if self.state == "waiting" and not (self.track.opening and not self.opening):
+                self.track.said_n += 1
         if self.state == "owning":
             self.track._append(pcm, on_queue)
             return True
@@ -917,7 +926,12 @@ class PipVoiceTrack(MediaStreamTrack):
 
     One line at a time: a writer opens a VoiceLine (line()), and the line
     that arrived first owns the track until it ends; the others wait in
-    arrival order and are never spliced in. A cut drops them all."""
+    arrival order and are never spliced in. A cut drops them all.
+
+    The call's opening goes first: while `opening` is set, an
+    opening line (the recording notice, then the greeting) goes ahead of any
+    line still waiting, and no other line starts. end_opening() lifts it, and
+    the lines that waited then start in their order, under the floor."""
     kind = "audio"
 
     def __init__(self):
@@ -931,6 +945,7 @@ class PipVoiceTrack(MediaStreamTrack):
         self.owner = None                     # the VoiceLine that has the track
         self.waiting = collections.deque()    # VoiceLines behind it, in arrival order
         self.floor = None                     # bridge/floor.py's Floor: the call sets it; None = no gate
+        self.opening = False                  # the call's opening holds every other line (CallSession sets it)
         self._start = None
         self._timestamp = 0
 
@@ -943,12 +958,18 @@ class PipVoiceTrack(MediaStreamTrack):
 
     # ---- one line at a time
 
-    def line(self, who="", floor=False):
+    def line(self, who="", floor=False, opening=False):
         """Open a line. Its arrival is now: it owns the track at once if
         nothing does, else it waits behind the lines that arrived before it.
-        floor: a reply line, held while the caller speaks (see _may_start)."""
-        ln = VoiceLine(self, who, floor)
-        self.waiting.append(ln)
+        floor: a reply line, held while the caller speaks (see _may_start).
+        opening: a line of the call's opening. It goes before the first waiting
+        line that is not one, so the notice and the greeting keep their order."""
+        ln = VoiceLine(self, who, floor, opening)
+        if opening:
+            i = next((k for k, w in enumerate(self.waiting) if not w.opening), len(self.waiting))
+            self.waiting.insert(i, ln)
+        else:
+            self.waiting.append(ln)
         self._grant()
         return ln
 
@@ -996,7 +1017,13 @@ class PipVoiceTrack(MediaStreamTrack):
         been quiet for the floor's gap, or once the cap has held it. Its hold
         is counted from the moment it could otherwise have started, and logged
         once, as it is released. Every other line, a track with no floor (a web
-        call) and floor control off start as before."""
+        call) and floor control off start as before.
+
+        While the call's opening lasts, only an opening line starts, floor or
+        no floor. That wait is not a floor hold: held_at is not set,
+        so the cap counts from the end of the opening."""
+        if self.opening and not ln.opening and not (ln.complete and not ln.buf):
+            return False         # the opening first (an ended empty line still passes)
         f = self.floor
         if f is None or not ln.floor or not f.on or (ln.complete and not ln.buf):
             return True          # (an ended line with nothing to say passes the track on)
@@ -1012,6 +1039,16 @@ class PipVoiceTrack(MediaStreamTrack):
             _line_log(f"FLOOR {ln.who or 'reply'} line held {now - ln.held_at:.1f}s, "
                       f"released by {why}")
         return True
+
+    def end_opening(self):
+        """The call's opening is on the track: the lines that waited for it may
+        start, in their order, under the floor. Once is enough; again is a no-op."""
+        if not self.opening:
+            return
+        self.opening = False
+        if self.waiting:
+            _line_log(f"OPENING {len(self.waiting)} line(s) waited for the greeting")
+        self._grant()
 
     def floor_tick(self):
         """Once a frame: the floor reads the VAD, and a held line starts as soon
@@ -1898,6 +1935,10 @@ class CallSession:
         self.voice = PipVoiceTrack()
         # a reply line waits for his quiet: the floor reads the VAD's speaking
         self.voice.floor = Floor(lambda: self.speaking, FLOOR_GAP, FLOOR_CAP)
+        # >>> greeting-first: the call is live for a dc-say once its
+        # pc exists, before it connects; a reply that arrives then waits for the
+        # opening (notice, greeting), which _on_connected ends, whatever happens
+        self.voice.opening = True
         # >>> call-id
         # The directory carries the CALL, not just the room, so the log line
         # "closing msg 5531" and the tape on disk name the same thing.
@@ -2146,6 +2187,17 @@ class CallSession:
 
     async def _on_connected(self):
         self.connected = True
+        # >>> greeting-first: every way out ends the opening (said, failed, cut
+        # or raised), or every reply on this call would wait for good
+        try:
+            await self._open()
+        finally:
+            voice = getattr(self, "voice", None)
+            if callable(getattr(voice, "end_opening", None)):
+                voice.end_opening()
+
+    async def _open(self):
+        """The call is up: the chat line, the mail, the notice, the greeting."""
         self.started = time.time()
         self._live_write()              # >>> call-id: dc-say can now see us
         set_call_id(self.msg_id)        # >>> call-id-log: stamp every line
@@ -2175,7 +2227,7 @@ class CallSession:
             self.wait_task = asyncio.ensure_future(self._first_call_wait())
         await self._rec_notice_speak()  # >>> recording-notice: before the greeting
         await self.speak(self.greeting or (first if not self.outgoing else hello),
-                         self.greet_voice, self.greet_voice or None)
+                         self.greet_voice, self.greet_voice or None, opening=True)
 
     # >>> first-call-wait
     async def _first_call_wait(self):
@@ -2834,11 +2886,13 @@ class CallSession:
                          "Medium": "voice"},
                 call=self.msg_id))
 
-    async def speak(self, text, voice=None, who=None, fallback=True, floor=False):
+    async def speak(self, text, voice=None, who=None, fallback=True, floor=False, opening=False):
         """Say TEXT into the call. fallback: a line TTS could not say is sent
         as chat text instead (False: it is only logged). floor: a REPLY (a
         dc-say, a mail into the call): it does not start while the caller is
         speaking (bridge/floor.py). The bridge's own lines pass False.
+        opening: the recording notice and the greeting, which go before any
+        line that arrived while the call was connecting.
 
         The whole reply is ONE line on the track (PipVoiceTrack.line), and it
         takes its place as it arrives, here: a line already speaking (the
@@ -2848,9 +2902,9 @@ class CallSession:
         Returns what happened: {"n": sentences, "failed": how many TTS could
         not say, "error": the first failure, "cut": cut short}. Every sentence
         not failed and not cut was rendered and handed to the call."""
-        voice, who = voice or dc_env.VOICE, who or dc_env.AGENT_NAME   # >>> identity
+        voice, who = voice or dc_env.VOICE, who or dc_env.GREETING_NAME   # >>> identity: no who = the bot's own line
         loop = asyncio.get_running_loop()
-        line = self.voice.line(who, floor=floor)
+        line = self.voice.line(who, floor=floor, opening=opening)
         # >>> said-rows: one utt per line, like the mouth. A sentence starts
         # playing when it reaches the track, behind what is queued there, so
         # the line's end is estimated then; `said` is written at that end.
@@ -3117,7 +3171,7 @@ class CallSession:
         why = None
         if spoken_on:
             try:
-                out = await self.speak(recording.SPOKEN_NOTICE, fallback=False)
+                out = await self.speak(recording.SPOKEN_NOTICE, fallback=False, opening=True)
                 if out["failed"]:
                     why = out["error"] or "tts failed"
                 elif out["cut"]:

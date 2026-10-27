@@ -12,7 +12,7 @@ lock, never writes it), it writes DC_PID_FILE (<root>/bot.pid), four lines:
     12345                                       the bot's pid
     Thu Oct 22 02:19:57 2026                    its start time: ps -o lstart=
     /venv/bin/python -m sessionphone.bridge.bot claude    its command line: ps -o command=
-    /Users/<you>/.sessionphone                  its root, symlinks resolved
+    /Users/<you>/.sessionkit/phone/state        its root, symlinks resolved
 
 `ps` is asked with TZ=UTC0 and LC_ALL=C, so the start time reads the same in
 the bot's launchd job and in any shell. `dc-live` reads the file and says the

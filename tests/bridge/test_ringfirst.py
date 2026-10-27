@@ -264,7 +264,7 @@ def test_voicemail_greets_as_voicemail(monkeypatch, tmp_path):
         monkeypatch.setattr(calls, "_recorder", object())
         monkeypatch.setattr(calls, "set_call_id", lambda _id: None)
 
-        async def speak(text, voice=None, who=None, r=r):
+        async def speak(text, voice=None, who=None, r=r, **_kw):
             r.spoken.append(text)
         s.speak = speak
         run(s._on_connected())

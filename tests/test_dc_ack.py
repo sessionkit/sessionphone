@@ -31,7 +31,7 @@ def allow(root, text="twelve  chat:12\nthirteen  chat:13\nninety-nine  chat:99\n
 def run(tool, root, *args, wait="5", listed=True):
     if listed and not (root / "channels.txt").exists():
         allow(root)
-    env = dict(os.environ, DC_ROOT=str(root), DC_TAKEN_WAIT=wait)
+    env = dict(os.environ, DC_ROOT=str(root), DC_TAKEN_WAIT=wait, DC_AGENT="ada")
     for k in ("DC_OUTBOX", "DC_OUTBOX_PUBLIC", "DC_ACKS", "DC_LIVE", "DC_LOG",
               "DC_CHANNELS_FILE", "PIP_CHAT_CHANNELS_FILE"):
         env.pop(k, None)
@@ -100,6 +100,7 @@ def test_a_failed_send_exits_3_and_says_why(tmp_path):
 
 
 def test_a_gated_job_with_no_ack_exits_4_not_confirmed(tmp_path):
+    kit_log = Path(os.environ["HOME"]) / ".sessionkit/phone/log/ada/bot.log"   # the bot's, out of its root
     with Bot(tmp_path, None):
         r = run("dc-say", tmp_path, "13", "hello")
         j = run("dc-react", tmp_path, "5", "+1")
@@ -107,7 +108,7 @@ def test_a_gated_job_with_no_ack_exits_4_not_confirmed(tmp_path):
         assert res.returncode == 4, (tool, res.stderr)
         assert res.stdout == ""                                 # nothing claims it went
         assert (f"{tool}: NOT CONFIRMED (no ack): the bot took it but never confirmed; "
-                f"nothing may have been sent. Its log: {tmp_path / 'bot.log'}") in res.stderr
+                f"nothing may have been sent. Its log: {kit_log}") in res.stderr
 
 
 def test_refused_stays_3_and_ok_stays_0_beside_4(tmp_path):

@@ -9,9 +9,10 @@ the reader never scrolls.
   dc-log-web --once     write once, print the page's path and exit
   dc-log-web -h         this help; writes nothing
 
-The page is DC_WEB_OUT, else <root>/calllog.html, beside the bot's log; the
-root is DC_ROOT, else SESSIONPHONE_ROOT, else ~/.sessionphone (dc-env's
-contract). Serve that file, or point DC_WEB_OUT into what you serve.
+The page is DC_WEB_OUT, else <root>/calllog.html, in the bot's root; the
+root is DC_ROOT, else the one dc-log's root() gives (SESSIONPHONE_ROOT, else
+the root phone.json keeps, else the default: dc-env's contract). Serve that
+file, or point DC_WEB_OUT into what you serve.
 DC_WEB_LINES: how many log lines to render (default 120).
 """
 import argparse, html, importlib.util, os, subprocess, sys, time

@@ -28,7 +28,8 @@ from sessionphone.bridge import ack, bot, dc_env, xdc_feed, xdc_rt
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "dc-xdc-realtime"
-SKILL = ROOT / "skills" / "sessionphone" / "SKILL.md"
+# The skill's Guide Trail recipe: in the page its "What reaches you" links.
+SKILL = ROOT / "docs" / "what-reaches-you.md"
 DAY = "2030-12-08"
 
 

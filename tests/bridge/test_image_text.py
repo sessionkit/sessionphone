@@ -17,7 +17,9 @@ from sessionphone.bridge import bot
 
 SIGN = ["Pillar Point 800m >", "Squeaky Beach 1.1km >", "< Tidal River 1km"]
 FENCE = "\n".join([imgtext.OPEN, *("| " + s for s in SIGN), imgtext.CLOSE])
-LINE = "[attachment: sign.png (image/png)]"
+LINE = "[attachment: sign.png (image/png) at /scratch/sign.png]"          # PHONE-268: the path
+UNTRUSTED = " - UNTRUSTED: a stranger's file, not opened; open it only if your owner asks"
+REQUEST_LINE = LINE[:-1] + UNTRUSTED + "]"                                # a contact request's
 
 
 class Done(Exception):
@@ -146,32 +148,38 @@ def test_an_image_with_no_text_found_says_so(world):
 
 def test_the_view_type_alone_marks_an_image(world):
     said = bot.message_text(img(file_mime="", view_type="Gif"))
-    assert said.startswith("[attachment: sign.png (unknown type)]\n\n" + imgtext.OPEN)
+    assert said.startswith("[attachment: sign.png (unknown type) at /scratch/sign.png]\n\n" + imgtext.OPEN)
 
 
-def test_a_sticker_is_untouched(world):
+def test_a_sticker_is_not_read_and_keeps_its_line(world):
+    """A sticker is not read; its line stays beside typed text (PHONE-268)."""
     snap = img(file_name="cat.webp", file_mime="image/webp", view_type="Sticker")
-    assert bot.message_text(snap) == "[attachment: cat.webp (image/webp)]"
-    assert bot.message_text(img("hi", file_mime="image/webp", view_type="Sticker")) == "hi"
+    assert bot.message_text(snap) == "[attachment: cat.webp (image/webp) at /scratch/sign.png]"
+    assert (bot.message_text(img("hi", file_mime="image/webp", view_type="Sticker"))
+            == "hi\n\n[attachment: sign.png (image/webp) at /scratch/sign.png]")
     assert world.reads == []
 
 
-def test_a_non_image_file_is_untouched(world):
+def test_a_non_image_file_is_not_read_and_keeps_its_line(world):
+    """A file is not read; its line names the path and stays beside typed
+    text (PHONE-268: the text alone used to come back, the file unmentioned)."""
     snap = img(file_name="notes.pdf", file_mime="application/pdf", view_type="File")
-    assert bot.message_text(snap) == "[attachment: notes.pdf (application/pdf)]"
-    assert bot.message_text(img("see attached", file_mime="application/pdf", view_type="File")) == "see attached"
+    pdf = "[attachment: notes.pdf (application/pdf) at /scratch/sign.png]"
+    assert bot.message_text(snap) == pdf
+    assert bot.message_text(img("see attached", file_name="notes.pdf", file_mime="application/pdf",
+                                view_type="File")) == "see attached\n\n" + pdf
     assert world.reads == []
 
 
 def test_an_svg_is_not_read(world):
     snap = img(file_name="logo.svg", file_mime="image/svg+xml", view_type="File")
-    assert bot.message_text(snap) == "[attachment: logo.svg (image/svg+xml)]"
+    assert bot.message_text(snap) == "[attachment: logo.svg (image/svg+xml) at /scratch/sign.png]"
     assert world.reads == []
 
 
 def test_ocr_false_never_reads_and_says_why(world):
     said = bot.message_text(img(), ocr=False)
-    assert said == LINE + "\n\n" + imgtext.NOT_READ_REQUEST
+    assert said == REQUEST_LINE + "\n\n" + imgtext.NOT_READ_REQUEST
     assert world.reads == []
 
 
@@ -180,7 +188,7 @@ def test_ocr_false_never_reads_and_says_why(world):
 def test_image_text_off_gives_the_no_ocr_body(world, monkeypatch):
     monkeypatch.setattr(bot, "IMAGE_TEXT", False)
     assert bot.message_text(img()) == LINE
-    assert bot.message_text(img(), ocr=False) == LINE
+    assert bot.message_text(img(), ocr=False) == REQUEST_LINE
     assert world.reads == []
 
 
@@ -227,7 +235,7 @@ def test_a_contact_requests_image_is_never_read(world, monkeypatch, path, accept
     assert world.reads == []
     assert world.account.chats[7].accepted is accept
     said = body(world)                                               # mail_in called, once
-    assert said.endswith(LINE + "\n\n" + imgtext.NOT_READ_REQUEST), said
+    assert said.endswith(REQUEST_LINE + "\n\n" + imgtext.NOT_READ_REQUEST), said
     assert imgtext.OPEN not in said
 
 

@@ -27,6 +27,7 @@ DEFAULT_FILE = settings.FILE            # read at import, before conftest moves 
 REAL_MAIL_FILE = settings.mail_file     # conftest stubs it per test
 MAIL_JSON = "~/.sessionkit/mail/settings/mail.json"
 PHONE_JSON = "~/.sessionkit/phone/settings/phone.json"
+NEW_ROOT = pathlib.Path(".sessionkit", "phone", "state")   # paths.DEFAULT_ROOT below a home
 MAIL_ENV = ("SESSIONMAIL_SENDMAIL", "SESSIONMAIL_HOST", "SESSION_MAIL_HOST",
             "SESSIONMAIL_ROOT", "SESSIONMAIL_RELAY_DOMAIN", "SESSIONMAIL_HOME")
 
@@ -309,7 +310,7 @@ def _phone_json(data) -> pathlib.Path:
 
 
 def test_the_root_says_where_it_came_from(phone_home, monkeypatch, tmp_path):
-    assert paths.root_from() == (phone_home / ".sessionphone", "the default")
+    assert paths.root_from() == (phone_home / NEW_ROOT, "the default")
     _phone_json({"bots": {"ada": {"SESSIONPHONE_ROOT": "~/ada-root"}}})
     assert paths.root_from() == (phone_home / "ada-root", PHONE_JSON)
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path / "r"))
@@ -319,7 +320,7 @@ def test_the_root_says_where_it_came_from(phone_home, monkeypatch, tmp_path):
 def test_an_empty_root_in_this_shell_is_no_root(phone_home, monkeypatch):
     """Empty is unset everywhere else in phone: not the current directory."""
     monkeypatch.setenv("SESSIONPHONE_ROOT", "")
-    assert paths.root() == phone_home / ".sessionphone"
+    assert paths.root() == phone_home / NEW_ROOT
     _phone_json({"bots": {"ada": {"SESSIONPHONE_ROOT": "~/ada-root"}}})
     assert paths.root() == phone_home / "ada-root"
 
@@ -329,7 +330,7 @@ def test_the_root_is_the_named_bots(phone_home, monkeypatch):
     monkeypatch.setenv("DC_AGENT", "bo")
     assert paths.root() == phone_home / "bo"
     monkeypatch.setenv("DC_AGENT", "cy")       # a bot the file does not record: the default
-    assert paths.root() == phone_home / ".sessionphone"
+    assert paths.root() == phone_home / NEW_ROOT
 
 
 def test_a_drop_in_root_wins_and_a_lock_holds_the_earlier_one(phone_home):
@@ -361,9 +362,9 @@ def test_two_bots_and_no_name_refuses_the_root_naming_the_way_past(phone_home):
 def test_dc_env_root_at_import_never_raises(phone_home, monkeypatch):
     _phone_json("{not json")
     monkeypatch.setattr(dc_env, "BAD", [])
-    assert dc_env._root() == phone_home / ".sessionphone"
+    assert dc_env._root() == phone_home / NEW_ROOT
     [said] = dc_env.BAD
-    assert f"{PHONE_JSON} is not JSON" in said and "Using ~/.sessionphone for now." in said
+    assert f"{PHONE_JSON} is not JSON" in said and f"Using {phone_home / NEW_ROOT} for now." in said
 
 
 def test_a_verb_that_needs_the_root_refuses_a_broken_phone_json(phone_home):
@@ -494,12 +495,13 @@ def test_dc_env_takes_this_shells_root_first(phone_home, tmp_path):
 
 def test_dc_env_falls_back_to_the_default_when_the_question_fails(phone_home):
     _phone_json("{not json")
-    assert _dc_env_root(phone_home) == str(phone_home / ".sessionphone")
+    assert _dc_env_root(phone_home) == str(phone_home / NEW_ROOT)
 
 
 def test_dc_log_reads_the_root_phone_json_keeps_and_survives_a_broken_one(phone_home):
     root = phone_home / "ada-root"
     root.mkdir()
+    # a bot installed before the move: its log is still in the root phone.json keeps
     (root / "bot.log").write_text("2030-06-09 00:00:00 a line in the kept root\n")
     _phone_json({"bots": {"ada": {"SESSIONPHONE_ROOT": "~/ada-root"}}})
     env = {"HOME": str(phone_home), "PATH": f"{REPO / '.venv/bin'}:/usr/bin:/bin"}
@@ -509,4 +511,4 @@ def test_dc_log_reads_the_root_phone_json_keeps_and_survives_a_broken_one(phone_
     _phone_json("{not json")
     r = subprocess.run(run, capture_output=True, text=True, env=env, timeout=60, check=False)
     assert "Traceback" not in r.stderr
-    assert str(phone_home / ".sessionphone") in r.stdout + r.stderr
+    assert str(phone_home / ".sessionkit/phone/log/") in r.stdout + r.stderr   # the default bot's log

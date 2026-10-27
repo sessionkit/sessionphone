@@ -27,6 +27,7 @@ import pathlib
 import plistlib
 
 import pytest
+from _kit_log import kit_log
 from click.testing import CliRunner
 
 from sessionphone import paths, service, settings
@@ -185,7 +186,7 @@ def test_a_root_in_this_shell_wins_over_phone_json(remembered, monkeypatch, tmp_
 
 
 def test_with_no_root_anywhere_paths_root_is_the_default(phone_home):
-    assert paths.root() == phone_home / ".sessionphone"
+    assert paths.root() == phone_home / ".sessionkit" / "phone" / "state"
 
 
 def test_bot_status_finds_the_bot_phone_json_records(remembered, launchd):
@@ -195,12 +196,21 @@ def test_bot_status_finds_the_bot_phone_json_records(remembered, launchd):
 
 
 def test_bot_status_reads_the_log_in_the_root_phone_json_records(remembered, launchd, monkeypatch):
-    """The shell names the bot; its plist is gone (uninstalled), its log stays
-    in the root phone.json records."""
+    """The shell names the bot; its plist is gone (uninstalled), and the log of
+    a bot installed before the move stays in the root phone.json records."""
     monkeypatch.setenv("DC_AGENT", "ada")
     r = CliRunner().invoke(cli, ["bot", "status"])
     assert f"log:     {remembered / 'bot.log'}" in r.output
     assert "the line in the kept root" in r.output
+
+
+def test_bot_status_reads_the_bots_own_log_over_the_old_one_in_the_root(remembered, launchd, monkeypatch):
+    monkeypatch.setenv("DC_AGENT", "ada")
+    kit_log("ada").parent.mkdir(parents=True)
+    kit_log("ada").write_text("2030-06-09 00:00:01 the line in the bot's own log\n")
+    r = CliRunner().invoke(cli, ["bot", "status"])
+    assert f"log:     {kit_log('ada')}" in r.output
+    assert "the line in the bot's own log" in r.output
 
 
 def test_bot_uninstall_removes_the_bot_phone_json_records(remembered, launchd):

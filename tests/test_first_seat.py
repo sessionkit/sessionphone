@@ -25,6 +25,7 @@ import stat
 import subprocess
 
 import pytest
+from _kit_log import kit_log
 from click.testing import CliRunner
 
 from sessionphone import seat, service, settings
@@ -636,6 +637,7 @@ def test_t10_a_probe_answering_the_wrong_kind_is_refused_before_the_plist(rig):
 @pytest.fixture
 def status_rig(rig, monkeypatch, tmp_path):
     rig.launchd.loaded = False
+    monkeypatch.setenv("DC_AGENT", "ada")       # the bot status reads: named, so its log is known
     return tmp_path / "root"
 
 
@@ -650,18 +652,28 @@ def _write_plist(rig, env: dict, err: str | None = None):
     rig.plist.write_bytes(plistlib.dumps(j))
 
 
+def _kit_log_at(text, name="bot.log"):
+    p = kit_log("ada", name=name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+    return p
+
+
 def test_t11_status_shows_the_bots_last_line(rig, status_rig):
-    (status_rig / "bot.log").write_text("started\nonline as bot@relay - listening\n\n")
+    log = _kit_log_at("started\nonline as bot@relay - listening\n\n")
     out = _status()
-    assert f"log:     {status_rig / 'bot.log'}" in out
+    assert f"log:     {log}" in out
     assert "last:    online as bot@relay - listening" in out
 
 
-def test_t11_with_no_bot_log_it_shows_launchds(rig, status_rig):
-    _write_plist(rig, {"SESSIONPHONE_ROOT": str(status_rig)}, str(status_rig / "bot.launchd.log"))
-    (status_rig / "bot.launchd.log").write_text("sessionphone bot: no signer: DC_SIGNER_SOCK is not set\n")
+@pytest.mark.parametrize("where", ["kit", "an older plist's, in the root"])
+def test_t11_with_no_bot_log_it_shows_launchds(rig, status_rig, where):
+    err = kit_log("ada", name="bot.launchd.log") if where == "kit" else status_rig / "bot.launchd.log"
+    _write_plist(rig, {"SESSIONPHONE_ROOT": str(status_rig)}, str(err))
+    err.parent.mkdir(parents=True, exist_ok=True)
+    err.write_text("sessionphone bot: no signer: DC_SIGNER_SOCK is not set\n")
     out = _status()
-    assert f"log:     {status_rig / 'bot.launchd.log'}" in out
+    assert f"log:     {err}" in out
     assert "last (bot.launchd.log): sessionphone bot: no signer: DC_SIGNER_SOCK is not set" in out
 
 
@@ -673,7 +685,8 @@ def test_t11_with_neither_it_says_no_log_yet(rig, status_rig):
 def test_t11_dc_log_in_the_plist_names_the_bots_log(rig, status_rig, tmp_path):
     mine = tmp_path / "elsewhere.log"
     mine.write_text("a line\nthe last line\n")
-    (status_rig / "bot.log").write_text("not this one\n")
+    _kit_log_at("not this one\n")
+    (status_rig / "bot.log").write_text("not this one either\n")
     _write_plist(rig, {"SESSIONPHONE_ROOT": str(status_rig), "DC_LOG": str(mine)})
     out = _status()
     assert f"log:     {mine}" in out and "last:    the last line" in out

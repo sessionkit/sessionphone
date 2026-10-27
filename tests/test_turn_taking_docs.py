@@ -5,6 +5,8 @@ speaking, but only up to its cap: after that the reply plays even over the
 caller. And it still plays every reply it is given, in order. So the agent
 side is a rule in the skill: one reply per caller turn, none to a fragment
 that asks nothing, and anything more goes as text in the chat, by dc-dm.
+The rules name a spoken reply, not `dc-say`: on a call the mouth leads and
+dc-say is the fallback, as the call mail's own hint says (dc_env.reply_hint).
 These tests hold the skill's "Turn-taking" part to those three rules, to
 the reason quoted for them, and to the floor default the code uses.
 
@@ -20,7 +22,7 @@ from pathlib import Path
 
 import _changelog
 
-from sessionphone.bridge import floor
+from sessionphone.bridge import dc_env, floor
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "sessionphone" / "SKILL.md"
@@ -51,10 +53,12 @@ def test_the_reason_is_quoted_verbatim():
     assert f'"{QUOTE}"' in _turn_taking()
 
 
-def test_one_dc_say_per_caller_turn():
+def test_one_spoken_reply_per_caller_turn():
     text = _turn_taking()
-    assert "One `dc-say` per caller turn" in text
+    assert "One spoken reply per caller turn" in text
     assert "a sentence or two" in text
+    # dc-say is the mouth's fallback on a call, never THE reply
+    assert "One `dc-say` per caller turn" not in text
 
 
 def test_no_reply_to_a_fragment_that_asks_nothing():
@@ -63,9 +67,10 @@ def test_no_reply_to_a_fragment_that_asks_nothing():
     assert '"No."' in text and '"Okay."' in text
 
 
-def test_never_a_second_dc_say_and_more_goes_as_chat_text():
+def test_never_a_second_spoken_reply_and_more_goes_as_chat_text():
     text = _turn_taking()
-    assert "Never a second `dc-say` before they speak again" in text
+    assert "Never a second spoken reply before they speak again" in text
+    assert "Never a second `dc-say`" not in text
     assert "as text in the chat" in text
     # A plain dc-say is spoken into a live call (bot.py speak_if_live), so
     # the text route must be one that never is: dc-dm (PHONE-253 F1).
@@ -78,6 +83,21 @@ def _on_a_call() -> str:
     on_call = re.search(r"^## On a call\n(.*?)(?=^## )", text, re.MULTILINE | re.DOTALL)
     assert on_call, "no '## On a call' section in SKILL.md"
     return _flat(on_call.group(1))
+
+
+def test_skill_answers_a_call_as_the_call_mail_says_mouth_first():
+    """The call mail tells the agent to answer with the mouth, and names
+    dc-say only if the mouth fails. The skill says the same, in the mail's
+    own words, and never presents a dc-say line as THE call reply."""
+    hint = dc_env.reply_hint(12, call="N")
+    first, fallback = hint.splitlines()
+    assert first == 'Answer with: mouth say --device call:N "text"'
+    assert fallback.startswith("If the mouth fails: ")
+    text = _on_a_call()
+    assert f"`{first}`" in text
+    assert "only for when the mouth fails" in text
+    # the old wording that made dc-say --call the way to answer a call
+    assert 'dc-say --call "$(dc-live --id)" CHAT_ID "text"` speaks into the call' not in text
 
 
 # dc-say --text-only (PHONE-252) landed beside PHONE-253's turn-taking rules.

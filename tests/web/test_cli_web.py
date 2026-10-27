@@ -42,14 +42,16 @@ def test_enrol_defaults_to_the_sessionphone_root(scratch_root):
     assert json.loads((scratch_root / "web" / "enrol.json").read_text())["wrong"] == 0
 
 
-def test_with_no_root_set_the_default_is_home_dot_sessionphone(tmp_path, monkeypatch):
-    """What the guard is for: with SESSIONPHONE_ROOT unset the root is ~/.sessionphone.
+def test_with_no_root_set_the_default_is_the_kits_state_folder(tmp_path, monkeypatch):
+    """What the guard is for: with SESSIONPHONE_ROOT unset the root is
+    ~/.sessionkit/phone/state (or the old ~/.sessionphone, tests/test_state_root.py).
     HOME is pointed at tmp, so this proves the resolution without touching the real one."""
     monkeypatch.delenv("SESSIONPHONE_ROOT")
     monkeypatch.setenv("HOME", str(tmp_path))
     r = CliRunner().invoke(cli.main, ["web", "enrol"])
     assert r.exit_code == 0, r.output
-    assert (tmp_path / ".sessionphone" / "web" / "enrol.json").exists()
+    assert (tmp_path / ".sessionkit" / "phone" / "state" / "web" / "enrol.json").exists()
+    assert not (tmp_path / ".sessionphone").exists()
 
 
 def test_web_refuses_a_public_bind(tmp_path):

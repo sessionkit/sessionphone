@@ -43,7 +43,11 @@ The keys, by what they set:
 - [Read from the environment only][read-from-the-environment-only]
 
 `<root>` is the bot's root: `DC_ROOT`, else `SESSIONPHONE_ROOT`, else the
-root `bot install` keeps in `phone.json` (below), else `~/.sessionphone`.
+root `bot install` keeps in `phone.json` (below), else `~/.sessionkit/phone/state`.
+Until a Mac's old root is moved, that last default is the old `~/.sessionphone`
+when it is the only one there, and every verb says so on stderr:
+[`sessionphone bot migrate`](../README.md#moving-the-root-with-bot-migrate)
+moves it.
 `<home>` is the bot's home: `<root>` itself for the default profile, and
 `<root>/<profile>` for a bot run with `DC_PROFILE` (see
 [Two profiles on one root](#two-profiles-on-one-root)).
@@ -99,7 +103,7 @@ leaves the last settings that worked.
   and no name in your shell, install refuses (exit 2) and names them.
 - **One bot to a root:** a root is one Delta Chat account. When the files
   record another bot whose root (`DC_ROOT`, else `SESSIONPHONE_ROOT`, else
-  `~/.sessionphone`) or account folder (`DC_ACCOUNTS`, else
+  `~/.sessionkit/phone/state`) or account folder (`DC_ACCOUNTS`, else
   `<root>/accounts`) is this bot's, install refuses (exit 2, writing
   nothing) and names it. **`bot install --replace NAME`** retires it: its
   launchd job is booted out and its plist removed, before the new job is
@@ -146,8 +150,8 @@ shell, then the file, then the default) and says which it took:
   launchd job always carries `DC_AGENT`, so the bot never asks.
 - **The root** (`SESSIONPHONE_ROOT`), for every verb and the `dc-*` tools:
   your shell's, else the one the file keeps for the bot install would pick,
-  else `~/.sessionphone`. sessionmail is asked only when the file records a
-  bot, since with none the name changes nothing. A lock is not enforced
+  else `~/.sessionkit/phone/state`. sessionmail is asked only when the file
+  records a bot, since with none the name changes nothing. A lock is not enforced
   here: only install, which writes, refuses a value your shell gives.
 
 ## Mail route
@@ -187,16 +191,17 @@ carrier. A change in `mail.json` reaches the bot at its next start.
 ## Paths
 
 Each one is a path, and each defaults to a place under `<home>`, except the
-root itself and `DC_VOICES`, which every profile shares under `<root>`.
+root itself, `DC_VOICES`, which every profile shares under `<root>`, and
+`DC_LOG`, which is in the bot's own log folder, out of the root.
 
 | Key | Default | What it holds |
 | --- | --- | --- |
-| `SESSIONPHONE_ROOT` | the root `bot install` keeps, else `~/.sessionphone` | the root, for every verb and the bot |
+| `SESSIONPHONE_ROOT` | the root `bot install` keeps, else `~/.sessionkit/phone/state` | the root, for every verb and the bot |
 | `DC_ROOT` | `SESSIONPHONE_ROOT`'s root | the bot's root, when it differs |
 | `DC_ACCOUNTS` | `<home>/accounts` | the Delta Chat account and its keys |
 | `DC_OUTBOX` | `<home>/outbox` | the jobs the `dc-*` tools leave for the bot |
 | `DC_ACKS` | `<home>/acks` | where the tools wait for the bot's answer to a job |
-| `DC_LOG` | `<home>/bot.log` | the bot's log |
+| `DC_LOG` | `~/.sessionkit/phone/log/<agent>/bot.log`, or `<agent>/<profile>/bot.log` for a named profile | the bot's log |
 | `DC_SEEN` | `<home>/bridged-ids.txt` | the message ids already mailed, so a restart never mails one again |
 | `DC_UNDELIVERED` | `<home>/undelivered` | agent mail that failed to send, waiting for a retry |
 | `DC_CALLERS_FILE` | `<home>/callers.txt` | who may ring the bot: one `ADDR  key:FPR` line per caller, bound to a key |
@@ -219,8 +224,10 @@ profile, and a named one (`DC_PROFILE=public`). Chat ids belong to one
 account (chat 12 on one is another chat on the other), so each bot keeps
 everything about its account in its own home: the default profile in
 `<root>`, a named one in `<root>/<profile>/`. That is its channels list,
-callers, outbox, seen ids, acks, undelivered mail, calls, live call, log,
-sockets and (with no `DC_ACCOUNTS`) its account. A named profile with no
+callers, outbox, seen ids, acks, undelivered mail, calls, live call,
+sockets and (with no `DC_ACCOUNTS`) its account. Its logs are in its own
+folder too, out of the root: `~/.sessionkit/phone/log/<agent>/<profile>/`.
+A named profile with no
 `callers.txt` of its own refuses every call and says so at start, naming
 the file. An explicit `DC_<NAME>` still wins.
 
@@ -228,7 +235,10 @@ The bot refuses to start (exit 2, one line naming the path and the fix) when:
 
 - a named profile's channels list or callers file is the default
   profile's own (`<root>/channels.txt`, `<root>/callers.txt`), say by a
-  `DC_CHANNELS_FILE` pointing there;
+  `DC_CHANNELS_FILE` pointing there. The files are compared by real path,
+  so a link to the root's file, or a profile folder that links to the root,
+  counts too. `bot install` refuses the same job first (exit 2, the same
+  line), before it writes or loads anything;
 - another bot already runs on the same home: each bot holds
   `<home>/.bot.lock` while it runs, and the refusal names the holder's pid;
 - its outbox holds jobs older than `DC_OUTBOX_STALE_S`, queued while no bot
@@ -237,6 +247,65 @@ The bot refuses to start (exit 2, one line naming the path and the fix) when:
 
 `bot install` counts two profiles on one root as two homes, so they are not
 rivals; two bots on one home still are.
+
+`bot status` on a named profile's job reads that profile's own log,
+`~/.sessionkit/phone/log/<agent>/<profile>/bot.log`, so its `last:` line
+quotes a refusal and its fix. Both of a profile's logs are in that folder,
+never the default profile's.
+
+### A profile's own callers file and list
+
+- **Each profile reads its own copy.** A named profile reads
+  `<root>/<profile>/callers.txt`, a separate file. Once it has one, an edit
+  to `<root>/callers.txt` no longer reaches it, and the reverse.
+- **Edit a profile's file with the profile named,** so the callers verbs
+  reach its file and not the root's:
+
+  ```bash
+  DC_PROFILE=<profile> sessionphone callers add ADDR --key FPR
+  ```
+
+- **To start a profile with the default profile's callers, copy the file.**
+  A callers line names a caller and a key, which mean the same on every
+  account. `-p` keeps its mode, 0600 as sessionphone writes it. Keep it
+  0600: README.md, "Before you upgrade, check each list" under Callers,
+  says why:
+
+  ```bash
+  cp -p <root>/callers.txt <root>/<profile>/callers.txt
+  ```
+
+- **Never copy a channels list that has `chat:N` lines.** A chat id belongs
+  to one account; on the profile's account the same number is another chat.
+  Build the profile's list with the profile named:
+
+  ```bash
+  DC_PROFILE=<profile> sessionphone channels seed
+  ```
+
+- Then list each further channel:
+
+  ```bash
+  DC_PROFILE=<profile> sessionphone channels add NAME TARGET
+  ```
+
+- **Moving a profile off the root's files** (it ran on them before each
+  profile kept its own, and now refuses to start): make the callers copy
+  first, then drop `DC_CALLERS_FILE`. With the setting gone and no copy, the
+  bot starts but refuses every call.
+- **A job `bot install` made:** it keeps the settings it was given, so
+  forget the setting, unset in the shell. Name the profile's bot with
+  `DC_AGENT`: install keeps its `DC_PROFILE`, and with no name install may
+  pick the other bot on the root.
+
+  ```bash
+  DC_AGENT=<agent> sessionphone bot install --forget DC_CALLERS_FILE
+  ```
+
+- **A launchd job written by hand:** remove the setting from the job's
+  environment and load it again.
+- `DC_CHANNELS_FILE` is dropped the same way, then the list is built as
+  above.
 
 ## Chat
 
@@ -332,7 +401,7 @@ also a flag, and the flag wins.
 | `DC_MAILTO` | `--mail-to` | the bare `<DC_AGENT>`; with neither set, `--legs` is refused | the seat each finished turn is mailed to, with `--legs` |
 | `DC_CALLER_NAME` | `--caller-name` | `owner` | the caller's name, and a new passkey's label. It grants nothing |
 | `EARS_HEARD_DIR` | `--heard-dir` | `$VOICEMODE_BASE_DIR/logs/conversations`, else `~/.voicemode/logs/conversations` | the heard log the turns are read from |
-| `SESSIONPHONE_ROOT` | `--root` | `~/.sessionphone` | the root. The web state goes in its `web/` |
+| `SESSIONPHONE_ROOT` | `--root` | `~/.sessionkit/phone/state` | the root. The web state goes in its `web/` |
 
 ## The dc-* tools
 
@@ -342,7 +411,7 @@ and so on), to find the bot's root. With no `DC_AGENT`, or neither
 `DC_ROOT` nor `SESSIONPHONE_ROOT` set, they ask the package which bot
 `bot install` would pick and the root it keeps for it, so they and the bot
 read one name and one root. If that question fails, they use `claude` and
-`~/.sessionphone`, and say so.
+`~/.sessionkit/phone/state`, and say so.
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |

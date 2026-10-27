@@ -53,6 +53,7 @@ already cut (a barge-in mid-line) drops the rest of its frames, cuts nothing
 more, and ends "cut" at its D.
 """
 import asyncio
+import bisect
 import json
 import os
 import pathlib
@@ -240,7 +241,10 @@ async def serve_one(manager, reader, writer, log=print):
                     except Exception:  # noqa: BLE001
                         where = None
             dropped_s += lost / RATE
-            s.lines.append((t0, who, text if ended == "done" else f"{text} [cut]"))
+            # filed at its stamp's place, not at the end: a caller turn heard while it
+            # played is already in, stamped later (the transcript reads in time order)
+            bisect.insort(s.lines, (t0, who, text if ended == "done" else f"{text} [cut]"),
+                          key=lambda r: r[0])
             log(f"MOUTH line {ended} in call {call}: {queued / RATE:.1f}s queued, "
                 f"{dropped_s:.1f}s dropped" + (f" ({detail})" if detail else ""))
             out = {"ok": ended == "done", "ended": ended, "call": call,

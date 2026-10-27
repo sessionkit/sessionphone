@@ -18,6 +18,7 @@ import sys
 import time
 
 import pytest
+from _kit_log import kit_log
 
 from sessionphone import channels, settings
 from sessionphone.bridge import bot, dc_env
@@ -29,13 +30,15 @@ DC_ENV_SH = pathlib.Path(__file__).resolve().parents[1] / "bin" / "dc-env"
 # master read them before profiles had homes: the PIN is that, for the default
 # profile, each one is still <root>/<rel>, byte for byte.
 KEYS = (("ACCOUNTS", "accounts"), ("OUTBOX", "outbox"), ("CALLS_DIR", "calls"),
-        ("LIVE", "call-live.json"), ("ACKS", "acks"), ("LOG", "bot.log"),
+        ("LIVE", "call-live.json"), ("ACKS", "acks"),
         ("CALLERS_FILE", "callers.txt"), ("CHANNELS_FILE", "channels.txt"),
         ("SEEN", "bridged-ids.txt"), ("UNDELIVERED", "undelivered"),
         ("GUESTS", "call-guests.txt"), ("VOICES", "voices.json"),
         ("WAIT_MUSIC", "wait-music.opus"), ("EARS_SOCK", "call-ears.sock"),
         ("MOUTH_SOCK", "call-mouth.sock"))
 ROOT_WIDE = {"VOICES", "WAIT_MUSIC"}     # not about an account: shared by every profile
+# The bot's log is out of the root: ~/.sessionkit/phone/log/<bot>[/<profile>]/
+# (dc_env.log_file, _kit_log), per bot and per profile, never in KEYS.
 
 PROBE = r"""
 import sys
@@ -44,6 +47,7 @@ from sessionphone.bridge import dc_env, earleg, mouthleg, spool
 from sessionphone import channels
 for k, rel in [a.split("=", 1) for a in sys.argv[2:]]:
     print(f"{k} {dc_env.path(k, rel)}")
+print(f"LOG {dc_env.log_file()}")
 print(f"channels_file {dc_env.channels_file()}")
 print(f"callers_file {dc_env.callers_file()}")
 print(f"channels_path {channels.channels_path()}")
@@ -88,6 +92,7 @@ def test_the_default_profile_resolves_every_path_exactly_as_before(tmp_path):
     assert got["earleg"] == f"{tmp_path}/call-ears.sock"
     assert got["mouthleg"] == f"{tmp_path}/call-mouth.sock"
     assert got["say_cmd"] == "dc-say"
+    assert got["LOG"] == str(kit_log("ada"))     # the one path that moved: out of the root
 
 
 def test_an_empty_profile_is_the_default_profile(tmp_path):
@@ -108,11 +113,12 @@ def test_a_named_profile_keeps_every_per_account_file_in_its_home(tmp_path):
     assert got["earleg"] == f"{tmp_path}/public/call-ears.sock"
     assert got["mouthleg"] == f"{tmp_path}/public/call-mouth.sock"
     assert got["say_cmd"] == f"DC_OUTBOX={tmp_path}/public/outbox dc-say"
+    assert got["LOG"] == str(kit_log("ada", "public"))     # its own log folder, in the bot's
 
 
 def test_two_bots_on_one_root_share_no_list_callers_or_outbox(tmp_path):
     private, public = resolved(tmp_path), resolved(tmp_path, "public")
-    per_account = [k for k, _ in KEYS if k not in ROOT_WIDE]
+    per_account = [k for k, _ in KEYS if k not in ROOT_WIDE] + ["LOG"]
     for k in per_account + ["channels_file", "callers_file", "spool", "earleg", "mouthleg"]:
         assert private[k] != public[k], k
     for k in ("OUTBOX", "channels_file", "callers_file", "SEEN"):
@@ -124,7 +130,9 @@ def test_an_explicit_setting_still_wins_on_a_named_profile(tmp_path):
     got = resolved(tmp_path, "public", DC_OUTBOX=str(mine), DC_CHANNELS_FILE=str(tmp_path / "x.txt"))
     assert got["OUTBOX"] == str(mine)
     assert got["channels_file"] == got["CHANNELS_FILE"] == str(tmp_path / "x.txt")
-    assert got["LOG"] == f"{tmp_path}/public/bot.log"
+    assert got["LOG"] == str(kit_log("ada", "public"))
+    mine = resolved(tmp_path, "public", DC_LOG=str(tmp_path / "own.log"))
+    assert mine["LOG"] == str(tmp_path / "own.log")             # DC_LOG still wins
 
 
 def test_home_reads_the_environment_it_is_given(tmp_path):

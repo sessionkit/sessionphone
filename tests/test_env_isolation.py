@@ -22,11 +22,15 @@ PROBES = ("tests/test_env_isolation.py::test_import_time_settings_are_a_bare_ins
 LEAKY = "tests/bridge/test_incall_posts.py::test_mail_leg_posts_once_to_a_listed_chat"
 
 
-def test_import_time_settings_are_a_bare_install() -> None:
-    # what dc_env and calls froze at import, whatever the shell that ran pytest held
+def test_import_time_settings_are_a_bare_install(suite_home, monkeypatch) -> None:
+    # what dc_env and calls froze at import, whatever the shell that ran pytest held:
+    # the default root of the suite's tmp HOME (PHONE-264), where paths.root() was then
     assert dc_env.AGENT == "claude"
     assert dc_env.VOICE == "af_sky"
     assert calls.DEFAULT_VOICE_MAP == {"claude": "af_sky"}
+    assert dc_env.ROOT == pathlib.Path(suite_home) / ".sessionkit" / "phone" / "state"
+    monkeypatch.setenv("HOME", suite_home)
+    monkeypatch.delenv("SESSIONPHONE_ROOT")
     assert dc_env.ROOT == paths.root()
     assert calls.VOICE_MAP_FILE == dc_env.ROOT / "voices.json"
 
@@ -35,13 +39,16 @@ def test_no_seat_variable_survives_into_a_test() -> None:
     # the autouse tripwires set DC_SENDMAIL, DC_MESSAGE, DC_SIGNER_* and DC_STT_URL per test. And
     # importing bridge/bot.py fills an unset DC_AGENT from sys.argv[1] (the launchd
     # job names the agent there); under pytest that is pytest's own argument, never
-    # the seat's. Nothing else may be set.
+    # the seat's. And home_is_tmp sets SESSIONPHONE_ROOT to this test's tmp HOME's
+    # default root (PHONE-264), never the seat's. Nothing else may be set.
     tripwires = {"DC_SENDMAIL", "DC_MESSAGE", "DC_SIGNER_SOCK", "DC_SIGNER_PUB", "DC_STT_URL"}
     left = {k: v for k, v in os.environ.items()
             if (k in ("CLAUDE_CODE_AGENT", "SESSIONPHONE_ROOT") or k.startswith(("DC_", "PIP_CHAT_")))
             and k not in tripwires}
     if len(sys.argv) > 1 and left.get("DC_AGENT") == sys.argv[1]:
         del left["DC_AGENT"]
+    if left.get("SESSIONPHONE_ROOT") == os.path.join(os.environ["HOME"], ".sessionkit", "phone", "state"):
+        del left["SESSIONPHONE_ROOT"]
     assert left == {}
 
 

@@ -1,6 +1,8 @@
 """The launchd job the bot runs under: what it runs, and what it carries."""
 import plistlib
 
+from _kit_log import kit_log
+
 from sessionphone import service
 
 
@@ -14,7 +16,8 @@ def test_the_job_runs_the_bridge_as_the_agent(monkeypatch, tmp_path):
     assert j["EnvironmentVariables"]["SESSIONPHONE_ROOT"] == str(tmp_path)
     assert j["EnvironmentVariables"]["DC_AGENT"] == "claude"
     assert "/opt/homebrew/bin" in j["EnvironmentVariables"]["PATH"]
-    assert j["StandardOutPath"].startswith(str(tmp_path))
+    # launchd's log is the bot's own, out of its root (tests/test_log_kit.py has the rest)
+    assert j["StandardOutPath"] == str(kit_log("claude", name="bot.launchd.log"))
 
 
 def test_the_seat_names_the_agent(monkeypatch):

@@ -462,6 +462,7 @@ def test_the_docs_name_the_sink_its_line_and_that_it_is_never_mailed():
     for need in ('"via": "realtime"', '"seq": 1,', "never mailed", "no `serial`", "20 a second",
                  "webxdc-realtime", "sibling of `DC_XDC_IN`"):
         assert need in sec, need
-    assert "DC_XDC_RT_IN" in (ROOT / "skills" / "sessionphone" / "SKILL.md").read_text()
+    # the skill's long form of "What reaches you"
+    assert "DC_XDC_RT_IN" in (ROOT / "docs" / "what-reaches-you.md").read_text()
     unreleased = (ROOT / "CHANGELOG.md").read_text().split("## [0.1.0]", 1)[0]
     assert "`DC_XDC_RT_IN=PATH`" in unreleased

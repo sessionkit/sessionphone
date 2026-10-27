@@ -295,7 +295,7 @@ def test_no_under_the_kit_points_at_ears_services_never_voicemode(env, kit_path)
     """The kit's `ears services install` loads mlx-audio on :8890; a second
     mlx-audio job beside it crash-loops. So under the kit the line sends the
     user to the kit's read-only status, names the kit's installer for an
-    empty port only, and never names VoiceMode's installer (SKILL.md step 7)."""
+    empty port only, and never names VoiceMode's installer (docs/call-hearing.md)."""
     lines = _kit_lines(env, FakeCurl(rc=7), kit_path)
     text = _flat(lines)
     assert lines[0].startswith("hearing:   NO.")
@@ -312,7 +312,7 @@ def test_no_under_the_kit_points_at_ears_services_never_voicemode(env, kit_path)
     assert "`none on :8890`: no server and no job" in _flat(lines[status + 1:install])
     assert "the kit's own speech server, if it loads one" in text
     # the first-run download belongs to the `mlx-audio on :8890` row (as in
-    # SKILL.md step 7), so its wait-and-retry comes before the other rows
+    # docs/call-hearing.md), so its wait-and-retry comes before the other rows
     again = lines.index(f"{hearing.INDENT}  sessionphone bot install")
     agent = lines.index(f"{hearing.INDENT}  {hearing.KIT_INSTALL_AGENT}")
     up = _flat(lines[agent + 1:again])

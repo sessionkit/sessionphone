@@ -113,8 +113,8 @@ def test_step_4_orders_the_window_first_the_link_second_the_terminal_qr_last():
 
 def test_step_4_opens_the_files_with_open_and_names_xdg_open():
     step = _step4()
-    assert "&& open ~/.sessionphone/invite.png" in step
-    assert "&& open ~/.sessionphone/connect.html" in step
+    assert "&& open ~/.sessionkit/phone/state/invite.png" in step
+    assert "&& open ~/.sessionkit/phone/state/connect.html" in step
     assert "xdg-open" in step
 
 

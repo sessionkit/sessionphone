@@ -2,10 +2,15 @@
 
 What sessionphone configures, and where each piece lives.
 
-- **Everything lives under one root:** `~/.sessionphone`, or
-  `$SESSIONPHONE_ROOT`. The bot can be pointed elsewhere with `DC_ROOT`.
+- **Everything lives under one root:** `~/.sessionkit/phone/state`, or
+  `$SESSIONPHONE_ROOT`. Before 0.3.2 the default was `~/.sessionphone`: while
+  that is the only root on a Mac, every verb uses it and says so on stderr,
+  until `sessionphone bot migrate` moves it (see the
+  [README](../README.md#moving-the-root-with-bot-migrate)). The bot can
+  be pointed elsewhere with `DC_ROOT`.
   The root is mode 0700. `sessionphone setup` makes it, and every other verb
-  refuses a root with a wider mode.
+  refuses a root with a wider mode. The logs are the exception: they are in
+  the bot's own folder, `~/.sessionkit/phone/log/<agent>/`.
 - **The bot reads `DC_*` environment variables.** `sessionphone bot install`
   copies every `DC_*` set in your shell into the bot's launchd job. To change
   one, set it and run `bot install` again.
@@ -39,6 +44,15 @@ your launchd job.
 | the account and keys | `<root>/accounts/` |
 | the outbox, where the `dc-*` tools leave jobs | `<root>/outbox/` (`DC_OUTBOX`) |
 | the invite link `setup` saved | `<root>/invite.txt` |
+| the bot's log | `~/.sessionkit/phone/log/<agent>/bot.log` (`DC_LOG`) |
+| launchd's capture of the bot's output, the plist's `StandardOutPath` and `StandardErrorPath` | `~/.sessionkit/phone/log/<agent>/bot.launchd.log` |
+
+A named profile (`DC_PROFILE`) writes both logs in its own folder,
+`~/.sessionkit/phone/log/<agent>/<profile>/`, so two bots or two profiles
+never write one file. The folders are mode 0700; `bot install` makes them.
+A job installed before the logs moved keeps the launchd log its plist names,
+`<root>/bot.launchd.log`, until `bot install` runs again, and no old log is
+moved or deleted. `bot uninstall` removes the plist and no log.
 
 `<agent>` is `DC_AGENT`, else `CLAUDE_CODE_AGENT`, else the one bot
 `~/.sessionkit/phone/settings/phone.json` records, else the harness vendor's

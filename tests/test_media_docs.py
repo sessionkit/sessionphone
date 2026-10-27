@@ -26,7 +26,10 @@ def _flat(text: str) -> str:
 
 
 def _skill() -> str:
-    return _flat((ROOT / "skills" / "sessionphone" / "SKILL.md").read_text(encoding="utf-8"))
+    """Where the skill's fetch facts live: the skill links its long form,
+    docs/first-run.md, and keeps a short form itself. Both are read."""
+    return " ".join(_flat((ROOT / rel).read_text(encoding="utf-8"))
+                    for rel in ("skills/sessionphone/SKILL.md", "docs/first-run.md"))
 
 
 def _installation() -> str:

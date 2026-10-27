@@ -28,7 +28,8 @@ from sessionphone.cli import main
 ROOT = Path(__file__).resolve().parent.parent
 TRAIL = ROOT / "src" / "sessionphone" / "apps" / "guide-trail"
 INDEX = TRAIL / "index.html"
-SKILL = ROOT / "skills" / "sessionphone" / "SKILL.md"
+# The Guide Trail recipe is in the page the skill's "What reaches you" links.
+REACHES = ROOT / "docs" / "what-reaches-you.md"
 README = ROOT / "README.md"
 
 
@@ -314,7 +315,7 @@ def test_app_help_names_the_send_recipe():
 # ---- the docs ----------------------------------------------------------------
 
 def test_skill_has_the_send_then_feed_recipe():
-    text = SKILL.read_text()
+    text = REACHES.read_text()
     assert "sessionphone app build guide-trail" in text
     send = text.index("dc-send-file")
     assert "dc-xdc-realtime --feed" in text[send:]

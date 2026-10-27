@@ -140,7 +140,7 @@ def build_mail(listing, fix: list[str], *, profile: str, account: str, pid: int,
         "Fix it:\n" + "".join(f"  {line}\n" for line in fix) + "\n"
         "The bot re-reads the list on every job, so no restart is needed.\n"
         "This is the only mail about it until the reason changes or the bot restarts\n"
-        f"(and not again within the hour). Log: {dc_env.path('LOG', 'bot.log')}\n"
+        f"(and not again within the hour). Log: {dc_env.log_file(agent=dc_env.AGENT, profile_name=dc_env.PROFILE)}\n"
     )
     headers = {"X-Delta-Chat-Bridge": "1", "X-Delta-Chat-Alert": f"channels-{listing.kind}"}
     if profile:

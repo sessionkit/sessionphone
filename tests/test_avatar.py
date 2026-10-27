@@ -430,8 +430,9 @@ class BotAccount(FakeAccount):
 
 
 @pytest.fixture
-def botrig(tmp_path, monkeypatch):
+def botrig(tmp_path, monkeypatch, lock_home_in_tmp):
     from sessionphone.bridge import bot
+    lock_home_in_tmp(bot)       # imported here: run alone, the autouse fixtures saw no bot (PHONE-264)
 
     r = Rig()
     r.out, r.logs = tmp_path / "outbox", []

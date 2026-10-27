@@ -23,6 +23,11 @@ can only repeat: it goes to undelivered/dead/ at once, logged BRIDGE MAIL DEAD.
   backing off from BACKOFF_S (doubling, at most BACKOFF_MAX_S). drain() sends
   every mail that is due, oldest first; one that fails again is rescheduled,
   and the rest still go.
+- A CALL TURN is first retried sooner: the caller is still on the line. A
+  record whose `--message-id` starts CALL_TURN_PREFIX (a Delta call's turn,
+  or a web call's) is first retried after CALL_TURN_FIRST_S, then backs off
+  as any other: 5, 60, 120 ... 3600 s. The rule is read from the record's own
+  args at each try (call_turn()), so the record carries no extra field.
 - Except when the MTA itself is down:
   drain() runs on the outbox thread, BEFORE the agent's dc-say jobs, and a
   hung MTA costs every send seatmail.TIMEOUT_S. So a pass STOPS at the first
@@ -76,6 +81,8 @@ RETRIED = frozenset({"identity", "mta", "undeliverable", "exec", "timeout"})
 STOP_KINDS = frozenset({"timeout", "mta"})
 BACKOFF_S = 60.0
 BACKOFF_MAX_S = 3600.0
+CALL_TURN_FIRST_S = 5.0          # a call turn's first retry: the caller is on the line
+CALL_TURN_PREFIX = "call-turn-"  # calls.py's call-turn-[<profile>-]<chat>-<ms>@, web's call-turn-web-<N>-<seq>@
 CAP_S = 24 * 3600.0
 DEAD = "dead"
 
@@ -86,9 +93,23 @@ def directory() -> pathlib.Path:
     return DIR if DIR is not None else dc_env.path("UNDELIVERED", "undelivered")
 
 
-def backoff(attempts: int) -> float:
-    """Seconds before the next try, after ATTEMPTS failures: 60, 120, 240 ... 3600."""
+def backoff(attempts: int, call_turn: bool = False) -> float:
+    """Seconds before the next try, after ATTEMPTS failures: 60, 120, 240 ... 3600.
+    A CALL_TURN's first retry is CALL_TURN_FIRST_S, then the same ladder from its
+    first rung: 5, 60, 120 ... 3600."""
+    if call_turn:
+        if attempts <= 1:
+            return CALL_TURN_FIRST_S
+        attempts -= 1
     return min(BACKOFF_S * 2 ** max(attempts - 1, 0), BACKOFF_MAX_S)
+
+
+def call_turn(args: list[str]) -> bool:
+    """A kept send's ARGS are a call turn's: its --message-id starts CALL_TURN_PREFIX.
+    A call's ringing root (call-...), its preview (call-preview-...) and a mail
+    with no --message-id are not."""
+    mid = message_id(args)
+    return bool(mid) and mid.startswith(CALL_TURN_PREFIX)
 
 
 def _mkdir(d: pathlib.Path) -> pathlib.Path:
@@ -195,7 +216,7 @@ class Spool:
         heals. Logs BRIDGE MAIL FAILED <error>, kept at PATH. -> the path."""
         now = self.clock()
         rec = {"v": 1, "args": list(sent.args), "body": body, "created": now, "attempts": 1,
-               "next_try": now + backoff(1), "kind": sent.kind, "sent": sent.sent,
+               "next_try": now + backoff(1, call_turn(sent.args)), "kind": sent.kind, "sent": sent.sent,
                "error": sent.error, "tries": [_try(sent, now)]}
         retried = sent.kind in RETRIED
         _mkdir(self.root)                   # the spool itself 0700, even when only dead/ is written
@@ -295,10 +316,11 @@ class Spool:
         if sent.kind not in RETRIED:
             self._bury(path, rec, f"try {n}: kind {sent.kind or 'unknown'} is never retried ({sent.error})")
             return sent
-        rec["next_try"] = now + backoff(n)
+        wait = backoff(n, call_turn(rec["args"]))
+        rec["next_try"] = now + wait
         _rewrite(path, rec)
         self.log(f"BRIDGE MAIL RETRY {n} FAILED {sent.error}; next try in "
-                 f"{backoff(n):.0f}s: {path}")
+                 f"{wait:.0f}s: {path}")
         return sent
 
     def _not_there(self, path: pathlib.Path, rec: dict, n: int) -> bool:

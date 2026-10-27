@@ -169,6 +169,12 @@ def test_readme_logs_name_the_files_the_code_writes(monkeypatch, tmp_path):
     assert Path(j["StandardOutPath"]).name in sec          # bot.launchd.log
     assert Path(j["StandardErrorPath"]) == Path(j["StandardOutPath"])
     assert "bot.log" in sec and "transcript.md" in sec
+    # the folder both logs are written in, as the code spells it, per bot and per profile
+    folder = paths.kit_dir("phone", "log")
+    assert Path(j["StandardOutPath"]) == Path(folder).expanduser() / "tester" / "bot.launchd.log"
+    assert f"`{folder}/<agent>/bot.log`" in sec and f"`{folder}/<agent>/bot.launchd.log`" in sec
+    assert f"`{folder}/<agent>/<profile>/`" in sec
+    assert "~/.sessionphone/bot.log" not in sec and "~/.sessionphone/bot.launchd.log" not in sec
 
 
 def test_readme_health_is_a_real_command():

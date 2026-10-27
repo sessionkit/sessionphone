@@ -307,7 +307,7 @@ def test_two_rivals_are_both_named_and_both_flags_given(rig, monkeypatch):
 # ---- the pure parts ------------------------------------------------------------------
 
 def test_place_reads_the_root_as_the_job_does(tmp_path):
-    home_root = os.path.realpath(os.path.expanduser("~/.sessionphone"))
+    home_root = os.path.realpath(os.path.expanduser("~/.sessionkit/phone/state"))
     assert settings.place({}) == (home_root, os.path.join(home_root, "accounts"))
     r = str(tmp_path / "r")
     assert settings.place({"SESSIONPHONE_ROOT": r})[0] == os.path.realpath(r)

@@ -14,6 +14,199 @@ under the new version.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-28
+
+### A kept call turn is retried within seconds
+
+- A call turn the agent's box refused was kept and first retried after
+  60 s, so a live caller's words reached the agent a minute late.
+- A kept call turn is now first retried after 5 s. Later retries back off
+  as before: 60 s, then doubling to at most an hour. Other kept mail keeps
+  its 60 s first retry.
+
+### A web call's refused turn is kept, retried and told
+
+- A web call's turn that the agent's box refused was tried up to 3 times
+  in the call, then lost, and the caller heard nothing.
+- `sessionphone web --legs` now makes one try, then keeps the turn in its
+  own spool, `<root>/web/undelivered/`, and retries it from the web seat
+  while it runs: first after 5 s, never twice under its id. Its start line
+  counts what is kept.
+- The caller hears "I couldn't reach the agent." once for each turn that
+  did not go, spoken into the call by the mouth.
+
+### `bot install` refuses a profile on the default profile's callers file or list
+
+- A named profile (`DC_PROFILE`) whose callers file or channels list is the
+  default profile's own (`<root>/callers.txt`, `<root>/channels.txt`)
+  refuses to start (exit 2). The files are compared by real path, so a link
+  counts too: a `DC_CALLERS_FILE` or `DC_CHANNELS_FILE` that points there, a
+  profile's own file that links to the root's, or a profile folder that
+  links to the root.
+- `bot install` installed such a job anyway. launchd then restarted a bot
+  that refused every time, with no end. Install now refuses it first (exit
+  2), before it writes or loads anything. Its message is the bot's own: the
+  file, the setting and the fix.
+- `bot status` on a named profile's job now reads that profile's own log,
+  `~/.sessionkit/phone/log/<agent>/<profile>/bot.log`, where the bot writes
+  the refusal. Its `last:` line quotes the refusal and its fix. It read the
+  default profile's log before.
+- The refusal gives the real reason a shared callers file is refused: the
+  file says who may ring, so a caller approved on one profile could ring the
+  other. When the profile's own file is a link to the root's, it says to make
+  that file the profile's own, not a link.
+
+### Upgrade note: give each named profile its own callers file and list
+
+- A named profile run on the root's `callers.txt` or `channels.txt` worked
+  until each profile kept its own files ("A second profile on one root
+  keeps its own files"). Since then it refuses to start, and `bot install`
+  now refuses it too. Give the profile its own copy first, then drop the
+  setting.
+- **Copy the callers file first.** Its lines name a caller and a key, which
+  mean the same on every account, so a copy is sound. `-p` keeps its mode,
+  0600 as sessionphone writes it. Keep it 0600 (`README.md`, "Before you
+  upgrade, check each list", under Callers):
+
+  ```bash
+  cp -p <root>/callers.txt <root>/<profile>/callers.txt
+  ```
+
+- Then drop `DC_CALLERS_FILE` from that profile's job. Keep that order: with
+  the setting gone and no copy, the bot starts but finds no callers file of
+  its own, and refuses every call.
+- **Do not copy a channels list that has `chat:N` lines.** A chat id belongs
+  to one account, and on the profile's account the same number is another
+  chat. Drop `DC_CHANNELS_FILE` from the job, then build the profile's own
+  list with the profile named:
+
+  ```bash
+  DC_PROFILE=<profile> sessionphone channels seed
+  ```
+
+- Add each further channel the same way:
+
+  ```bash
+  DC_PROFILE=<profile> sessionphone channels add NAME TARGET
+  ```
+
+- **A job `bot install` made:** it keeps the settings it was given, so
+  dropping a setting means forgetting it. Leave it unset in the shell, and
+  forget each one that names the root's file. Name the profile's bot with
+  `DC_AGENT`: install keeps its `DC_PROFILE`, and with no name install may
+  pick the other bot on the root:
+
+  ```bash
+  DC_AGENT=<agent> sessionphone bot install --forget DC_CALLERS_FILE
+  ```
+
+- **A launchd job written by hand:** remove the setting from the job's
+  environment and load it again.
+- From then on the profile reads only its own copy: an edit to the root's
+  `callers.txt` no longer reaches it. Edit the profile's file with the
+  profile named (`DC_PROFILE=<profile> sessionphone callers add ...`).
+  `docs/settings.md`, "A profile's own callers file and list", says this
+  in full.
+
+### The bot's logs move to ~/.sessionkit/phone/log
+
+- Both of a bot's logs, `bot.log` and `bot.launchd.log`, are now written
+  in its own folder, `~/.sessionkit/phone/log/<agent>/`, and a named
+  profile's in `~/.sessionkit/phone/log/<agent>/<profile>/`, so two bots or
+  two profiles never write one file. They were in the bot's root. The
+  folders are private (0700).
+- `DC_LOG` still wins for the bot's log.
+- A job installed before this release keeps writing `bot.launchd.log` in
+  its root, where its plist says, until `sessionphone bot install` runs
+  again. The bot writes its own log in the new folder from its first start
+  on this release. Until then, `sessionphone bot status`, `dc-log` and the
+  `dc-*` tools read the old `bot.log` in the root while it is the only one.
+- No old log is moved or deleted. `sessionphone bot uninstall` removes the
+  job's plist and no log.
+
+### The greeting no longer waits behind a reply queued before the call connects
+
+- A `dc-say` sent while a call was still connecting took its place on the
+  call ahead of the greeting, so the caller heard the reply first and the
+  greeting several seconds late.
+- The call's opening now goes first: the recording notice (when it is said),
+  then the greeting. A reply that arrived before them plays after the
+  greeting, once, under the floor rules.
+
+### A call transcript names the bot for the bot's own words, in time order
+
+- A call's transcript gave the bot's own words, such as its greeting, to
+  the agent's name ("Claude"), even when `setup --name` had given the bot
+  another name. They are now under the bot's name, the one its greeting
+  says. The agent's replies keep the agent's name.
+- A caller's words heard while the agent's reply was still playing were
+  printed before that reply, with a later time. The transcript now lists
+  every line in time order.
+
+### A posted file names its path, and keeps its line beside typed text
+
+- A file, an image and a voice note whose transcription failed now reach
+  the agent as `[attachment: NAME (MIME) at PATH]`, with the path where the
+  bot keeps the file. The line had no path, so an agent searched the disk
+  for a name that a stored file never carries.
+- A file sent with typed text kept only the text, and the mail never said
+  a file had come. The line now follows the text for every kind, as it
+  already did for an image. A sticker keeps its line too.
+- In a contact request the line still names the path, and ends
+  `- UNTRUSTED: a stranger's file, not opened; open it only if your owner
+  asks`. A stranger's image is still never read.
+- The sender's file name is flattened to one line, so it cannot break the
+  line or start a line of its own.
+
+### The bot's root moves to ~/.sessionkit/phone/state
+
+- The default root, with no `SESSIONPHONE_ROOT`, `DC_ROOT` or kept root, is
+  now `~/.sessionkit/phone/state/`. It was `~/.sessionphone`. The account, its
+  keys, the outbox, the callers and channels files, the call recordings and
+  the invite files are all in it. A root you set is never moved.
+- A Mac that has only the old `~/.sessionphone` keeps using it, and every verb
+  and `dc-*` tool says so once on stderr. Nothing moves by itself.
+- New: `sessionphone bot migrate [--dry-run]` moves the old default root to the
+  new one, once on each Mac. Stop the bot first: it refuses while a bot runs
+  on the root or a call is live, when the new root is already there, when the
+  old path is a link elsewhere, or across filesystems (exit 2, nothing moved).
+  The keys move by rename, never copy then delete, and keep their mode 0700.
+  The old path is left as a symlink to the new root, and is never deleted. The
+  launchd plists that name the old root are re-rendered; run
+  `sessionphone bot install` to start the bot on the new path. `--dry-run`
+  says each step and where the account opens, and changes nothing.
+- The README, the sessionphone skill and the docs say
+  `open ~/.sessionkit/phone/state/invite.png` and name the new root.
+
+### A session that started plain is told to repair its box first
+
+- When this session does not hear the bot's box and `session start` printed
+  `starting plain: box <agent> is missing ...; repair: message setup --box
+  <agent>`, the skill now gives that repair (or `sessionkit setup`) and a new
+  `session start` first. `bot install --hear-here` and a subscription are
+  offered only after, as a stopgap that ends with this session.
+- The other `starting plain:` lines carry no repair, and the skill invents
+  none for them.
+
+### The skill is a short map, and points at the family's etiquette
+
+- `skills/sessionphone/SKILL.md` now carries one line after its lead: several
+  agents in one seat follow the sessionkit skill's card, "Several agents in
+  one seat". The skill keeps no copy of it.
+- The skill keeps the setup steps and the commands to reach for. Its long
+  reference moved, whole, to pages in `docs/`, each linked from the skill:
+  `first-run.md`, `bot-install.md`, `call-hearing.md`, `calls.md`,
+  `call-guests.md`, `what-reaches-you.md`, `callers.md`, `channels.md` and
+  `bot-files.md`.
+- On a call the skill now answers as the call's mail says: with the mouth
+  (`mouth say --device call:N "text"`), and `dc-say --call` only when the
+  mouth fails. The turn-taking rules speak of one spoken reply per caller
+  turn, not one `dc-say`.
+
+### Earlier entries are reworded
+
+- Earlier entries were reworded to drop a personal name.
+
 ## [0.3.1] - 2026-10-25
 
 ### Changelog entries are written one file per change
@@ -1339,7 +1532,7 @@ first PyPI release that carries this change.
   those tests skip, and the run's summary counts them and names the variable.
   The recording-name guard checks a shape instead: a recording file is named
   for the caller (`caller-*`), never for anyone else.
-- Release metadata for 0.2.0 (PHONE-148): Mike Bailey is the author, the GitHub repository is the homepage, and the classifier is Alpha.
+- Release metadata for 0.2.0 (PHONE-148): the author is set, the GitHub repository is the homepage, and the classifier is Alpha.
 - The README's examples (JSON lines, `channels.txt`) and the code comments that quote them use synthetic UTC times and made-up ids. No example carries a local zone offset or a real time.
 - **`DC_STT_URL` defaults to VoiceMode's mlx-audio on `:8890`, not
   `ears serve` on `:2023`** (PHONE-18). The default is now
@@ -1425,12 +1618,12 @@ first PyPI release that carries this change.
 - **Call recordings are named for the role, not a person.** In each call dir
   the far party's audio is now `caller-NNN.wav` (one per chunk),
   `caller-call.wav` (the whole call, with `DC_EARS=1`) and `caller-call.json`
-  (its clock). These were `mike-NNN.wav`, `mike-call.wav` and
-  `mike-call.json`. Calls recorded before the upgrade keep their old names.
+  (its clock). Older versions used another name for the same files; calls
+  recorded before the upgrade keep their old names.
   Nothing in sessionphone reads these files by name; a tool that does should
   read `caller-*` first, then the old name. **Depends on sessionvoice:** its
-  speaker side-car reads `mike-call.wav` today, so it must read
-  `caller-call.*` first (then `mike-call.*`), landed before or with this.
+  speaker side-car reads the whole call by its old name today, so it must
+  read `caller-call.*` first (then the old name), landed before or with this.
   Otherwise it names no call lines.
 - A contact request from a stranger is mailed to the agent with "ask your
   owner before accepting", not a person's name.

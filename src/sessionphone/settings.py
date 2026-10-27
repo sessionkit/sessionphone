@@ -270,7 +270,8 @@ class Resolved:
 
     @property
     def root(self) -> pathlib.Path:
-        return pathlib.Path(self.given.get(ROOT_KEY) or paths.DEFAULT_ROOT).expanduser()
+        v = self.given.get(ROOT_KEY)
+        return pathlib.Path(v).expanduser() if v else paths.default_root()
 
 
 NAME_VARS = ("DC_AGENT", "CLAUDE_CODE_AGENT")
@@ -433,11 +434,12 @@ def kept(key: str, shell: Mapping[str, str] | None = None,
 def place(values: Mapping[str, str]) -> tuple[str, str]:
     """(the home, the account folder) of a bot whose job carries VALUES, as
     dc_env reads them there: DC_ROOT, else SESSIONPHONE_ROOT, else the
-    default, plus /<DC_PROFILE> when a profile is named (dc_env.home);
+    default (paths.default_root), plus /<DC_PROFILE> when a profile is named (dc_env.home);
     DC_ACCOUNTS, else <home>/accounts. Two profiles on one root are two
     homes, so two accounts. Real paths: two spellings of one folder are one
     folder."""
-    root = os.path.expanduser(values.get("DC_ROOT") or values.get(ROOT_KEY) or paths.DEFAULT_ROOT)
+    given = values.get("DC_ROOT") or values.get(ROOT_KEY)
+    root = os.path.expanduser(given) if given else str(paths.default_root())
     profile = (values.get("DC_PROFILE") or "").strip()
     home = os.path.join(root, profile) if profile else root
     accounts = values.get("DC_ACCOUNTS") or os.path.join(home, "accounts")

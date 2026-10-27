@@ -7,12 +7,18 @@
 # word (`session agent default`, else "claude"). With no DC_AGENT in this
 # shell, each tool says on stderr which bot it picked. The root comes from
 # DC_ROOT, then SESSIONPHONE_ROOT, then the root install keeps in phone.json
-# for that bot, then ~/.sessionphone. Both are asked of the
-# package's own Python (dc_env.py), so the tools and the bot pick one name and
-# one root. If that question cannot be answered: claude, and ~/.sessionphone.
+# for that bot, then the default: ~/.sessionkit/phone/state, or the old
+# ~/.sessionphone while only that one is there (each tool then says so on
+# stderr, once). Both are asked of the package's own Python (dc_env.py;
+# the root rule is sessionphone.paths.default_root's, kept nowhere else), so
+# the tools and the bot pick one name and one root. If that question cannot be
+# answered: claude, and ~/.sessionkit/phone/state, a last resort with no
+# old-path fallback (the rule is not copied here).
 # Every path a tool touches derives from the root unless its own DC_X is set:
 # from the bot's home, the root itself, or <root>/<profile>/ when DC_PROFILE
-# names a profile in this shell (dc_env.home), as the bot's own job does.
+# names a profile in this shell (dc_env.home), as the bot's own job does. The
+# bot's log is the one exception: it is under ~/.sessionkit/phone/log/, asked
+# of the package (DC_LOG, below).
 # Mirrors src/sessionphone/bridge/dc_env.py exactly - change both or neither.
 # Run on its own (it is on the PATH with the tools), it answers -h/--help with
 # this header and refuses anything else: it is a library, not a tool.
@@ -34,15 +40,18 @@ _DC_PY="$_DC_HOME/.venv/bin/python"
 # a wheel install: dc-env sits in the env's own bin/, beside its python
 [ -x "$_DC_PY" ] || _DC_PY="$(dirname "${BASH_SOURCE[0]}")/python"
 [ -x "$_DC_PY" ] || _DC_PY=python3
-# dc_kept: dc_env.py's own answer for this shell, three lines: the bot
-# (dc_env.AGENT), where its name came from (dc_env.AGENT_FROM) and the root
+# dc_kept: dc_env.py's own answer for this shell, four lines: the bot
+# (dc_env.AGENT), where its name came from (dc_env.AGENT_FROM), the root
 # with no DC_ROOT (dc_env.ROOT: SESSIONPHONE_ROOT, else the one phone.json
-# keeps, else the default); nothing when it cannot say.
+# keeps, else paths.default_root) and the line the package said on stderr if
+# that root is the old one (paths.old_root_notice; its stderr is not shown
+# here, so this file says it); nothing when it cannot say.
 dc_kept() {
   "$_DC_PY" -c 'import sys
 sys.path[0] = sys.argv.pop(1)
+from sessionphone import paths
 from sessionphone.bridge import dc_env
-print(dc_env.AGENT); print(dc_env.AGENT_FROM); print(dc_env.ROOT)' "$_DC_HOME/src" 2>/dev/null
+print(dc_env.AGENT); print(dc_env.AGENT_FROM); print(dc_env.ROOT); print(paths.old_root_notice())' "$_DC_HOME/src" 2>/dev/null
 }
 _DC_NAMED="${DC_AGENT:-}"
 if [ -z "$_DC_NAMED" ] || { [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-}" ]; }; then
@@ -61,11 +70,18 @@ if [ -z "$_DC_NAMED" ] || { [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-
   fi
   if [ -z "${DC_ROOT:-}" ] && [ -z "${SESSIONPHONE_ROOT:-}" ]; then
     DC_ROOT="$(printf '%s\n' "$_DC_KEPT" | sed -n 3p)"
+    _DC_OLD_ROOT="$(printf '%s\n' "$_DC_KEPT" | sed -n 4p)"
+    # the package fell back to the old root: say its line (DC_ROOT is exported
+    # below, so the tool's own Python never resolves, nor says it, again)
+    [ -z "$_DC_OLD_ROOT" ] || echo "$(basename "$0"): ${_DC_OLD_ROOT#sessionphone: }" >&2
   fi
 fi
 # shellcheck disable=SC2018,SC2019  # lowers A-Z only, unchanged here (dc_env.py lowers any letter)
 DC_AGENT="$(printf %s "$DC_AGENT" | tr 'A-Z' 'a-z')"
-DC_ROOT="${DC_ROOT:-${SESSIONPHONE_ROOT:-$HOME/.sessionphone}}"
+# the last resort, only when the package could not be asked: the new default
+# as a plain path. The old-path fallback is NOT copied here: paths.default_root
+# is the one rule, and dc_kept above asked it.
+DC_ROOT="${DC_ROOT:-${SESSIONPHONE_ROOT:-$HOME/.sessionkit/phone/state}}"
 # the bot's home (dc_env.home): every per-account file lives under it. The root
 # for the default profile; <root>/<profile>/ for a named one (DC_PROFILE).
 _DC_PROFILE="$(printf %s "${DC_PROFILE:-}" | tr -d '[:space:]')"
@@ -74,7 +90,22 @@ _DC_LIVE_GIVEN="${DC_LIVE:-}"     # dc_live: a DC_LIVE this shell names wins; el
 DC_LIVE="${DC_LIVE:-$_DC_BOT_HOME/call-live.json}"
 DC_ACKS="${DC_ACKS:-$_DC_BOT_HOME/acks}"
 DC_CALLS_DIR="${DC_CALLS_DIR:-$_DC_BOT_HOME/calls}"
-DC_LOG="${DC_LOG:-$_DC_BOT_HOME/bot.log}"
+# the bot's log (dc_env.log_for_reader): DC_LOG, else the package's own answer,
+# ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log, or the bot's old
+# <home>/bot.log while only that one is there (a bot not started on this
+# version yet). Asked of the package, never spelled here: the folder rule has one
+# home, sessionphone.paths.log_dir. If the package cannot be asked, the old
+# place in the home, as before.
+dc_log_kept() {
+  DC_AGENT="$DC_AGENT" DC_ROOT="$DC_ROOT" DC_PROFILE="$_DC_PROFILE" "$_DC_PY" -c 'import sys
+sys.path[0] = sys.argv.pop(1)
+from sessionphone.bridge import dc_env
+print(dc_env.log_for_reader())' "$_DC_HOME/src" 2>/dev/null
+}
+if [ -z "${DC_LOG:-}" ]; then
+  DC_LOG="$(dc_log_kept)" || DC_LOG=""
+  DC_LOG="${DC_LOG:-$_DC_BOT_HOME/bot.log}"
+fi
 # the undelivered spool (bridge/spool.py): failed agent mail, waiting and dead/
 DC_UNDELIVERED="${DC_UNDELIVERED:-$_DC_BOT_HOME/undelivered}"
 # the bot's pid file (bridge/pidfile.py): the bot writes it once it holds the
@@ -205,7 +236,7 @@ sys.exit(main(sys.argv[1:]))' "$_DC_HOME/src" check --outbox "$1" --tool "$(base
 }
 # <<< job-shape
 # dc_taken FILE: "queued" must mean a bot took it (else a job can sit in
-# ~/.sessionphone/public/outbox, read by no bot, while the tool says "queued").
+# <root>/public/outbox, read by no bot, while the tool says "queued").
 # Every bot polls its outbox each second and unlinks a job
 # once handled, so wait up to DC_TAKEN_WAIT seconds (10; 0 = don't wait, but a
 # job the bot gates is always waited for: dc_wait) for FILE

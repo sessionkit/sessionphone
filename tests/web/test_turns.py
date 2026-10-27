@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from sessionphone import settings
-from sessionphone.bridge import bot, dc_env, echo, seatmail
+from sessionphone.bridge import bot, dc_env, echo, seatmail, spool
 from sessionphone.bridge.echo import EchoGuard
 from sessionphone.bridge.seatmail import Sent
 from sessionphone.web import turns
@@ -489,87 +489,94 @@ def test_a_follower_that_fails_says_so_once_and_goes_quiet(heard, fake_message):
     assert f"call:{N}" in stopped and "RuntimeError: boom" in stopped
 
 
-# ---- T6: the send policy (§5.5) ------------------------------------------------------------
+# ---- T6: the send policy (§5.5; PHONE-256: one try, then the spool) -------------------------
 
 MTA = refused("mta")
+MID = f"call-turn-web-{N}-741@{IDS}"
 
 
-def test_t6_a_refused_send_is_retried_with_the_same_message_id(heard, fake_message):
-    fake_message.answer(MTA, MTA)
-    waits, logs = [], []
+@pytest.fixture
+def kept(tmp_path):
+    """The web server's own spool, as CallDesk builds it: <webdir>/undelivered, on a fake clock."""
+    return spool.Spool(lambda m: None, root=tmp_path / "web" / "undelivered", clock=Clock(T0))
+
+
+def records(k):
+    return [json.loads(p.read_text()) for p in k.waiting()] + \
+        [json.loads(p.read_text()) for p in sorted((k.root / spool.DEAD).glob("*.json"))]
+
+
+def test_t6_a_refused_send_is_tried_once_and_kept_under_its_message_id(heard, fake_message, kept):
+    """No in-process retry (the foreman's ruling 3): one try, then kept; the spool retries."""
+    fake_message.answer(MTA, MTA, MTA)
+    waits, logs, told = [], [], []
 
     async def sleep(dt):
         waits.append(dt)
 
-    f = follower(heard, logs=logs, sleep=sleep)
-    write(heard, turn(741, "third time lucky"))
-    go(pump(f))
-    mails = fake_message.mails()
-    assert len(mails) == 3 and {m["Message-ID"] for m in mails} == {f"<call-turn-web-{N}-741@{IDS}>"}
-    assert waits == [1.0, 2.0]
-    assert f.mailed == [f"call-turn-web-{N}-741@{IDS}"]
-    assert any(m.startswith(f"TURN call:{N} seq 741 mailed to alice@") for m in logs)
-
-
-def test_t6_refused_every_time_is_logged_taken_no_and_never_re_sent(heard, fake_message):
-    fake_message.answer(MTA, MTA, MTA, MTA)
-    logs = []
-    f = follower(heard, logs=logs)
+    f = follower(heard, logs=logs, sleep=sleep, kept=kept, tell=told.append)
     write(heard, turn(741, "nobody takes it"))
     go(pump(f))
     go(pump(f))
-    assert len(fake_message.calls()) == turns.TRIES == 3
+    assert len(fake_message.calls()) == 1 and waits == []
     (no,) = [m for m in logs if "NOT mailed" in m]
     assert no == f"TURN call:{N} seq 741 NOT mailed to alice@{HOST}: rc=3 kind=mta: refused: mta, taken=no"
-    assert f.last_seq == 741 and f.mailed == []
+    assert f.last_seq == 741 and f.mailed == [] and told == [741]
+    (rec,) = records(kept)
+    assert spool.message_id(rec["args"]) == MID and spool.target(rec["args"]) == SEAT.to
+    assert rec["next_try"] == T0 + spool.CALL_TURN_FIRST_S        # fix-001: a call turn, first retry at +5 s
+    assert "nobody takes it" in rec["body"]
 
 
 @pytest.mark.parametrize("kind", seatmail.WORLD_KINDS)
-def test_t6_only_a_world_kind_that_sent_nothing_is_retried(heard, fake_message, kind):
-    """The super's ruling (b): retry ONLY on sent=no with a world kind."""
-    fake_message.answer(refused(kind), refused(kind))
-    f = follower(heard)
+def test_t6_a_world_kind_that_sent_nothing_is_kept_for_the_spool(heard, fake_message, kind, kept):
+    fake_message.answer(refused(kind))
+    f = follower(heard, kept=kept)
     write(heard, turn(741, "again"))
     go(pump(f))
-    assert len(fake_message.calls()) == 3 and f.mailed == [f"call-turn-web-{N}-741@{IDS}"]
+    assert len(fake_message.calls()) == 1 and f.mailed == []
+    assert len(kept.waiting()) == 1 and kept.counts() == (1, 0)
 
 
 @pytest.mark.parametrize("kind", ["usage", "subject", "address", "thread-id", "body", "header", "message-id", None])
-def test_t6_an_input_kind_is_never_retried(heard, fake_message, kind):
-    """It would only fail again: one try, logged taken=no."""
+def test_t6_an_input_kind_is_kept_dead_and_never_retried(heard, fake_message, kind, kept):
+    """It would only fail again: one try, logged taken=no, kept in dead/ (counted, never lost silently)."""
     fake_message.answer((2, {"sent": "no", "kind": kind, "message": "bad"} if kind else {}))
-    logs = []
-    f = follower(heard, logs=logs)
+    logs, told = [], []
+    f = follower(heard, logs=logs, kept=kept, tell=told.append)
     write(heard, turn(741, "bad input"))
     go(pump(f))
     assert len(fake_message.calls()) == 1 and f.mailed == []
     (no,) = [m for m in logs if "NOT mailed" in m]
     assert no.endswith(", taken=no") and (kind is None or f"kind={kind}" in no)
+    assert kept.counts() == (0, 1) and told == [741]
 
 
 @pytest.mark.parametrize("reply", [refused("mta", sent="unknown"), refused("undeliverable", sent="unknown"),
                                    (3, {"sent": "unknown", "message": "sendmail exited 75"})])
-def test_t6_sent_unknown_is_never_retried(heard, fake_message, reply):
-    """An MTA that failed after the hand-off: the mail may have gone. Never twice."""
+def test_t6_sent_unknown_is_tried_once_and_kept(heard, fake_message, reply, kept):
+    """An MTA that failed after the hand-off: the mail may have gone. Never twice here:
+    it is kept, and the spool asks the box before any retry."""
     fake_message.answer(reply)
-    logs = []
-    f = follower(heard, logs=logs)
+    logs, told = [], []
+    f = follower(heard, logs=logs, kept=kept, tell=told.append)
     write(heard, turn(741, "did it go?"))
     go(pump(f))
     assert len(fake_message.calls()) == 1
     (u,) = [m for m in logs if "sent=unknown" in m]
     assert u.startswith(f"TURN call:{N} seq 741 NOT confirmed to alice@{HOST}: rc=3")
-    assert u.endswith(f"<call-turn-web-{N}-741@{IDS}>") and "taken=no" not in u
+    assert u.endswith(f"<{MID}>") and "taken=no" not in u
+    assert told == [741] and sum(kept.counts()) == 1
 
 
-def test_t6_a_timeout_is_tried_once_and_logged_sent_unknown(heard):
+def test_t6_a_timeout_is_tried_once_logged_sent_unknown_and_kept(heard, kept):
     tries, logs = [], []
 
     def send(mail):
         tries.append(mail)
         return Sent(False, "rc=- kind=timeout sent=unknown: no answer in 30s", kind="timeout", sent="unknown")
 
-    f = follower(heard, logs=logs, send=send)
+    f = follower(heard, logs=logs, send=send, kept=kept)
     write(heard, turn(741, "did it go?"))
     go(pump(f))
     f.offsets = {p: 0 for p in f.offsets}
@@ -578,6 +585,8 @@ def test_t6_a_timeout_is_tried_once_and_logged_sent_unknown(heard):
     (u,) = [m for m in logs if "sent=unknown" in m]
     assert u.startswith(f"TURN call:{N} seq 741 NOT confirmed to alice@{HOST}") and "taken=no" not in u
     assert "timeout" in u
+    (rec,) = records(kept)                       # kept once, though the lines were read twice
+    assert rec["sent"] == "unknown" and rec["kind"] == "timeout"
 
 
 def test_t6_a_timeout_through_seatmail_is_sent_unknown(heard, fake_message, monkeypatch):
@@ -595,17 +604,47 @@ def test_t6_a_timeout_through_seatmail_is_sent_unknown(heard, fake_message, monk
     assert "kind=timeout sent=unknown" in u
 
 
-def test_t6_a_send_that_cannot_be_run_is_nothing_sent_and_retried(heard):
+def test_t6_a_send_that_cannot_be_run_is_kept_with_the_turns_full_args(heard, kept):
+    """_send's exec fallback answers args=[]: the record's args are the TurnMail's own."""
     tries, logs = [], []
 
     def send(mail):
         tries.append(mail)
         raise FileNotFoundError(2, "No such file", "/nope/message")
 
-    f = follower(heard, logs=logs, send=send, sleep=lambda dt: asyncio.sleep(0))
+    f = follower(heard, logs=logs, send=send, kept=kept)
     write(heard, turn(741, "x"))
     go(pump(f))
-    assert len(tries) == 3 and any("FileNotFoundError" in m and "kind=exec" in m and "taken=no" in m for m in logs)
+    assert len(tries) == 1 and any("FileNotFoundError" in m and "kind=exec" in m and "taken=no" in m for m in logs)
+    (rec,) = records(kept)
+    assert rec["args"] == tries[0].args() and rec["args"][:2] == ["send", SEAT.to]
+    assert spool.message_id(rec["args"]) == MID and rec["kind"] == "exec"
+
+
+def test_t6_a_keep_that_fails_is_logged_and_never_the_followers_end(heard, fake_message):
+    class Full:
+        def keep(self, sent, body):
+            raise OSError(28, "No space left on device")
+    fake_message.answer(MTA)
+    logs = []
+    f = follower(heard, logs=logs, kept=Full())
+    write(heard, turn(741, "x"), turn(742, "y"))
+    go(pump(f))
+    (nk,) = [m for m in logs if "NOT KEPT" in m]
+    assert nk.startswith(f"TURN call:{N} <{MID}> NOT KEPT: OSError") and "heard log only" in nk
+    assert f.mailed == [f"call-turn-web-{N}-742@{IDS}"]          # the next turn still goes
+
+
+def test_t6_a_tell_that_fails_is_logged_and_never_the_followers_end(heard, fake_message):
+    def tell(seq):
+        raise RuntimeError("no loop")
+    fake_message.answer(MTA)
+    logs = []
+    f = follower(heard, logs=logs, tell=tell)
+    write(heard, turn(741, "x"), turn(742, "y"))
+    go(pump(f))
+    assert any(m.startswith(f"UNDELIVERED call:{N} seq 741: not said: RuntimeError") for m in logs)
+    assert f.mailed == [f"call-turn-web-{N}-742@{IDS}"]
 
 
 def test_a_send_cancelled_in_flight_still_logs_when_it_lands(heard):
@@ -637,33 +676,37 @@ def test_a_send_cancelled_in_flight_still_logs_when_it_lands(heard):
     assert any("(late)" in m and "mailed to" in m for m in logs)
 
 
-def test_f1_a_refused_turn_stopped_in_the_back_off_is_still_logged(heard):
-    """build-001 review F1: refused, then the follower is cancelled between tries
-    (CallDesk.stop()'s bound): nothing went, and the turn's own line says so."""
-    tries, logs = [], []
+def test_f1_a_send_cancelled_in_flight_that_lands_refused_is_kept_once_and_never_said(heard, kept):
+    """The late path (CallDesk.stop()'s bound): the send's own thread keeps it;
+    _landed_late only logs, and says nothing (the call is gone)."""
+    import threading
+    gate, logs, told = threading.Event(), [], []
 
     def send(mail):
-        tries.append(mail)
+        gate.wait(5)
         return Sent(False, "rc=3 kind=mta: no MTA", kind="mta")
 
     async def main():
-        f = follower(heard, logs=logs, send=send, sleep=asyncio.sleep, poll=0.01, backoff=(5.0, 5.0))
+        f = follower(heard, logs=logs, send=send, kept=kept, tell=told.append)
         write(heard, turn(741, "refused, then stopped"))
-        f.start()
+        t = asyncio.ensure_future(pump(f))
+        await asyncio.sleep(0.05)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        gate.set()
         for _ in range(200):
-            if tries:
+            if any("(late)" in m for m in logs):
                 break
             await asyncio.sleep(0.01)
-        f.end()
-        await f.wait(timeout=0.1)
-        await asyncio.sleep(0)
         return f
 
     f = go(main())
-    assert len(tries) == 1 and f.task.cancelled()
+    assert f.mailed == [] and told == []
     (no,) = [m for m in logs if "NOT mailed" in m]
-    assert no == f"TURN call:{N} seq 741 NOT mailed to alice@{HOST}: rc=3 kind=mta: no MTA, taken=no (stopped)"
-    assert any("did not finish" in m for m in logs)
+    assert no == f"TURN call:{N} seq 741 NOT mailed to alice@{HOST} (late): rc=3 kind=mta: no MTA, taken=no"
+    (rec,) = records(kept)
+    assert spool.message_id(rec["args"]) == MID
 
 
 # ---- T8: who the turns go to, and when --legs is refused (§4.5, §11 A1, A4, A8) -------------------

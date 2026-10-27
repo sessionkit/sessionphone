@@ -6,7 +6,9 @@ Rename it. An empty value counts as unset. The defaults suit a bare install: one
 its state in one private root.
 
 The root is DC_ROOT, else sessionphone.paths.root() (SESSIONPHONE_ROOT,
-else the root `bot install` keeps in phone.json, else ~/.sessionphone). It is mode 0700, and it holds the account, the
+else the root `bot install` keeps in phone.json, else paths.default_root():
+~/.sessionkit/phone/state, or the old ~/.sessionphone while only that one is
+there). It is mode 0700, and it holds the account, the
 outbox, the call dirs, the approved callers and the ear and mouth sockets.
 `sessionphone setup` makes it. A named profile (DC_PROFILE) keeps all of
 those in its own home, <root>/<profile>/ (home()); the default profile's
@@ -389,10 +391,11 @@ def take_mail_host():
 # bot keeps about its account lives in its HOME: the root itself for the
 # default profile, exactly as before, and <root>/<profile>/ for a named one.
 # That is the allow-list, the callers, the outbox, the seen ids, the acks, the
-# undelivered spool, the calls, the live call, the log, the sockets and the
-# accounts folder. An explicit DC_<NAME> still wins. ROOT_WIDE names the few
-# settings that are not about an account and stay at the root for every
-# profile: the wait music and the voice map.
+# undelivered spool, the calls, the live call, the sockets and the accounts
+# folder. An explicit DC_<NAME> still wins. ROOT_WIDE names the few settings
+# that are not about an account and stay at the root for every profile: the
+# wait music and the voice map. The logs are not in the root at all: they are
+# under ~/.sessionkit/phone/log/<bot>[/<profile>]/ (log_file, paths.log_dir).
 ROOT_WIDE = ("WAIT_MUSIC", "VOICES")
 
 
@@ -420,10 +423,39 @@ def home(environ=None, root=None):
     return r / p if p else r
 
 
+def log_file(environ=None, agent=None, profile_name=None):
+    """The log a bot run with ENVIRON writes: DC_LOG (or its deprecated
+    alias), else paths.bot_log, ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log.
+    AGENT and PROFILE_NAME, when given, are the ones already worked out (the
+    bot's, bound at import); else agent_from(environ) and profile(environ)."""
+    e = os.environ if environ is None else environ
+    given = _get(e, "LOG")
+    if given:
+        return pathlib.Path(given).expanduser()
+    a = agent if agent is not None else agent_from(e)[0]
+    return paths.bot_log(a, profile(e) if profile_name is None else profile_name)
+
+
+def log_for_reader(environ=None, agent=None, root=None):
+    """The bot's log as a reader finds it (`bot status`, bin/dc-env, bin/dc-log):
+    log_file, unless DC_LOG is unset and only the bot's old log is there,
+    <home>/bot.log (home, ROOT as given), which a bot that has not started on
+    this version yet still writes (paths.legacy_or)."""
+    e = os.environ if environ is None else environ
+    new = log_file(e, agent)
+    if _get(e, "LOG"):
+        return new
+    try:
+        old = home(e, root) / paths.BOT_LOG
+    except settings.Bad:
+        return new          # no root to look in: the new log is the answer
+    return paths.legacy_or(new, old)
+
+
 def callers_file(environ=None):
     """The approved-callers file a bot run with `environ` reads: DC_CALLERS_FILE,
     else <home>/callers.txt (home: <DC_ROOT, else SESSIONPHONE_ROOT, else
-    ~/.sessionphone>, plus /<DC_PROFILE> when one is set). The same answer as
+    paths.root()>, plus /<DC_PROFILE> when one is set). The same answer as
     path("CALLERS_FILE", "callers.txt"), for any environment (the plist's, at
     install)."""
     e = os.environ if environ is None else environ
@@ -462,6 +494,48 @@ def channels_file(environ=None):
     if v:
         return pathlib.Path(v).expanduser()
     return home(e) / "channels.txt"
+
+
+# The per-account files a named profile may not share with the default profile,
+# each with why: (what, setting, file, reason). A channels.txt entry is a chat
+# id, one account's; a callers.txt line is a key that may ring (keygate.judge:
+# the key decides), so one file approves the same callers on both bots.
+PROFILE_FILES = (
+    ("allow-list", "CHANNELS_FILE", "channels.txt",
+     "Chat ids are per account, so an entry for one account would open a chat on the other."),
+    ("callers file", "CALLERS_FILE", "callers.txt",
+     "It says who may ring, so a caller approved on one profile could ring the other."),
+)
+
+
+def profile_files_problem(environ=None, root=None, profile_name=None):
+    """A NAMED profile whose allow-list or callers file is the default
+    profile's (<root>/channels.txt, <root>/callers.txt), by a DC_CHANNELS_FILE
+    or DC_CALLERS_FILE that points there or by a link (the files are compared
+    by realpath), would gate one account on the other's. -> None, or the
+    reason a bot run with `environ` refuses to start. The one rule: the bot's
+    start check (bot.check_profile_files) and `bot install` both ask it.
+    ROOT and PROFILE_NAME, when given, are the ones already worked out (the
+    bot's, bound at import); else root_of(environ) and profile(environ)."""
+    e = os.environ if environ is None else environ
+    p = profile(e) if profile_name is None else profile_name
+    if not p:
+        return None
+    r = root_of(e) if root is None else pathlib.Path(root)
+    for what, name, rel, reason in PROFILE_FILES:
+        given, own, theirs = _get(e, name), r / p / rel, r / rel
+        mine = pathlib.Path(given).expanduser() if given else own
+        if os.path.realpath(mine) != os.path.realpath(theirs):
+            continue
+        if given:
+            return (f"profile {p}'s {what} is {mine}, the default profile's own. {reason} "
+                    f"Unset DC_{name} (this profile then reads {own}) or point it at "
+                    f"a file of this profile's own.")
+        # its own path is a link (the file, or the profile's folder) to the default's
+        return (f"profile {p}'s {what} is {mine}, which resolves to {os.path.realpath(theirs)}, "
+                f"the default profile's own. {reason} Make {mine} a file of this profile's own, "
+                f"not a link to the default profile's.")
+    return None
 
 
 def stt_url(environ=None):
@@ -571,8 +645,9 @@ def _root():
     try:
         return paths.root()
     except settings.Bad as exc:
-        BAD.append(f"{exc} Using {paths.DEFAULT_ROOT} for now.")
-        return pathlib.Path(paths.DEFAULT_ROOT).expanduser()
+        r = paths.default_root()
+        BAD.append(f"{exc} Using {r} for now.")
+        return r
 
 
 ROOT = _root()
@@ -645,7 +720,8 @@ XDC_FEEDS_MAX = max(0, int(number("XDC_FEEDS_MAX", 2)))     # feeds at once
 def path(name, *rel):
     """DC_<name> (or its deprecated alias) as a path, else home_dir()/<rel...>:
     this bot's home, which is ROOT for the default profile. A ROOT_WIDE name
-    is ROOT/<rel...> for every profile."""
+    is ROOT/<rel...> for every profile. Never LOG: the log is out of the
+    home (log_file)."""
     v = env(name)
     if v:
         return pathlib.Path(v).expanduser()
@@ -708,8 +784,9 @@ if __name__ == "__main__":
     if HOST_PROBLEM:
         print(f"{'REFUSED':12} {HOST_PROBLEM}")
     for k, rel in (("ACCOUNTS", ("accounts",)), ("OUTBOX", ("outbox",)), ("CALLS_DIR", ("calls",)),
-                   ("LIVE", ("call-live.json",)), ("ACKS", ("acks",)), ("LOG", ("bot.log",)),
+                   ("LIVE", ("call-live.json",)), ("ACKS", ("acks",)),
                    ("CALLERS_FILE", ("callers.txt",)), ("CHANNELS_FILE", ("channels.txt",)),
                    ("SEEN", ("bridged-ids.txt",)), ("UNDELIVERED", ("undelivered",)),
                    ("PID_FILE", ("bot.pid",))):
         print(f"{k:12} {path(k, *rel)}")
+    print(f"{'LOG':12} {log_file(agent=AGENT, profile_name=PROFILE)}")

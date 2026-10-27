@@ -250,13 +250,14 @@ def test_callers_file_resolves_as_the_bot_does(tmp_path):
 # --- the running bot says so, loudly, at start ------------------------------
 
 @pytest.fixture
-def bot(monkeypatch, tmp_path):
+def bot(monkeypatch, tmp_path, lock_home_in_tmp):
     for k in [k for k in os.environ if k.startswith(("DC_", "PIP_CHAT_"))]:
         monkeypatch.delenv(k)
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))     # a scratch HOME, never the real one
     monkeypatch.setenv("DC_AGENT", "ada")
     from sessionphone.bridge import bot as b
+    lock_home_in_tmp(b)         # imported here: run alone, the autouse fixtures saw no bot (PHONE-264)
     monkeypatch.setattr(b, "LOG", tmp_path / "bot.log")
     monkeypatch.setattr(b, "OUTBOX", tmp_path / "outbox")
     monkeypatch.setattr(b, "check_root", lambda: None)

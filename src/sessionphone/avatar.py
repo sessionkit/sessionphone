@@ -291,7 +291,7 @@ def queue(value: str | None, box: pathlib.Path | None = None, acks: pathlib.Path
     if not paths.exists(ack_path):
         raise Failed(NOT_CONFIRMED, f"NOT CONFIRMED (no ack): the bot took the job and wrote no ack "
                                     f"in {ack_wait:g}s, so whether the picture changed is unknown. "
-                                    f"Its log: {_root() / 'bot.log'}")
+                                    f"Its log: {dc_env.log_for_reader()}")
     try:
         ans = json.loads(ack_path.read_text(encoding="utf-8"))
         ok, detail = bool(ans.get("ok")), str(ans.get("detail", ""))

@@ -348,7 +348,9 @@ def test_a_barge_in_mid_mouth_line_drops_both_speakers_and_the_mouths_later_fram
     assert end["ended"] == "cut" and not end["ok"]          # the mouth's D after the cut
     assert end["dropped_s"] == pytest.approx(0.2)           # its later frame was not said
     assert s.echo.cuts == 0                                 # the barge-in already cut; the mouth cuts no more
-    assert s.lines[-1][2] == "Morning Bob. [cut]"
+    # the mouth line opened first, so it is filed first, before the reply that waited behind it
+    assert [r[2] for r in s.lines if r[1] == "Agent"] == ["Morning Bob. [cut]"], s.lines
+    assert [r[0] for r in s.lines] == sorted(r[0] for r in s.lines), s.lines
 
 
 @pytest.mark.parametrize("ending", [b"D", b""], ids=["D", "EOF"])     # its D, or it dies (EOF)

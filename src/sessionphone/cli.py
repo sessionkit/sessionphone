@@ -10,6 +10,7 @@
     sessionphone channels rejected [--profile public]  who the public bot turned away
     sessionphone bot install [--owner ADDR [--owner-key FPR]] [--forget KEY]  run the resident bot under launchd
     sessionphone bot status|uninstall|run
+    sessionphone bot migrate [--dry-run]  move the old default root into ~/.sessionkit/phone/state
     sessionphone web [--port --root --origin --tls --host --legs --mail-to --heard-dir]
                                      a browser tab as a call, passkey first
     sessionphone web enrol           a one-time code (and its QR) to enrol a passkey on the web page
@@ -844,7 +845,7 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     except settings.NotSaved as exc:   # the job is loaded: say all of it, then why, exit 1
         p, unsaved = exc.plist, exc
     except (paths.NotConfigured, paths.Unsafe, service.NoMailHost, service.NoSTTModel,
-            service.NoCallers, service.NoChannels, service.LegacyCarryOver,
+            service.ProfileFiles, service.NoCallers, service.NoChannels, service.LegacyCarryOver,
             service.NoSigner, service.NoBox, service.CallLive, settings.Bad) as exc:
         _fail(exc, 2)
         return
@@ -1034,6 +1035,42 @@ def bot_uninstall(force: bool = False) -> None:
         click.echo(line)
 
 
+@bot.command("migrate", context_settings=CTX)
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="check, and say each step and where the account will open, changing nothing")
+def bot_migrate(dry_run: bool = False) -> None:
+    """Move the bot's old default root, ~/.sessionphone, to the new one,
+    ~/.sessionkit/phone/state, once on this Mac, keeping its Delta Chat keys.
+
+    Refused (exit 2, nothing moved) while a bot runs on the old root (it
+    holds the root's .bot.lock, or its bot.pid names a running bot) or a
+    call is live on it: stop the bot first (`sessionphone bot uninstall`).
+    Refused too when the new root is already there, when the old path is a
+    link somewhere else, or when the two are on different filesystems.
+
+    The root is moved by rename, never copied: the account and its keys
+    keep their files and their 0700. The old path is left as a link to the
+    new root, so anything still holding the old name keeps working; it is
+    never deleted. The launchd plists whose root is the old one (their
+    DC_ROOT, else SESSIONPHONE_ROOT) are re-rendered to name the new one,
+    and a plist with any other root is left as it is. A loaded job reads
+    its plist at its next load (`sessionphone bot install`, or the next
+    login); until then it runs on the old path, the link.
+
+    Only the old DEFAULT root moves: a root set by SESSIONPHONE_ROOT, DC_ROOT
+    or phone.json is never touched. Each line names a step: old, new, where
+    the account opens (account:), the move, the link, each plist. With
+    --dry-run they say what would be done, and nothing is changed. Exit 1
+    when a step after the checks fails; the message says what was done."""
+    from sessionphone import migrate
+    try:
+        migrate.migrate(dry_run=dry_run, say=click.echo)
+    except migrate.Refused as exc:
+        _fail(exc, 2)
+    except migrate.Failed as exc:
+        _fail(exc, 1)
+
+
 def _undelivered(name: str | None) -> None:
     """`undelivered: N waiting, M dead (<dir>)`: the bot's spool of agent mail
     that failed, call turns included, as dc-live counts it. Said on
@@ -1071,7 +1108,7 @@ def bot_status() -> None:
     The bot is the one install would pick (as `bot uninstall` says; with no
     name in this shell, a `bot:` line says which), and its log is the one its
     plist names, else the one under the root: this shell's SESSIONPHONE_ROOT,
-    else the one phone.json keeps, else ~/.sessionphone."""
+    else the one phone.json keeps, else the default (paths.root)."""
     name, picked = _which_bot("bot status")
     st = service.status(name)
     click.echo(f"job:     {st['label']} ({'installed' if st['installed'] else 'not installed'})")
@@ -1133,11 +1170,13 @@ def bot_run() -> None:
 # ---- sessionphone web: a browser tab as a call device ----------------------
 
 def _webdir(root: pathlib.Path | None) -> pathlib.Path:
-    """`<root>/web/`: --root, else SESSIONPHONE_ROOT, else ~/.sessionphone."""
+    """`<root>/web/`: --root, else paths.root() (SESSIONPHONE_ROOT, else the
+    root phone.json keeps, else the default)."""
     return (root.expanduser() if root else paths.root()) / "web"
 
 
-_ROOT_HELP = "the sessionphone root (default: $SESSIONPHONE_ROOT, else ~/.sessionphone); state goes in ROOT/web/"
+_ROOT_HELP = (f"the sessionphone root (default: $SESSIONPHONE_ROOT, else the one phone.json keeps, "
+              f"else {paths.DEFAULT_ROOT}); state goes in ROOT/web/")
 
 
 @main.group("web", context_settings=CTX, invoke_without_command=True)
@@ -1242,7 +1281,8 @@ def web_enrol(ctx: click.Context, root: pathlib.Path | None) -> None:
 # ---- sessionphone app: the webxdc apps this package ships -------------------
 
 def _dc_root() -> pathlib.Path:
-    """The bot's root, read now: DC_ROOT, else SESSIONPHONE_ROOT, else ~/.sessionphone."""
+    """The bot's root, read now: DC_ROOT, else paths.root() (SESSIONPHONE_ROOT,
+    else the root phone.json keeps, else the default)."""
     root = dc_env.env("ROOT")
     return pathlib.Path(root).expanduser() if root else paths.root()
 

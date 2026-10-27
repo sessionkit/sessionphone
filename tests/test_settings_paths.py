@@ -27,6 +27,11 @@ from sessionphone.bridge import calls, recording
 
 # what `bot install` remembers: settings.FILE as shipped (conftest moves it per test)
 PHONE_CONF = paths.kit_settings("phone", "phone.json")
+# the bot's log folder as the docs name it: paths.log_dir's layout, <agent> and
+# <profile> standing for the bot and its profile
+LOG_DIR = f"{paths.kit_dir('phone', 'log')}/<agent>/"
+LOG_PATHS = {LOG_DIR, LOG_DIR + paths.BOT_LOG, LOG_DIR + paths.LAUNCHD_LOG,
+             LOG_DIR + "<profile>/", LOG_DIR + "<profile>/" + paths.BOT_LOG}
 
 
 def test_ears_conf_wins_when_set(monkeypatch, tmp_path):
@@ -65,8 +70,8 @@ SUPERSEDED = re.compile(r"\.settings|sessionkit/settings/")
 ALLOWED = {
     "src/sessionphone/bridge/recording.py:145",  # LEGACY_EARS_CONF: stat-ed for the warning only
     "tests/test_stranded_ears_conf.py:23",       # OLD: the HOME=tmp test of the warning
-    "tests/test_settings_paths.py:61",           # SUPERSEDED: this gate's own pattern
-    "docs/configuration.md:244",                 # the "Upgrading from 0.1.0" note
+    "tests/test_settings_paths.py:66",           # SUPERSEDED: this gate's own pattern
+    "docs/configuration.md:258",                 # the "Upgrading from 0.1.0" note
 }
 
 # Never shipped, or not ours: version control, caches, virtualenvs, builds.
@@ -148,12 +153,15 @@ KIT_PATH = re.compile(r"~/\.sessionkit/[^\s`'\")]+")
 def test_every_kit_path_in_the_docs_is_one_the_code_builds():
     """Docs cannot import, so each names a kit path in exactly the form the
     code builds: a layout change in the code fails here until the docs follow."""
-    built = {recording.EARS_CONF_DEFAULT, calls.MAIL_CONF, PHONE_CONF, settings.MAIL_TEMPLATE}
+    state = paths.DEFAULT_ROOT   # the bot's root (PHONE-270); a file in it is named under it
+    built = {recording.EARS_CONF_DEFAULT, calls.MAIL_CONF, PHONE_CONF, settings.MAIL_TEMPLATE, *LOG_PATHS, state}
     docs = [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
     seen, odd = set(), []
     for p in docs:
         for n, line in enumerate(p.read_text().splitlines(), 1):
             for m in KIT_PATH.findall(line):
+                if m.rstrip("/.,;:").startswith(state + "/") or m.rstrip("/.,;:") == state:
+                    m = state
                 seen.add(m)
                 if m not in built:
                     odd.append(f"{p.relative_to(ROOT)}:{n}: {m}")
