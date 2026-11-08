@@ -33,10 +33,18 @@ rules; this page has the rest.
 - `dc-hangup CHAT_ID` ends it.
 - Hearing them is the bot's job. It sends what they say to the
   speech-to-text server at `DC_STT_URL` ([Voice notes][voice-notes]) and
-  mails you each finished turn. Only with `DC_EARS=1` in the bot's
-  environment does it listen through ears instead and hand the call's
-  audio to ears on `$SESSIONPHONE_ROOT/call-ears.sock`, where the ears
-  keeper can wake you. See the ears skill.
+  mails you each finished turn. It also hands the call's audio to ears on
+  `$SESSIONPHONE_ROOT/call-ears.sock`, where the ears keeper can wake you.
+  See the ears skill. With `DC_EARS=1` in the bot's environment, the bot
+  itself hears through ears instead of the speech-to-text server.
+- **They can cut you off.** At the defaults a line stops when they talk
+  over it, whichever path spoke it. The mouth cuts its own line when the
+  ears on that socket hear them. The bot's barge-in (`DC_BARGE_IN`, on by
+  default) cuts any line once their words are heard: a mouth line, a
+  `dc-say` or a mail into the call. A short murmur such as "yeah" does
+  not cut, though "stop" or "wait" does. Words that sound like your own
+  voice coming back do not cut. With `DC_EARS=1` the bot's barge-in is
+  off, and only the mouth cuts.
 
 ## When they ring you
 

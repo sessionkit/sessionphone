@@ -145,10 +145,14 @@ def test_floor_line_matches_the_code_default():
     text = _turn_taking()
     assert "`DC_FLOOR_GAP`" in text
     assert f"{floor.GAP_DEFAULT:g} s" in text
-    # The cap releases a held reply even mid-speech: the skill must not
-    # promise the bot never starts over the caller.
+    # The cap releases a held reply over noise, and over a caller who talks on
+    # with no pause long enough to send words: the skill must not promise the
+    # bot never starts over the caller. Past the cap it still waits while
+    # their words are arriving, so the cap is no longer "at most".
     assert "`DC_FLOOR_CAP`" in text
-    assert f"{floor.CAP_DEFAULT:g} s at most" in text
+    assert f"After {floor.CAP_DEFAULT:g} s by default" in text
+    assert "unless their words are still reaching" in text
+    assert f"{floor.CAP_DEFAULT:g} s at most" not in text
     assert f"{floor.GAP_DEFAULT:g} s by default" in text
     assert "never starts over" not in text
     assert "does not start over" not in text

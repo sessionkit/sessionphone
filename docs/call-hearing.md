@@ -117,5 +117,20 @@ every request. A call uses the same endpoint for what the caller says.
   tag `DC_STT_URL` or set `DC_STT_MODEL`. An HTTP error logs its status and
   the server's reply (`TRANSCRIBE HTTP 422 ...`), and so does a reply with
   no text.
+- A voice note that isn't wav is decoded to wav first. A Delta Chat voice
+  note arrives as M4A, and some speech servers read only wav: an mlx-audio
+  server answers an M4A with `Unsupported output format: m4a`. So the bot
+  decodes the note with PyAV (`av`, from the media pack) to 16 kHz mono
+  wav in a temporary file, posts that, and deletes it. A wav, such as a
+  call's audio, is posted as it is. The log says `VOICE NOTE decoded to 16
+  kHz mono wav (NAME, SECONDS s)`. A bot without the media pack posts the
+  note as it came, as before, and logs that PyAV is not installed.
+- A note that can't be decoded is not posted. The log says `VOICE NOTE not
+  decoded to wav (NAME): REASON`, and the agent reads `[voice note -
+  transcription failed: it could not be decoded (REASON)]`, then the
+  attachment line, so it can open the file itself. REASON is plain, such as
+  `Invalid data found when processing input`. When the speech server fails
+  instead, the agent reads `[voice note - transcription failed]`, as
+  before, and the log has the server's reason.
 
 [skill]: ../skills/sessionphone/SKILL.md

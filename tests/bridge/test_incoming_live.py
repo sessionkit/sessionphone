@@ -10,6 +10,7 @@
 
 Fakes only: no account, no rpc-server, no whisper, no sendmail.
 """
+import _chatlist
 import pytest
 
 from sessionphone.bridge import bot
@@ -49,7 +50,7 @@ class FakeChat:
         self.info.is_contact_request = False
 
 
-class FakeAccount:
+class FakeAccount(_chatlist.Chatlist):
     """One account: messages by id, chats by id, a queue of events, and a
     record of every mark_seen_messages() call."""
 
@@ -84,9 +85,6 @@ class FakeAccount:
 
     def get_chat_by_id(self, chat_id):
         return self.chats[chat_id]
-
-    def get_fresh_messages(self):
-        return list(self.fresh)
 
     def mark_seen_messages(self, msgs):
         for m in msgs:

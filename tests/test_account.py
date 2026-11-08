@@ -112,3 +112,45 @@ def test_cli_callers_add_then_list(root) -> None:
 
 def test_cli_invite_before_setup_exits_2(root) -> None:
     assert CliRunner().invoke(main, ["invite"]).exit_code == 2
+
+
+# -- setup() leaves the core's bot flag unset ----------------------------------
+# With the flag set the core accepts every contact request by itself, so a
+# stranger reached the agent unflagged. A fresh account is made without it.
+
+class _SetupAccount:
+    """The account surface setup() uses; every set_config() is recorded."""
+
+    def __init__(self, configured):
+        self.configured, self.set_calls, self.transports = configured, [], []
+
+    def is_configured(self):
+        return self.configured
+
+    def set_config(self, key, value):
+        self.set_calls.append((key, value))
+
+    def init_transports(self, *qr):
+        self.transports.append(qr)
+        self.configured = True
+
+    def start_io(self):
+        pass
+
+    def get_qr_code(self):
+        return LINK
+
+    def list_transports(self):
+        return [{"addr": "bot@relay.example"}]
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["fresh", "existing"])
+def test_setup_never_sets_the_bot_flag(root, monkeypatch, configured) -> None:
+    acct = _SetupAccount(configured)
+    monkeypatch.setattr(account, "_open", lambda create=False: iter([acct]))
+    root.mkdir(mode=0o700)
+    out = account.setup("Test Agent", status="on call")
+    assert out["created"] is (not configured)
+    assert acct.transports == ([()] if not configured else [])
+    assert [k for k, _ in acct.set_calls] == ["displayname", "selfstatus"]
+    assert all(k != "bot" for k, _ in acct.set_calls)

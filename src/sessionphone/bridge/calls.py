@@ -41,13 +41,19 @@ from sessionphone.noise import no_real_word   # '.', 'Music.', 'Um' never wake
 # Barge-in: if anyone speaks while the agent is speaking, the bridge stops
 # sending the audio, and the agent is told at what point it stopped.
 #
-# DEFAULT OFF, and that is the point of the flag. Barge-in DEPENDS on
-# echo suppression: 34 of 39 echo chunks on the recorded call arrived while
-# we were still speaking, so before the echo is being dropped this
-# cuts us off on our own voice. Both ship in the same patch, so the
-# flag is what keeps the order the dependency demands - echo first,
-# watched working on a live call, then DC_BARGE_IN=1.
-BARGE_IN = os.environ.get("DC_BARGE_IN", "0") == "1"
+# ON by default; DC_BARGE_IN=0 turns it off. Barge-in DEPENDS on echo
+# suppression: 34 of 39 echo chunks on the recorded call arrived while
+# we were still speaking, so without the echo being dropped this cuts us
+# off on our own voice. So the cut is driven by the transcript, never the
+# VAD, and two gates stand before it: a line the echo guard calls ours is
+# dropped (ECHO), and a line that only looks partly like ours is not a cut
+# (BARGE_IN_MAX_ECHO, below). Off, a caller could not stop a long line:
+# he talked over it, and that only queued his turn behind it.
+#
+# It is the energy-VAD path's cut (_heard). Under DC_EARS=1 the call's
+# finals go to _ears_dispatch, which has no echo check and no barge-in,
+# so this setting does nothing there.
+BARGE_IN = os.environ.get("DC_BARGE_IN", "1") == "1"
 
 # ...and echo suppression catches most of our voice, not all. What
 # leaks through arrives WHILE WE ARE SPEAKING - exactly the state
@@ -281,7 +287,8 @@ EARS_SRC = dc_env.env("EARS_SRC")     # an ears checkout's src/, for development
 # asked for something ears provides: with both off, as by default, a missing
 # ears costs nothing, and "ears is not installed" was read as "no hearing".
 # The call's ears proper are a separate process on call-ears.sock
-# (earleg.py), not this import.
+# (earleg.py), not this import, and the ear leg is fed at every setting:
+# _listen (the default) and _listen_ears (DC_EARS=1) both serve his audio there.
 import sys
 if EARS_SRC and EARS_SRC not in sys.path:
     sys.path.insert(0, EARS_SRC)
@@ -303,8 +310,38 @@ except ImportError as _e:               # no ears: a policy that never previews
 # The INBOUND leg: a new call is a new mail thread, and the bridge voices
 # whatever is mailed on that thread. The bridge reads its OWN box, never
 # the agent's seat box - reading it would claim mail out from under the agent's pager,
-# which is the bug that retired `session mail arm`.
-BOT_BOX = pathlib.Path(dc_env.env("BOT_BOX") or HOME / ".mail/agents" / f"{dc_env.AGENT}-chat").expanduser()
+# which is the bug that retired `session mail arm`. Where that box is,
+# sessionmail says (`message path <agent>-chat`): this module never spells
+# the mail root. DC_BOT_BOX overrides it; a test sets BOT_BOX.
+BOT_BOX: pathlib.Path | None = None
+BOT_BOX_RECHECK_S = 60.0    # a box not there is asked again after this; one there is kept
+_bot_box_asked: tuple[pathlib.Path | None, float] | None = None
+
+
+def bot_box() -> pathlib.Path | None:
+    """The bot's own box: BOT_BOX when set (a test's), else $DC_BOT_BOX, else
+    the maildir sessionmail resolves `<agent>-chat` to (seatmail.box_path,
+    read-only). A box found is kept for the run; a no is asked again after
+    BOT_BOX_RECHECK_S and said once. None: sessionmail has no such box, and
+    the mail leg reads nothing (it never makes one)."""
+    global _bot_box_asked
+    if BOT_BOX is not None:
+        return BOT_BOX
+    given = dc_env.env("BOT_BOX")
+    if given:
+        return pathlib.Path(given).expanduser()
+    now, had = time.monotonic(), _bot_box_asked
+    if had is not None and (had[0] is not None or now - had[1] < BOT_BOX_RECHECK_S):
+        return had[0]
+    name = f"{dc_env.AGENT}-chat"
+    found = seatmail.box_path(name)
+    if found is None and had is None:
+        log(f"mail leg: no box `{name}` (`message path {name}` names none): "
+            "mail into a call is not read until there is one")
+    _bot_box_asked = (found, now)
+    return found
+
+
 VOICE_MAP_FILE = dc_env.path("VOICES", "voices.json")
 GUESTS_FILE = dc_env.path("GUESTS", "call-guests.txt")
 DEFAULT_VOICE_MAP = {dc_env.AGENT: dc_env.VOICE}   # the agent's own mail, in its own voice
@@ -1037,7 +1074,7 @@ class PipVoiceTrack(MediaStreamTrack):
             return False
         if ln.held_at is not None:
             _line_log(f"FLOOR {ln.who or 'reply'} line held {now - ln.held_at:.1f}s, "
-                      f"released by {why}")
+                      f"released by {f.reason(why, ln.held_at, now)}")
         return True
 
     def end_opening(self):
@@ -1616,7 +1653,7 @@ class MailLeg(threading.Thread):
         """Guest mail we have not spoken: new/, plus cur/ without `S`.
 
         Watching new/ alone loses a race we cannot win. notmuch indexes
-        ~/.mail, which contains this box, and `notmuch new` MOVES mail
+        the mail root, which contains this box, and `notmuch new` MOVES mail
         out of new/ into cur/ as it goes - so a one-second poll of new/
         finds nothing and the guest is silently dropped. Measured here:
         77 guest mails delivered and never spoken, the oldest six days
@@ -1631,10 +1668,13 @@ class MailLeg(threading.Thread):
         # read "empty" and drop the guest's mail in silence; this way it raises
         # on every Python and run() logs it.
         out = []
-        newd = BOT_BOX / "new"
+        box = bot_box()
+        if box is None:
+            return out
+        newd = box / "new"
         if paths.is_dir(newd):
             out += [f for f in newd.iterdir() if paths.is_file(f)]
-        curd, cutoff = BOT_BOX / "cur", time.time() - self.CUR_WINDOW
+        curd, cutoff = box / "cur", time.time() - self.CUR_WINDOW
         if paths.is_dir(curd):
             for f in curd.iterdir():
                 if not paths.is_file(f) or "S" in f.name.rsplit(":2,", 1)[-1]:
@@ -1707,11 +1747,13 @@ class MailLeg(threading.Thread):
         self.seen(f)
 
     def seen(self, f):
-        """maildir: new/NAME -> cur/NAME:2,S. Done before speaking finishes, so
-        a slow TTS cannot make the same mail be spoken twice."""
+        """maildir: new/NAME -> cur/NAME:2,S, in the box F was read from. Done
+        before speaking finishes, so a slow TTS cannot make the same mail be
+        spoken twice. cur/ is made if it is missing, never the box above it."""
+        cur = f.parent.parent / "cur"
         try:
-            (BOT_BOX / "cur").mkdir(parents=True, exist_ok=True)
-            f.rename(BOT_BOX / "cur" / (f.name.split(":")[0] + ":2,S"))
+            cur.mkdir(exist_ok=True)
+            f.rename(cur / (f.name.split(":")[0] + ":2,S"))
         except Exception as e:
             log(f"mail leg: could not mark {f.name} read: {e} - unlinking")
             f.unlink(missing_ok=True)
@@ -1813,6 +1855,7 @@ class Utterances:
 
 # --------------------------------------------------------------- a session
 
+LISTEN_WAIT = 0.7        # s with no frame from him before the default listen loop fills
 # >>> ears-clock
 EARS_WAIT = 0.7          # s with no frame from him before the timeout path fills
 FILL_CAP = 2.0           # s: the most silence one fill writes
@@ -2402,20 +2445,34 @@ class CallSession:
         # The caller's voice while the agent talks is kept: the phone's WebRTC echo-cancels
         # the agent, and dropping frames here broke the VAD's continuity (a loopback
         # test). Barge-in works as a side effect.
+        # The call is a mic here too, not only on the ears path (DC_EARS=1):
+        # every frame the VAD gets goes to the taps on
+        # call-ears.sock (earleg.feed), and wav_samples counts the stream, so
+        # ear-taps.jsonl says where each tap starts. No tap: feed() is a no-op.
         silence = np.zeros(IN_SAMPLES, dtype=np.int16)
+        silence_b = silence.tobytes()
+        self.wav_samples = 0
         try:
             while True:
                 try:
-                    frame = await asyncio.wait_for(track.recv(), timeout=0.7)
+                    frame = await asyncio.wait_for(track.recv(), timeout=LISTEN_WAIT)
                 except asyncio.TimeoutError:
                     # no packets at all (Opus DTX, or the mic stopped): the VAD
                     # still needs its 700 ms of quiet to close an utterance
                     for _ in range(int(TURN_JOIN_OPEN / PTIME)):
                         self._feed(vad, silence)
+                    # >>> ear-leg: a tap is a mic, on the audio clock: it gets the time that
+                    # passed (LISTEN_WAIT), not the VAD's longer block, as the
+                    # web room does (web/call.py _listen)
+                    for _ in range(int(LISTEN_WAIT / PTIME)):
+                        earleg.feed(self, silence_b)
+                        self.wav_samples += IN_SAMPLES
                     continue
                 for f in resampler.resample(frame):
                     pcm = f.to_ndarray().reshape(-1).astype(np.int16)
                     self._feed(vad, pcm)
+                    earleg.feed(self, pcm.tobytes())     # >>> ear-leg: the call as a mic
+                    self.wav_samples += len(pcm)
         except Exception as e:
             log(f"listen ended: {e.__class__.__name__}: {e}")
 
@@ -2521,6 +2578,13 @@ class CallSession:
         if futs:
             await asyncio.gather(*futs, return_exceptions=True)
 
+    def _words(self):
+        """Real words of his reached the transcript: tell the floor, so a held
+        reply is not released by the cap while he is still talking."""
+        f = getattr(getattr(self, "voice", None), "floor", None)
+        if f is not None:
+            f.heard()
+
     def _ears_event(self, e):
         """Called by ears from any thread (pipe.close runs in an executor)."""
         self.loop.call_soon_threadsafe(self._ears_dispatch, e)
@@ -2530,6 +2594,8 @@ class CallSession:
             if e.text.strip():
                 log(f"HEARD seg {e.seg} [{e.start:.2f}-{e.end:.2f}] lag {(e.t or 0) - e.end:.2f}s: {one_line(e.text)}")
                 self.heard.partial(flat(e.text), seg=e.seg)
+                if not not_speech(e.text):
+                    self._words()       # his words: the floor's cap waits (bridge/floor.py)
         elif e.type == "vad":
             self.speaking = bool(e.get("speech"))
             # >>> recording-ears-speech
@@ -2815,8 +2881,16 @@ class CallSession:
             self.turn_parts.append((seq, ""))   # keeps his turn OPEN
             self._turn_arm()
             return
-        if (BARGE_IN and text and self.voice.speaking()
-                and (why.score if why else 0.0) < BARGE_IN_MAX_ECHO
+        # why is None (no text) or a FALSY Verdict here: it is truthy only
+        # for an echo, and an echo has returned above. So read its score
+        # whenever there is one, not "if why", which was always 0.0.
+        like_us = why.score if why is not None else 0.0
+        if (BARGE_IN and text and self.voice.speaking() and interrupts(text)
+                and like_us >= BARGE_IN_MAX_ECHO):
+            # never silently: residual echo, not him - his words still count
+            log(f"BARGE-IN held on {path.name}: looks like our own voice "
+                f"({like_us:.2f} >= {BARGE_IN_MAX_ECHO}) | {one_line(text)}")
+        elif (BARGE_IN and text and self.voice.speaking()
                 and interrupts(text)):
             # He talked over us and it was NOT our own echo - stop.
             # Driven by the transcript, not the VAD, on purpose: 34 of
@@ -2857,6 +2931,7 @@ class CallSession:
             log(f"HEARD {path.name} in {time.time()-t:.1f}s: {one_line(text)}")
             self.turn_parts.append((seq, text))
             self.heard.partial(flat(text), chunk=seq)
+            self._words()               # his words: the floor's cap waits (bridge/floor.py)
             if PREVIEWS:
                 p = self.previews.on_phrase(text, time.time())
                 if p:

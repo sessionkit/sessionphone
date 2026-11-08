@@ -557,26 +557,6 @@ def forget_boxes() -> None:
     _BOXES.clear()
 
 
-# WORKAROUND: sessionmail's `message path` (and `setup`) read only the
-# legacy SESSION_MAIL_ROOT, while `message send` and the drop read
-# SESSIONMAIL_ROOT first. Where the job carries SESSIONMAIL_ROOT, its box tools
-# get SESSION_MAIL_ROOT with the SAME value, so the box check and the drop agree.
-# Remove root_env, and its callers' use of it, once sessionmail's `path` and
-# `setup` read SESSIONMAIL_ROOT too.
-ROOT_VAR, LEGACY_ROOT_VAR = "SESSIONMAIL_ROOT", "SESSION_MAIL_ROOT"
-
-
-def root_env(env: Mapping[str, str]) -> dict[str, str]:
-    """ENV, with SESSION_MAIL_ROOT set to SESSIONMAIL_ROOT's value when that is
-    set (stripped, not empty): the environment for `message path` / `setup`
-    (the workaround above). ENV as it is otherwise."""
-    out = dict(env)
-    root = (out.get(ROOT_VAR) or "").strip()
-    if root:
-        out[LEGACY_ROOT_VAR] = root
-    return out
-
-
 def on_host(address: str, environ: Mapping[str, str] | None = None) -> bool:
     """Is ADDRESS's domain this host, as sessionmail's drop judges it: its mail
     host, or a name under it, and never a reverse-DNS name? The one judgement
@@ -614,7 +594,7 @@ def box_there(name: str, environ: Mapping[str, str] | None = None) -> bool:
         return had[0]
     try:
         r = subprocess.run([exe, "path", name], capture_output=True, text=True, timeout=TIMEOUT_S,
-                           check=False, stdin=subprocess.DEVNULL, env=root_env(child_env(e)))
+                           check=False, stdin=subprocess.DEVNULL, env=child_env(e))
         there = r.returncode == 0 and bool((r.stdout or "").strip())
     except (OSError, subprocess.SubprocessError):
         there = False
@@ -633,7 +613,7 @@ def box_path(name: str, environ: Mapping[str, str] | None = None) -> pathlib.Pat
         return None
     try:
         r = subprocess.run([exe, "path", name], capture_output=True, text=True, timeout=TIMEOUT_S,
-                           check=False, stdin=subprocess.DEVNULL, env=root_env(child_env(e)))
+                           check=False, stdin=subprocess.DEVNULL, env=child_env(e))
     except (OSError, subprocess.SubprocessError):
         return None
     out = (r.stdout or "").strip().splitlines()

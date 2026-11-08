@@ -101,13 +101,15 @@ def heard(tmp_path):
     return d
 
 
-def fake_mouth(tmp_path, monkeypatch, rc=0, err="", hang=0.0):
+def fake_mouth(tmp_path, monkeypatch, rc=0, err="", hang=0.0, delay=0.0):
     """A fake `mouth` first on PATH: each run's argv is one line in mouth.log; it
-    waits HANG s (a mouth that gives no answer), then exits RC."""
+    waits HANG s (a mouth that gives no answer), then exits RC. DELAY s holds it
+    back BEFORE it writes: a slow mouth, as a loaded host makes one."""
     log = tmp_path / "mouth.log"
     exe = tmp_path / "mouth-bin" / "mouth"
     exe.parent.mkdir(exist_ok=True)
     exe.write_text("#!/usr/bin/env python3\nimport json, sys, time\n"
+                   f"time.sleep({delay!r})\n"
                    f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
                    f"time.sleep({hang!r}); sys.stderr.write({err!r}); sys.exit({rc})\n")
     exe.chmod(0o755)
@@ -148,13 +150,19 @@ async def _no_sleep(dt):
     await asyncio.sleep(0)
 
 
-async def pump(f, *, settle=0.4):
-    """One poll of the follower, then let any `mouth say` it started land."""
+async def pump(desk, f):
+    """One poll of the follower, then await every `mouth say` it started.
+
+    A lost turn's line is a `mouth say` started and NOT awaited
+    (CallDesk._say_undelivered), held in desk._telling until it ends; stop()
+    awaits that same set. take() starts it before it returns, so once the set is
+    empty nothing is in flight: a line counted, or proved never said, is final.
+    Wait on that set, never on a clock: a fixed settle (0.05-1.0 s here once)
+    could end before a slow mouth wrote its line (PHONE-286). go() bounds it."""
     for rec, new in f.read():
         await f.take(rec, new)
-    end = asyncio.get_running_loop().time() + settle
-    while asyncio.get_running_loop().time() < end:
-        await asyncio.sleep(0.02)
+    while desk._telling:
+        await asyncio.gather(*list(desk._telling))
 
 
 def go(coro):
@@ -183,7 +191,7 @@ def test_the_web_spool_is_under_the_web_dir_whatever_the_shell_carries(tmp_path,
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "kept where?"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
     go(main())
     assert desk.kept.counts() == (1, 0)
     assert not bot_spool.exists() and list(undelivered_in_tmp.iterdir()) == []
@@ -233,7 +241,7 @@ def test_a_kept_web_turn_is_retried_at_plus_5s_from_the_web_seat_never_the_bots(
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "retry me"))
-        await pump(c.turns, settle=0.05)
+        await pump(desk, c.turns)
         assert desk.kept.counts() == (1, 0)
         await desk.start()
         for _ in range(500):
@@ -301,7 +309,7 @@ def test_a_drain_that_raises_is_logged_and_the_loop_goes_on(tmp_path, heard):
     assert any("the drain failed: OSError: disk gone" in m for m in logs if isinstance(m, str))
 
 
-def test_the_start_line_counts_the_web_spool(tmp_path, heard, fake_message):
+def test_the_start_line_counts_the_web_spool(tmp_path, heard, fake_message, mouth):
     desk = desk_for(tmp_path, heard, [])
     *_, line = turns.start_lines(SEAT, heard, environ={}, kept=desk.kept)
     assert line == f"turns kept: 0 waiting, 0 dead ({tmp_path / 'web' / 'undelivered'})"
@@ -310,7 +318,7 @@ def test_the_start_line_counts_the_web_spool(tmp_path, heard, fake_message):
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "count me"))
-        await pump(c.turns, settle=0.05)
+        await pump(desk, c.turns)
     go(main())
     *_, line = turns.start_lines(SEAT, heard, environ={}, kept=desk.kept)
     assert line.startswith("turns kept: 1 waiting, 0 dead (")
@@ -327,9 +335,27 @@ def test_a_lost_turn_is_said_once_by_the_mouth_and_logged(tmp_path, heard, fake_
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "lost"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
     go(main())
     assert said(mouth) == [["say", "--device", f"call:{N}", UNDELIVERED_LINE]]
+    assert f"UNDELIVERED call:{N} seq 741: said on the call" in logs
+
+
+def test_a_slow_mouth_is_still_heard(tmp_path, heard, fake_message, monkeypatch):
+    """PHONE-286: the line's `mouth say` is started and NOT awaited (_say_undelivered),
+    so the rig counts only once that run has ended. A mouth slower than any fixed
+    settle (0.4 s here once) is heard, and logged as said."""
+    mouth = fake_mouth(tmp_path, monkeypatch, delay=0.6)
+    logs = []
+    desk = desk_for(tmp_path, heard, logs)
+    fake_message.answer(MTA)
+
+    async def main():
+        c = live_call(desk)
+        write(heard, turn(741, "lost, and slowly told"))
+        await pump(desk, c.turns)
+    go(main())
+    assert said(mouth) == [["say", "--device", f"call:{N}", UNDELIVERED_LINE]], f"a slow mouth went unheard ({logs})"
     assert f"UNDELIVERED call:{N} seq 741: said on the call" in logs
 
 
@@ -341,10 +367,10 @@ def test_two_lost_turns_are_two_lines_and_lost_mailed_lost_is_two(tmp_path, hear
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "one"), turn(742, "two"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
         assert len(said(mouth)) == 2
         write(heard, turn(743, "three"), turn(744, "four"), turn(745, "five"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
         return c.turns
     f = go(main())
     assert f.mailed == [mid(744)]
@@ -360,10 +386,10 @@ def test_a_closed_call_says_nothing_and_the_turn_is_still_kept(tmp_path, heard, 
     async def main():
         c = live_call(desk, live=False)                     # no peer: the call is over
         write(heard, turn(741, "after the end"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
         desk.registry.sessions.pop(N)                       # WebCall.close pops it
         write(heard, turn(742, "after the pop"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
     go(main())
     assert said(mouth) == []
     assert desk.kept.counts() == (2, 0)
@@ -380,7 +406,7 @@ def test_no_mouth_on_path_logs_not_said_and_keeps_the_turn(tmp_path, heard, fake
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "nobody to say it"))
-        await pump(c.turns, settle=0.05)
+        await pump(desk, c.turns)
     go(main())
     assert f"UNDELIVERED call:{N} seq 741: not said: no mouth on PATH" in logs
     assert desk.kept.counts() == (1, 0)
@@ -395,7 +421,7 @@ def test_a_mouth_that_fails_is_logged_with_its_first_line(tmp_path, heard, fake_
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "x"))
-        await pump(c.turns)
+        await pump(desk, c.turns)
     go(main())
     assert len(said(mouth)) == 1
     assert f"UNDELIVERED call:{N} seq 741: not said: mouth exited 3: no call:N here" in logs
@@ -432,9 +458,9 @@ def test_a_mouth_that_cannot_say_it_loses_only_the_line_never_the_turn(tmp_path,
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "lost, and nobody can say so"))
-        await pump(c.turns, settle=1.0)
+        await pump(desk, c.turns)
         write(heard, turn(742, "the next turn still goes"))
-        await pump(c.turns, settle=0.05)
+        await pump(desk, c.turns)
         kept = sorted(desk.undelivered_dir().glob("*.json"))
         assert desk.kept.counts() == (1, 0) and len(kept) == 1
         rec = json.loads(kept[0].read_text())
@@ -462,7 +488,7 @@ def test_a_mailed_turn_is_neither_kept_nor_said(tmp_path, heard, fake_message, m
     async def main():
         c = live_call(desk)
         write(heard, turn(741, "it goes"))
-        await pump(c.turns, settle=0.1)
+        await pump(desk, c.turns)
         return c.turns
     f = go(main())
     assert f.mailed == [mid(741)] and said(mouth) == [] and desk.kept.counts() == (0, 0)

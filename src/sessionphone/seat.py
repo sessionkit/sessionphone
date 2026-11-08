@@ -193,10 +193,10 @@ def _said(r: subprocess.CompletedProcess) -> str:
 def tool_env(shell: Mapping[str, str], exe: str) -> dict[str, str]:
     """The environment sessionmail's tools run in: the installing shell's, with
     the pinned `message`'s directory first on PATH (`seat agent --install`
-    needs `message` on PATH, and it must be the same one), and SESSION_MAIL_ROOT
-    mirroring SESSIONMAIL_ROOT when that is set (seatmail.root_env: a workaround
-    until sessionmail's `path` and `setup` read SESSIONMAIL_ROOT too)."""
-    env = seatmail.root_env(shell)     # workaround: `path`/`setup` read the older root variable only
+    needs `message` on PATH, and it must be the same one). The mail root is
+    sessionmail's to resolve, in every verb, from SESSIONMAIL_ROOT or its own
+    mail.json: nothing here names it."""
+    env = dict(shell)
     path = env.get("PATH", os.defpath)
     env["PATH"] = os.pathsep.join([os.path.dirname(exe), path]) if path else os.path.dirname(exe)
     return env

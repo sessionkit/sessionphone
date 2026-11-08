@@ -27,7 +27,9 @@ import signal
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # `dc-log | head` ends quietly, not with a traceback
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parent.parent / "src"   # the package beside this tool
+HERE = Path(__file__).resolve().parent   # bin/ in a checkout; the env's own bin/ on a wheel install
+SRC = HERE.parent / "src"                # the package beside this tool, in a checkout
+_MOVED = "_DC_PY_PID"                    # set to this process's pid by the one move below
 
 
 _warned = set()   # names already warned about in this run
@@ -62,7 +64,33 @@ def root():
         return paths.default_root()
 
 
+def _python():
+    """The Python that holds the package, in bin/dc-env's order: the checkout's
+    .venv, else the python beside this tool (a wheel install puts the tools in
+    its env's bin/, beside that env's python), else None: stay on this one,
+    the python3 the shebang found, with SRC on sys.path."""
+    for py in (HERE.parent / ".venv" / "bin" / "python", HERE / "python"):
+        if os.access(py, os.X_OK):
+            return py
+    return None
+
+
 def _package():
+    """Make the package importable; call it before the first import of it.
+
+    The shebang runs the first python3 on PATH. On a wheel install that is not
+    the env that holds sessionphone: the tool is reached through a link (the
+    `uv tool install` layout) and the env's bin/ is off PATH. So, first, this
+    re-execs the running program (dc-log, or dc-log-web, which loads this
+    file) under _python(). It moves at most once: _MOVED holds the pid that
+    moved, and exec keeps the pid, so an interpreter reached by another path
+    (a wrapper, a link) cannot loop. A child tool has its own pid and chooses
+    afresh. --help never gets here, so help needs no package."""
+    py = _python()
+    if py and os.path.abspath(sys.executable) != str(py) \
+            and os.environ.get(_MOVED) != str(os.getpid()):
+        os.environ[_MOVED] = str(os.getpid())
+        os.execv(py, [str(py), sys.argv[0], *sys.argv[1:]])
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
 

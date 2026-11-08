@@ -691,8 +691,9 @@ RING_WAIT = number("RING_WAIT", 25.0)
 NO_REPLY_S = number("NO_REPLY_S", 0.0)
 HOLDING_LINE = env("HOLDING_LINE") or "I heard you, give me a moment."
 # Floor control (bridge/floor.py): a reply line does not start while the caller
-# is speaking. It waits for FLOOR_GAP seconds of his quiet, FLOOR_CAP at most,
-# then plays. FLOOR_GAP=0 turns it off: a reply starts the moment it arrives.
+# is speaking. It waits for FLOOR_GAP seconds of his quiet; after FLOOR_CAP it
+# plays anyway, unless his words are still reaching the transcript (floor.py).
+# FLOOR_GAP=0 turns it off: a reply starts the moment it arrives.
 FLOOR_GAP = number("FLOOR_GAP", 0.8)
 FLOOR_CAP = number("FLOOR_CAP", 6.0)
 # GREETING_VOICEMAIL: built from GREETING_NAME, as GREETING is.

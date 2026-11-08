@@ -40,8 +40,8 @@ UV = shutil.which("uv")
 needs_uv = pytest.mark.skipif(UV is None, reason="uv is not on PATH (make test runs under uv)")
 
 
-def prose(text):
-    """The README with fenced code blocks and inline code spans removed."""
+def unfenced(text):
+    """The lines of `text` outside its fenced code blocks, fence lines left out."""
     out, fence = [], None
     for line in text.splitlines():
         m = re.match(r"\s*(`{3,}|~{3,})", line)
@@ -52,8 +52,13 @@ def prose(text):
                 fence = None
             continue
         if fence is None:
-            out.append(re.sub(r"(`+).*?\1", "", line))
-    return "\n".join(out)
+            out.append(line)
+    return out
+
+
+def prose(text):
+    """The README with fenced code blocks and inline code spans removed."""
+    return "\n".join(re.sub(r"(`+).*?\1", "", line) for line in unfenced(text))
 
 
 def link_targets(text):

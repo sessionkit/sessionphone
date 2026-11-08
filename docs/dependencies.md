@@ -47,9 +47,13 @@ The Python packages, and what each one is for:
 - The `media` extra, for `bot install`, `bot run`, `web` and `web enrol`:
   aiortc 1.15.0, aioice 0.10.2 and av 17.1.0, pinned, the WebRTC stack
   calls run on; numpy 2 or later; websockets 16, for `sessionphone web`;
-  cryptography 42 or later, which checks the web page's passkeys. Without
-  it, a media verb refuses, exit 2, and says how to fetch it. A bot with
-  `DC_CALLS=off` is chat only and needs none of it.
+  cryptography 42 or later, which checks the web page's passkeys. av also
+  turns a voice note that isn't wav into wav before the bot posts it to the
+  speech server. Without the extra, a media verb refuses, exit 2, and says
+  how to fetch it. A bot with `DC_CALLS=off` is chat only and needs none of
+  it. Without av, a voice note that isn't wav is posted as it came, as
+  before, and the log says it was not decoded: a speech server that reads
+  M4A still hears it, and one that reads only wav refuses it.
 
 The plugin's `bin/sessionphone` runs at the versions in `uv.lock`, and
 fetches the media pack only at the first media verb. `uv tool install`

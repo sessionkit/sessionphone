@@ -27,10 +27,29 @@ How the kind is known:
     whisper (whisper.cpp), 2023 is apple (`ears serve`) and an openai.com host
     is openai. Each untagged URL logs the hint to tag it once. The bridge's own
     default is the tagged mlx-audio URL above (dc_env.STT_DEFAULT).
+
+A voice note is posted as wav (as_wav):
+  A voice note can arrive as M4A (AAC), Ogg or another container. Some
+  speech servers read only wav: an mlx-audio server answers an M4A with
+  "Unsupported output format: m4a", and the agent read "[voice note -
+  transcription failed]". So a note that isn't wav is decoded first, with
+  PyAV (av, from the media pack), to 16 kHz mono 16-bit wav in a temp file,
+  and that file is what's posted. The temp file is deleted afterwards. A wav
+  is posted as it came, so a call's chunks (always wav) are never decoded.
+  When a note can't be decoded, Undecodable says why in plain words, the log
+  has the line, and nothing is posted: a half-written file never is.
+  Without PyAV (a chat-only bot with no media pack), the note is posted as
+  it came, as before, and the log says it wasn't decoded: a server that
+  reads M4A (whisper.cpp does) still hears it. A raw file is not a half-file.
 """
 import json
+import os
 import re
 import subprocess
+import tempfile
+import wave
+from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import urlparse
 
 # VoiceMode's STT defaults. whisper.cpp never reads the field
@@ -51,8 +70,111 @@ BODY_MAX = 300           # how much of a server's error body goes in the log
 _hinted = set()          # untagged URLs already told to tag themselves (once each)
 
 
+WAV_RATE = 16000         # what a decoded note becomes: 16 kHz, mono, 16-bit
+WAV_PREFIX = "sessionphone-voicenote-"
+NO_PYAV = "PyAV (av, from the media pack) is not installed"
+
+
 class Refused(Exception):
     """No model could be named for this endpoint, so nothing is sent."""
+
+
+class Undecodable(Exception):
+    """A voice note that isn't wav could not be decoded to wav. str() is the
+    plain reason, e.g. "Invalid data found when processing input"."""
+
+
+def is_wav(path):
+    """Whether the file at path is a RIFF/WAVE file, read from its first 12
+    bytes, not its name. A file that can't be read isn't wav."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+    except OSError:
+        return False
+    return len(head) == 12 and head[:4] == b"RIFF" and head[8:] == b"WAVE"
+
+
+def _reason(e):
+    """An exception -> its plain words, without the errno or the path."""
+    words = getattr(e, "strerror", None)
+    return str(words or e or e.__class__.__name__).strip()
+
+
+def have_pyav():
+    """Whether PyAV can be imported: the media pack is installed."""
+    try:
+        import av  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def to_wav(path, dest):
+    """Decode the audio at path to 16 kHz mono 16-bit wav at dest.
+    -> its length in seconds, or raises Undecodable with the reason."""
+    try:
+        import av  # the media pack; stt imports without it
+    except ImportError:
+        raise Undecodable(NO_PYAV) from None
+    try:
+        with av.open(str(path)) as box:
+            stream = next((s for s in box.streams if s.type == "audio"), None)
+            if stream is None:                 # before the wav opens: an unset wav can't close
+                raise Undecodable("it has no audio track")
+            with wave.open(str(dest), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(WAV_RATE)
+                resample = av.AudioResampler(format="s16", layout="mono", rate=WAV_RATE).resample
+                samples = 0
+                for frame in box.decode(stream):
+                    for f in resample(frame):
+                        out.writeframes(f.to_ndarray().tobytes())
+                        samples += f.samples
+                for f in resample(None):       # what the resampler still holds
+                    out.writeframes(f.to_ndarray().tobytes())
+                    samples += f.samples
+    except Undecodable:
+        raise
+    except Exception as e:     # av.FFmpegError and the rest: a note never crashes the bot
+        raise Undecodable(_reason(e)) from e
+    if not samples:
+        raise Undecodable("it holds no audio")
+    return samples / WAV_RATE
+
+
+@contextmanager
+def as_wav(path, log):
+    """Yield a wav path for the voice note at path: path itself when it's wav
+    already, else a temp wav decoded from it and deleted on the way out.
+    A decode failure is logged and raised as Undecodable, and the partial
+    temp file is deleted first, so nothing half-written is ever posted.
+    With no PyAV to decode it, path itself is yielded, raw, and logged:
+    never after a failed decode, only when no decode could be tried."""
+    if is_wav(path):
+        yield path
+        return
+    name = Path(path).name
+    if not have_pyav():
+        log(f"VOICE NOTE not decoded to wav ({name}): {NO_PYAV}; posting it as it came")
+        yield path
+        return
+    fd, tmp = tempfile.mkstemp(prefix=WAV_PREFIX, suffix=".wav")   # 0600
+    os.close(fd)
+    try:
+        try:
+            secs = to_wav(path, tmp)
+        except Undecodable as e:
+            log(f"VOICE NOTE not decoded to wav ({name}): {e}")
+            raise
+        log(f"VOICE NOTE decoded to 16 kHz mono wav ({name}, {secs:.1f} s)")
+        yield tmp
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def endpoint(url):

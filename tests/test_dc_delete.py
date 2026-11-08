@@ -164,7 +164,8 @@ def test_help_prints_the_header(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_not_in_the_wheel():
-    """Q2: bin/ only, like dc-react."""
-    assert (BIN.parent / "wheel-bin").is_dir()
-    assert not (BIN.parent / "wheel-bin" / "dc-delete").exists()
+def test_in_the_wheel():
+    """The README, the docs and the skill name dc-delete, so a wheel ships it
+    (once bin/ only, like dc-react; tests/test_wheel_dc_tools.py holds the set)."""
+    link = BIN.parent / "wheel-bin" / "dc-delete"
+    assert link.is_symlink() and link.readlink() == Path("../bin/dc-delete")

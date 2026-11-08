@@ -168,13 +168,17 @@ def test_dc_stt_model_is_read_from_the_environment(tmp_path):
     assert _bot_in_a_fresh_process(tmp_path, DC_STT_MODEL="")[1] is None     # empty = unset
 
 
-def test_the_bot_hands_its_settings_to_stt(monkeypatch):
+def test_the_bot_hands_its_settings_to_stt(monkeypatch, tmp_path):
+    # a real wav, so it is posted as it is (a note that isn't wav is decoded
+    # first: tests/test_voicenote_wav.py)
+    note = tmp_path / "n.wav"
+    note.write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
     seen = []
     monkeypatch.setattr(bot.dc_env, "STT_URL", "mlx-audio+http://h:8890/v1/audio/transcriptions")
     monkeypatch.setattr(bot.dc_env, "STT_MODEL", "x/y")
     monkeypatch.setattr(bot.stt, "transcribe", lambda *a: seen.append(a) or "words")
-    assert bot.transcribe("/n.wav") == "words"
-    assert seen == [("/n.wav", "mlx-audio+http://h:8890/v1/audio/transcriptions", "x/y", bot.log)]
+    assert bot.transcribe(str(note)) == "words"
+    assert seen == [(str(note), "mlx-audio+http://h:8890/v1/audio/transcriptions", "x/y", bot.log)]
 
 
 # ---- refusal: no model, nothing sent -------------------------------------

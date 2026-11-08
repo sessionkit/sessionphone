@@ -123,11 +123,26 @@ def test_skill_step_7_says_not_confirmed_means_read_the_reason():
     assert "run `bot install` again in a few minutes" not in step7
 
 
-def test_skill_on_a_call_says_dc_ears_is_needed_for_ears():
+def test_skill_on_a_call_says_the_ears_get_the_call_at_every_setting():
+    # The bot feeds call-ears.sock from its default listen loop too, so the
+    # ears hear a call without DC_EARS=1; that setting changes only how the
+    # bot itself hears.
     skill = _skill()
     assert "Hearing them is the bot's job" in skill
-    assert "Only with `DC_EARS=1` in the bot's environment does it listen through ears" in skill
+    assert "It also hands the call's audio to ears on `$SESSIONPHONE_ROOT/call-ears.sock`" in skill
+    assert ("With `DC_EARS=1` in the bot's environment, the bot itself hears through ears "
+            "instead of the speech-to-text server") in skill
+    assert "Only with `DC_EARS=1` in the bot's environment does it listen through ears" not in skill
+    assert "ears hears the call only with `DC_EARS=1`" not in skill
     assert "Hearing them is ears' job" not in skill
+
+
+def test_skill_on_a_call_says_both_paths_cut_at_the_defaults():
+    skill = _skill()
+    assert "Both cut at the defaults." in skill
+    assert "The mouth cuts its own line when the ears on that socket hear them" in skill
+    assert "The bot's barge-in (`DC_BARGE_IN`, on by default) cuts any line" in skill
+    assert "With `DC_EARS=1` the bot's barge-in is off, and only the mouth cuts." in skill
 
 
 def test_skill_voice_notes_names_the_codes_default():

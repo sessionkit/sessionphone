@@ -37,7 +37,9 @@ and wav second = wav_s + t0, exactly. The wall clock will not do: on a
 22-minute call the capture's heartbeats drifted 2.0 s from it in 21
 minutes, while the audio-position offset stayed put (0.7 s early, 0.8 s
 late). A tap that dropped frames shifts after the first drop: its end row
-says how many. The ok reply carries ``wav_s`` too.
+says how many. The ok reply carries ``wav_s`` too. At the defaults (no
+DC_EARS) no caller-call.wav is written, but the count is the same: seconds
+of the call's audio served before the tap began, silence for DTX included.
 """
 import asyncio
 import json

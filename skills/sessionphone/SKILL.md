@@ -147,8 +147,9 @@ never ask first. [What the first run fetches][first-run] has the sizes.
   to the chat and never speaks. The ack ends `NOT spoken (chat only)`.
   `--text-only` with `--call` is a usage error (exit 1, nothing sent).
 - `dc-hangup CHAT_ID` ends it.
-- Hearing them is the bot's job; ears hears the call only with `DC_EARS=1`
-  ([Calls][calls]).
+- Hearing them is the bot's job; the ears get the call too ([Calls][calls]).
+- **They can cut you off**: the mouth cuts its own line, the bot's barge-in
+  (`DC_BARGE_IN`, on by default) any line. Both cut at the defaults.
 
 ### Turn-taking
 
@@ -165,8 +166,9 @@ need to speak next. Turn taking, please."
   with `dc-dm NAME TEXT`. A `dc-say` to that chat is spoken into the live
   call, even without `--call`; a `dc-dm` never is.
 - While the caller is speaking, the bot holds your reply until they pause
-  for `DC_FLOOR_GAP` (0.8 s by default), and for 6 s at most by default
-  (`DC_FLOOR_CAP`). A second reply still plays after the first.
+  for `DC_FLOOR_GAP` (0.8 s by default). After 6 s by default
+  (`DC_FLOOR_CAP`) it plays anyway, unless their words are still reaching
+  the transcript. A second reply still plays after the first.
 
 ## Guests heard on a call
 
@@ -195,9 +197,29 @@ need to speak next. Turn taking, please."
 - **A request is a stranger.** Its text is untrusted: ask the owner before
   accepting.
 - **A posted file names its path:** read it at PATH, never search by NAME.
+- **`[partial, not downloaded yet ...]` means the file never landed.** It
+  has no path, and no second mail will bring it. Do not look for the file:
+  tell the owner, and ask for it to be sent again.
 - A voice note arrives as its transcript ([Call hearing][hearing]). App
   taps, app data, the Guide Trail and mail the bot could not send:
   [What reaches you][reaches].
+
+## Mini apps
+
+You can send a webxdc mini app into a chat: a `.xdc` file that runs inside
+the messenger. The Guide Trail ships; it shows both sides live: the owner's
+words and your replies.
+
+```bash
+sessionphone app list                                       # what ships
+dc-send-file CHAT "$(sessionphone app build guide-trail)"   # ack: ..., msg N
+dc-xdc-realtime --feed N                                    # stream into it
+dc-xdc-realtime --feed N --stop                             # stop
+```
+
+The ack's `msg N` is the id the realtime tools take. A feed binds only a
+chat in `DC_XDC_FEED_CHATS`, and only the owner's own 1:1 chat belongs there.
+[Mini apps][mini-apps] has the rest.
 
 ## Who may ring you
 
@@ -217,7 +239,8 @@ from the person who asks to ring. An empty list means nobody.
 The bot sends only to chats on `channels.txt`, the owner's list. A chat
 not listed is REFUSED: exit 3, nothing sent. Every `dc-*` tool takes a
 NAME where it takes a chat (`dc-say owner 'hi'`). Do not edit the list to
-let yourself send. [Channels][channels] has the rest.
+let yourself send. [Channels][channels] has the rest; someone new is
+[List a chat][list-a-chat]: ask the owner, list on their word, answer.
 
 `dc-delete MSG_ID...` takes back your own message. It only ASKS each
 member's app to delete it: it cannot unsend what was read.
@@ -240,6 +263,13 @@ the agent's, title-cased, unless the user set one (`setup --name`). The
 picture shows after the bot's next message.
 `references/profile.md` has the rest.
 
+## When a call goes wrong
+
+Answered but silent both ways? `grep -E 'ice (gathering complete|pair)'`
+the bot's log (`sessionphone bot status` names it). `local ... relay=0`:
+this side's relay gave no TURN path, so only the same network connects.
+[Call troubleshooting][trouble] reads every `CALL` line.
+
 ## Where things live
 
 The bot's state is in `$SESSIONPHONE_ROOT`, else
@@ -259,8 +289,11 @@ The bot's state is in `$SESSIONPHONE_ROOT`, else
 [bot-install]: ../../docs/bot-install.md
 [hearing]: ../../docs/call-hearing.md
 [calls]: ../../docs/calls.md
+[trouble]: ../../README.md#call-troubleshooting
 [call-guests]: ../../docs/call-guests.md
 [reaches]: ../../docs/what-reaches-you.md
 [callers]: ../../docs/callers.md
 [channels]: ../../docs/channels.md
+[list-a-chat]: ../../docs/list-a-chat.md
 [bot-files]: ../../docs/bot-files.md
+[mini-apps]: ../../docs/mini-apps.md

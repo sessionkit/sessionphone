@@ -19,6 +19,7 @@ import email.policy
 import json
 import types
 
+import _chatlist
 import _keyfakes
 import pytest
 
@@ -82,7 +83,7 @@ class FakeMsg:
         return [u for u in self.updates if u["serial"] > since]
 
 
-class FakeAccount:
+class FakeAccount(_chatlist.Chatlist):
     """12 the listed group `family`; 20 the owner's 1:1 (listed as `owner`);
     43 an unlisted group; 50 a stranger's contact request (unlisted)."""
 
@@ -118,9 +119,6 @@ class FakeAccount:
 
     def get_contact_by_id(self, cid):
         return self.contacts_by_id[cid]
-
-    def get_fresh_messages(self):
-        return list(self.fresh)
 
     def mark_seen_messages(self, msgs):
         for m in msgs:

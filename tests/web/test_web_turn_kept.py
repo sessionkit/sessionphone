@@ -112,11 +112,14 @@ class SpyVoice:
 
 @pytest.fixture
 def mouth(tmp_path, monkeypatch):
-    """A fake `mouth` first on PATH: each run's argv is one line in mouth.log."""
+    """A fake `mouth` first on PATH: each run's argv is one line in mouth.log.
+    FAKE_MOUTH_DELAY_S (seconds, default 0) holds each run back before it
+    writes: a slow mouth, as a loaded host makes one."""
     log = tmp_path / "mouth.log"
     exe = tmp_path / "mouth-bin" / "mouth"
     exe.parent.mkdir()
-    exe.write_text("#!/usr/bin/env python3\nimport json, sys\n"
+    exe.write_text("#!/usr/bin/env python3\nimport json, os, sys, time\n"
+                   "time.sleep(float(os.environ.get('FAKE_MOUTH_DELAY_S') or 0))\n"
                    f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{exe.parent}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -145,14 +148,19 @@ async def _no_sleep(dt):
     await asyncio.sleep(0)
 
 
-def pump(rig, *, settle=0.3):
-    """One poll of the follower, as run() does; then let any line it starts land."""
+def pump(rig):
+    """One poll of the follower, as run() does; then await every line it started.
+
+    A lost turn's line is a `mouth say` started and NOT awaited
+    (CallDesk._say_undelivered), held in desk._telling until it ends; stop()
+    awaits that same set. So wait on it, never on a clock: a fixed settle
+    (0.3 s here once) lost to a mouth that took longer, and asyncio.run then
+    cancelled the run unsaid: 0 lines heard (PHONE-286). Bounded at 20 s."""
     async def main():
         for rec, new in rig.f.read():
             await rig.f.take(rec, new)
-        end = asyncio.get_running_loop().time() + settle
-        while asyncio.get_running_loop().time() < end:
-            await asyncio.sleep(0.02)
+        while rig.desk._telling:
+            await asyncio.gather(*list(rig.desk._telling))
     asyncio.run(asyncio.wait_for(main(), 20))
 
 
@@ -260,7 +268,7 @@ def test_each_lost_web_turn_is_said_once(rig, fake_message):
 
 def test_a_mailed_web_turn_is_neither_kept_nor_said(rig, fake_message, kept):
     write(rig.f.dir, turn(741, "can you hear me"))
-    pump(rig, settle=0.1)
+    pump(rig)
     assert rig.f.mailed == [mid(741)]
     assert kept(mid(741)) == [] and rig.heard_lines() == 0
 
@@ -277,6 +285,18 @@ def test_the_kept_search_finds_a_spool_record_and_ignores_the_fake_messages_logs
     spool.Spool(lambda m: None, root=web_spool).keep(sent, "body of it")
     (p, rec), = kept(mid(9))
     assert p.parent == web_spool and spool.target(rec["args"]) == SEAT.to
+
+
+def test_a_slow_mouth_is_still_heard(rig, fake_message, monkeypatch):
+    """PHONE-286: the line's `mouth say` is started and NOT awaited (_say_undelivered),
+    so the rig counts only once that run has ended. A mouth slower than any fixed
+    settle (0.3 s once; a fake `mouth` took 0.25 s on a loaded host) is heard."""
+    monkeypatch.setenv("FAKE_MOUTH_DELAY_S", "0.6")
+    fake_message.answer(MTA)
+    write(rig.f.dir, turn(741, "can you check the build"))
+    pump(rig)
+    assert rig.heard_lines() == 1, f"the caller heard {rig.heard_lines()} lines from a slow mouth ({rig.logs})"
+    assert any(m.endswith(": said on the call") for m in rig.logs)
 
 
 def test_the_ear_counts_a_mouth_say_for_this_call_only(rig):

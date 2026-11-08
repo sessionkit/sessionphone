@@ -140,10 +140,28 @@ def current(files):
     return docs
 
 
+# An ATX heading: up to three spaces, one to six #, then its text, less any closing #s.
+HEADING = re.compile(r" {0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*")
+
+
 def headings(text):
-    """GitHub's anchors for the headings in `text`, code blocks left out."""
-    return {config_docs._slug(h) for h in re.findall(r"^#+ (.+)$", pypi_readme.prose(text),
-                                                     re.MULTILINE)}
+    """GitHub's anchors for the headings in `text`, fenced code left out.
+
+    GitHub slugs a heading's text with its code spans' text kept: only the
+    backticks go, with the rest of the punctuation. A heading that repeats an
+    anchor already used takes -1, then -2, the way GitHub numbers it."""
+    anchors, seen = set(), {}
+    for line in pypi_readme.unfenced(text):
+        m = HEADING.fullmatch(line)
+        if not m:
+            continue
+        anchor = base = config_docs._slug(m.group(1))
+        while anchor in seen:
+            seen[base] += 1
+            anchor = f"{base}-{seen[base]}"
+        seen[anchor] = 0
+        anchors.add(anchor)
+    return anchors
 
 
 def is_relative(target):
@@ -153,7 +171,10 @@ def is_relative(target):
 def link_fault(source, target, paths, docs):
     """Why the relative link `target` in `source` does not resolve, or None."""
     rel, _, anchor = target.partition("#")
-    path = posixpath.normpath(posixpath.join(posixpath.dirname(source), rel))
+    if not rel:                                         # an in-page anchor: this file
+        path = source
+    else:
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(source), rel))
     if path.startswith("../") or path == "..":
         return f"{target}: leaves the repo"
     if path not in paths and not any(p.startswith(path + "/") for p in paths):
@@ -167,15 +188,15 @@ def link_fault(source, target, paths, docs):
 
 
 def broken_links(files):
-    """`path: fault` for every relative link in the Markdown of `files` that
-    does not resolve."""
+    """`path: fault` for every relative link or in-page anchor in the Markdown
+    of `files` that does not resolve."""
     files = list(files)
     paths = {path for _, path, _ in files}
     docs = current(files)
     found = []
     for source, text in sorted(docs.items()):
         for target in pypi_readme.link_targets(text):
-            if is_relative(target):
+            if is_relative(target) or target.startswith("#"):
                 fault = link_fault(source, target, paths, docs)
                 if fault:
                     found.append(f"{source}: {fault}")
@@ -301,12 +322,13 @@ def _tree(**docs):
     "[c](./docs/settings.md)",
     "[l](LICENSE)",
     "[d](docs)",
-    "[h](#call-recording-off-unless-it-is-turned-on)",
+    "[h](README.md#call-recording-off-unless-it-is-turned-on)",
+    "[h](#planted-zz)",                                  # an in-page anchor, this file's own
     "[w](https://example.com/a.md)",
     "`[not](a/link)`",
 ])
 def test_a_planted_link_that_resolves_passes(link):
-    assert broken_links(_tree(**{"zz.md": f"see {link}\n"})) == []
+    assert broken_links(_tree(**{"zz.md": f"# Planted: `zz`\n\nsee {link}\n"})) == []
 
 
 @pytest.mark.parametrize("source, link, fault", [
@@ -320,6 +342,10 @@ def test_a_planted_link_that_resolves_passes(link):
      "docs/README.md is not in the export"),
     ("docs/zz.md", "[recording]: ../README.md#call-recording",
      "README.md has no heading #call-recording"),
+    # an in-page anchor names a heading in the linking file, not in another
+    ("zz.md", "[h](#call-recording-off-unless-it-is-turned-on)",
+     "zz.md has no heading #call-recording-off-unless-it-is-turned-on"),
+    ("docs/zz.md", "[h](#no-such-heading)", "docs/zz.md has no heading #no-such-heading"),
 ])
 def test_a_planted_broken_link_fails(source, link, fault):
     """The control: a link that misses its file or its heading is caught,
@@ -327,3 +353,74 @@ def test_a_planted_broken_link_fails(source, link, fault):
     found = broken_links(_tree(**{source: f"see\n{link}\n"}))
     assert len(found) == 1, found
     assert found[0].startswith(f"{source}: ") and fault in found[0], found
+
+
+# --- the anchors: GitHub's slug for a heading -----------------------------------
+
+@pytest.mark.parametrize("heading, anchor", [
+    # a code span's text stays in the anchor; only its backticks go
+    ("### The Guide Trail app: `sessionphone app`", "the-guide-trail-app-sessionphone-app"),
+    ("## App taps: `DC_XDC_IN` is the integration point",
+     "app-taps-dc_xdc_in-is-the-integration-point"),
+    ("## ``a`b`` and `c`", "ab-and-c"),                  # a double-backtick span
+    ("## The dc-* tools", "the-dc--tools"),               # punctuation goes, each space stays
+    ("## The bot's seat", "the-bots-seat"),
+    ("## Upgrading from 0.1.0", "upgrading-from-010"),
+    ("# One", "one"),
+    ("###### Six", "six"),
+    ("   ## Indented three", "indented-three"),
+    ("## Closed ##", "closed"),                           # a closing sequence is not text
+    ("## C# notes", "c-notes"),                           # a # inside the text is
+])
+def test_a_heading_takes_githubs_anchor(heading, anchor):
+    assert headings(f"intro\n\n{heading}\n\nbody\n") == {anchor}
+
+
+def test_a_code_span_heading_no_longer_takes_the_anchor_without_its_code():
+    found = headings("## The Guide Trail app: `sessionphone app`\n")
+    assert "the-guide-trail-app" not in found
+    assert "app-taps--is-the-integration-point" not in headings(
+        "## App taps: `DC_XDC_IN` is the integration point\n")
+
+
+@pytest.mark.parametrize("text", [
+    "```\n# a comment, not a heading\n```\n",
+    "```bash\n# a comment, not a heading\n```\n",
+    "~~~\n# a comment, not a heading\n~~~\n",
+    "````\n```\n# a comment, not a heading\n```\n````\n",   # a fence inside a longer one
+    "#not a heading: no space\n",
+    "####### seven is not a heading\n",
+    "    # four spaces is code\n",
+])
+def test_a_line_that_is_not_a_heading_is_no_anchor(text):
+    assert headings(text) == set()
+
+
+def test_text_after_a_closed_fence_is_read_again():
+    assert headings("```\n# in\n```\n## Out `here`\n") == {"out-here"}
+
+
+def test_a_repeated_heading_is_numbered_the_way_github_does():
+    text = "## Upgrade\n\n## Upgrade\n\n### Upgrade\n"
+    assert headings(text) == {"upgrade", "upgrade-1", "upgrade-2"}
+
+
+def test_a_numbered_repeat_steps_past_an_anchor_a_heading_already_holds():
+    # "A", then a heading whose own anchor is a-1: the next "A" is a-2
+    assert headings("## A\n## A-1\n## A\n") == {"a", "a-1", "a-2"}
+
+
+def test_a_link_to_a_code_span_heading_resolves_by_githubs_anchor():
+    page = "# Page\n\n### The Guide Trail app: `sessionphone app`\n"
+    good = "[g](docs/page.md#the-guide-trail-app-sessionphone-app)"
+    assert broken_links(_tree(**{"docs/page.md": page, "zz.md": f"see {good}\n"})) == []
+    found = broken_links(_tree(**{"docs/page.md": page,
+                                  "zz.md": "see [g](docs/page.md#the-guide-trail-app)\n"}))
+    assert len(found) == 1 and "has no heading #the-guide-trail-app" in found[0], found
+
+
+def test_prose_still_drops_code_for_the_link_scan():
+    """headings() keeps code spans; link_targets() still reads prose without them."""
+    assert pypi_readme.prose("a `[x](y)` b\n```\n[z](w)\n```\n") == "a  b"
+    assert pypi_readme.link_targets("a `[x](y)` b [k](v)\n") == ["v"]
+    assert pypi_readme.unfenced("a `b`\n```\nc\n```\nd\n") == ["a `b`", "d"]

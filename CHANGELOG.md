@@ -14,6 +14,175 @@ under the new version.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-08
+
+### A voice note in M4A or Ogg reaches the agent as its words
+
+- A Delta Chat voice note arrives as M4A. Some speech servers read only
+  wav, and refused it, so the agent read "[voice note - transcription
+  failed]" and the sender was told nothing.
+- The bot now decodes a voice note that is not wav to 16 kHz mono wav with
+  PyAV, from the media pack, posts the wav, and deletes it afterwards. A wav
+  is posted as it is.
+- A voice note that cannot be decoded is not posted. The log names the
+  reason, and the agent reads "[voice note - transcription failed: it could
+  not be decoded (REASON)]", then the attachment line.
+- A bot without the media pack posts a voice note as it came, as before,
+  and the log says it was not decoded because PyAV is not installed.
+
+### A big encrypted file reaches the agent whole, once it has landed
+
+- A large encrypted file, such as a photo over about 140 KB, is sent in two
+  parts: a small message that names the file, then the file itself. The
+  bot mailed the first part straight away, as a size placeholder with no
+  attachment line and no image text, and never mailed the file when it
+  landed.
+- The bot now holds that first part and mails the message once, when the
+  file is on disk: typed text, attachment line and the image's text, as
+  for any message.
+- If the file has not landed after 300 seconds, or the download fails, the
+  message is mailed with a `[partial, not downloaded yet: NAME (MIME,
+  SIZE) - msg N ...]` line in place of the attachment line. It has no
+  path. A partial in a contact request is also marked as a stranger's file.
+- A message held when the bot stops is picked up again when it starts.
+
+### A request or a muted-chat message sent while the bot is down is mailed
+
+- At start, the bot looks for messages that arrived while it was down. It
+  asked Delta Chat only for the messages a notification would show, and
+  that list leaves out contact requests and muted chats. Such a message,
+  sent while the bot was down, could be lost and never mailed.
+- The bot now mails every incoming message it has not mailed yet, oldest
+  first: a contact request (held, not accepted, as before) and a message in
+  a muted or archived chat included. The device chat, messages to yourself
+  and info lines are not mailed.
+- A message that arrived as the bot started could be mailed twice, once by
+  the start-up check and once as it arrived. It is now mailed once.
+- The first start after an upgrade mails any such message that was missed
+  before, however old.
+
+### On a call, the caller can cut the bot off mid-line
+
+- At the defaults nothing cut a call line when the caller talked over it:
+  the line played on, and their words only queued their turn behind it.
+- Barge-in is now on by default (`DC_BARGE_IN=1`). Once their words are
+  heard while the bot speaks, the line playing stops. `DC_BARGE_IN=0`
+  turns it off. It does nothing with `DC_EARS=1`.
+- Words that sound like the bot's own voice coming back no longer cut it.
+  That check never ran before, so with barge-in on a line could be cut by
+  its own echo. A line held back this way is logged as `BARGE-IN held`.
+- The ears on `call-ears.sock` now get the call's audio at the defaults,
+  not only with `DC_EARS=1`, so a mouth line is cut by the mouth too.
+
+### A reply no longer plays over a caller who is still talking
+
+- A reply waiting for the caller to pause played anyway after
+  `DC_FLOOR_CAP` seconds (6 by default), even while the caller was still in
+  the middle of a sentence.
+- The cap now waits while the caller's words are still arriving: while words
+  of theirs reached the call's transcript in the last 5 seconds, the reply
+  keeps waiting for the pause. Speech on the line with no words coming
+  through is treated as noise, and the cap still releases the reply.
+- The `FLOOR` log line says which held the reply and why it was released.
+
+### Mini apps: a page on sending one and feeding it
+
+- `docs/mini-apps.md` is new. It walks through the webxdc mini apps
+  sessionphone ships, the Guide Trail first: list them, build one, send it
+  with `dc-send-file`, read its message id off the ack, then feed it with
+  `dc-xdc-realtime --feed` and stop it.
+- The sessionphone skill has a short "Mini apps" section, so an agent knows
+  it can send one and how. `README.md` and `docs/what-reaches-you.md` link
+  the new page.
+
+### A wheel install ships every dc-* tool the docs tell you to run
+
+- A wheel install put only five dc-* tools on the PATH: `dc-answer`,
+  `dc-hangup`, `dc-say`, `dc-xdc-realtime` and `dc-env`. The README, the
+  docs, the skill and `sessionphone app build --help` name twelve more, so
+  `dc-send-file` and the others were not found on an installed host.
+- A wheel install now ships all seventeen: also `dc-send-file`,
+  `dc-xdc-update`, `dc-react`, `dc-dm`, `dc-delete`, `dc-live`, `dc-ring`,
+  `dc-call`, `dc-invite`, `dc-call-mix`, `dc-log` and `dc-log-web`.
+- `dc-log` and `dc-log-web` run from a wheel install. Before they read the
+  log they move to the Python that holds sessionphone, in the order
+  `dc-env` uses: a checkout's `.venv`, else the Python installed beside the
+  tool, else `python3`.
+
+### A stranger's first message is held as a contact request again
+
+- `sessionphone setup` turned on Delta Chat's `bot` setting, which makes the
+  core accept every contact request by itself. A stranger who had the bot's
+  address landed in an accepted chat, and was mailed to the agent as an
+  ordinary message: no `CONTACT REQUEST - NOT ACCEPTED.` banner, and their
+  image was read. `DC_ACCEPT_REQUESTS` was off and did not stop it.
+- `setup` now leaves the setting off, so a stranger's first message, in a
+  1:1 chat or a group they made, is held and flagged as a contact request.
+  An owner who joined by the invite is mailed as before.
+- An account an older `setup` made is fixed on the bot's first start with
+  this version: the bot turns the setting off before it connects and logs
+  one line, `NOTICE: turned the account's bot flag OFF ...`. New strangers
+  are held from then on. Strangers and groups the account already accepted
+  stay accepted. Chat apps no longer show the account as a bot.
+- With the setting off, the core keeps a "Device messages" chat (a fresh
+  account gets "Get in contact!" and a picture) and a "Saved messages" chat.
+  Neither is mailed to the agent, when the bot starts or live.
+- A long text is mailed whole. With the setting off, the core cuts a text
+  longer than about 3800 characters and ends it `[...]`; the bot now reads
+  the whole text back from the message's html, as plain text. If that fails,
+  the cut text is mailed with one line that says it was cut, and why.
+
+### Known issue: an agent can add a mail guest to a live call without asking the caller
+
+- `dc-invite` is on in this release, and no setting turns it off. The chat
+  must be on the allow-list; the guest's mail address is checked against no
+  list.
+- The guest is copied on the call's mail thread. Each turn the caller says
+  reaches them as mail as it is said, not as audio, and at hang-up they get
+  the transcript, both sides, lines said before they were added included.
+- The guest can be heard on the call: a line they mail to the bridge,
+  threaded to the call, is read aloud. A guest the bridge cannot verify is
+  still read aloud, announced as an unverified sender.
+- The caller is not asked. The bot says "`<name>` is on the call now." when
+  the guest is added, and that line is the caller's only notice.
+- The next release turns `dc-invite` off by default, with a setting to turn
+  it on. "Where a turn is mailed" in `README.md` says what a guest gets.
+
+### Known issue: the call sockets trust any process running as the same user
+
+- `call-mouth.sock` and `call-ears.sock` are mode 0600, so only the bot's
+  own user can open them, but every process running as that user can. Such
+  a process can speak into a live call or listen to it.
+- The name a line is spoken under is the one the process gives. Nothing
+  checks it.
+- `README.md` says so beside the channel fence's honest limit.
+
+### The bot asks sessionmail where its boxes are
+
+- The bot's own box, which it reads for mail into a live call, is the box
+  sessionmail names for `<agent>-chat` (`message path`). Before, the bot
+  spelled it as `~/.mail/agents/<agent>-chat`, which is wrong on a host
+  whose mail root has moved. `DC_BOT_BOX` still overrides it.
+- With no such box the bot reads no mail into calls, and says so once in
+  its log. It never makes the box, nor any folder above a box's `cur/`.
+- `SESSIONMAIL_ROOT` names the mail root, as sessionmail 0.3.3 reads it;
+  before, it named the boxes folder. When the installing shell sets it,
+  `bot install` now says to write the same value under `root` in
+  sessionmail's `mail.json`, not its parent folder. Pair this release with
+  sessionmail 0.3.3 or later.
+- The bot no longer copies `SESSIONMAIL_ROOT` into `SESSION_MAIL_ROOT` for
+  `message path` and `message setup`. sessionmail reads one variable in
+  every verb, and retires the old name.
+
+### Fixed
+
+- **A passkey's key must fit its algorithm, and its label is kept
+  printable.** `sessionphone web` enrols an ES256 passkey only with a P-256
+  key, and an RS256 one only with an RSA key of 2048 bits or more. Login
+  holds a kept key to the same rule. The label the browser sends keeps
+  printable characters only. Before, any EC curve or RSA size passed, and
+  the label was kept as sent.
+
 ## [0.3.2] - 2026-10-28
 
 ### A kept call turn is retried within seconds

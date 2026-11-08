@@ -41,6 +41,8 @@ ENROL_TTL = 600              # seconds an enrol code is good for
 ENROL_TRIES = 5              # wrong tries that burn it
 ENROL_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"   # no 0/O, 1/I/L: read off a screen, typed on a phone
 ENROL_LEN = 10
+RSA_MIN_BITS = 2048          # the smallest RSA key an RS256 passkey may have
+NAME_LEN = 80                # the longest label a passkey keeps
 
 
 def user_record(name: str) -> dict:
@@ -223,9 +225,32 @@ def _auth_data(ad: bytes, rp_id: str) -> str:
     return ""
 
 
+def clean_label(text) -> str:
+    """A browser-supplied label kept printable (no control characters), at most
+    NAME_LEN: a terminal may show it."""
+    return "".join(c for c in text if c.isprintable())[:NAME_LEN] if isinstance(text, str) else ""
+
+
+def _key_fits(pub, alg) -> str:
+    """'' when PUB is a key ALG may use: ES256 a P-256 key, RS256 an RSA key of at
+    least RSA_MIN_BITS; else why not. Held at enrol and again at login."""
+    if alg == ES256:
+        if not isinstance(pub, ec.EllipticCurvePublicKey) or not isinstance(pub.curve, ec.SECP256R1):
+            return "public key is not a P-256 key"
+        return ""
+    if alg == RS256:
+        if not isinstance(pub, rsa.RSAPublicKey):
+            return "public key is not a RSA key"
+        if pub.key_size < RSA_MIN_BITS:
+            return f"RSA key of {pub.key_size} bits, under {RSA_MIN_BITS}"
+        return ""
+    return f"algorithm {alg} not supported"
+
+
 def register(msg: dict, chal: bytes | None, origin: str) -> tuple[dict | None, str]:
     """(credential, '') when the new passkey checks out, else (None, why).
-    settings webauth.py:195-213, plus: the key's type must match its algorithm."""
+    settings webauth.py:195-213, plus: the key must fit its algorithm (P-256 for ES256,
+    RSA of RSA_MIN_BITS or more for RS256), and the label is kept printable."""
     rp_id = rp_of(origin)
     try:
         cdj, ad = unb64u(msg["clientDataJSON"]), unb64u(msg["authenticatorData"])
@@ -241,13 +266,13 @@ def register(msg: dict, chal: bytes | None, origin: str) -> tuple[dict | None, s
         pub = serialization.load_der_public_key(spki)
     except (ValueError, TypeError):
         return None, "public key does not load"
-    want = ec.EllipticCurvePublicKey if alg == ES256 else rsa.RSAPublicKey
-    if not isinstance(pub, want):
-        return None, f"public key is not a {'P-256' if alg == ES256 else 'RSA'} key"
+    why = _key_fits(pub, alg)
+    if why:
+        return None, why
     if not cid:
         return None, "malformed: no id"
     return {"id": cid, "rp_id": rp_id, "spki": b64u(spki), "alg": alg,
-            "added": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "name": str(msg.get("name") or "")[:80]}, ""
+            "added": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "name": clean_label(msg.get("name"))}, ""
 
 
 def login(msg: dict, chal: bytes | None, origin: str, creds: list) -> str:
@@ -264,7 +289,12 @@ def login(msg: dict, chal: bytes | None, origin: str, creds: list) -> str:
     why = _client_data(cdj, "webauthn.get", chal, origin) or _auth_data(ad, rp_id)
     if why:
         return why
-    pub = serialization.load_der_public_key(unb64u(cred["spki"]))
+    try:
+        pub = serialization.load_der_public_key(unb64u(cred["spki"]))
+    except (KeyError, TypeError, ValueError):
+        return "the kept public key does not load"
+    if _key_fits(pub, cred.get("alg")):
+        return "the kept key does not match its algorithm"
     signed = ad + hashlib.sha256(cdj).digest()
     try:
         if cred["alg"] == ES256:

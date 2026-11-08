@@ -295,3 +295,47 @@ def test_unreadable_enrol_file_fails_closed(ring):
 
 def test_no_code_pending(ring):
     assert "sessionphone web enrol" in ring.check_enrol_code("ANYTHING22")
+
+
+# ---- the key must fit its algorithm; the label is printable (from sessiontools' review) ----
+
+def _with_key(softkey, key, alg):
+    """An enrol whose credential carries KEY's public key under ALG."""
+    from cryptography.hazmat.primitives import serialization
+    s, c = _chal()
+    spki = key.public_key().public_bytes(serialization.Encoding.DER,
+                                         serialization.PublicFormat.SubjectPublicKeyInfo)
+    return pk.register(softkey(ORIGIN, alg).create(s, spki=spki), c, ORIGIN)
+
+
+def test_es256_takes_a_p256_key_only(softkey):
+    from cryptography.hazmat.primitives.asymmetric import ec
+    cred, why = _with_key(softkey, ec.generate_private_key(ec.SECP384R1()), pk.ES256)
+    assert cred is None and why == "public key is not a P-256 key"
+
+
+def test_rs256_takes_an_rsa_key_of_2048_bits_or_more(softkey):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    cred, why = _with_key(softkey, rsa.generate_private_key(public_exponent=65537, key_size=1024),
+                          pk.RS256)
+    assert cred is None and "under 2048" in why
+
+
+def test_a_kept_key_that_does_not_fit_its_algorithm_signs_in_nothing(softkey, ring):
+    from cryptography.hazmat.primitives.asymmetric import ec
+    key = _enrolled(softkey, ring)
+    weak = ec.generate_private_key(ec.SECP384R1())
+    key.key = weak
+    creds = ring.load()
+    creds[0]["spki"] = pk.b64u(key.spki())
+    s, c = _chal()
+    assert pk.login(key.get(s), c, ORIGIN, creds) == "the kept key does not match its algorithm"
+
+
+def test_a_label_is_kept_printable(softkey):
+    s, c = _chal()
+    cred, why = pk.register(softkey(ORIGIN).create(s, name="iPhone\x1b]0;x\x07\n" + "y" * 200),
+                            c, ORIGIN)
+    assert why == "" and cred["name"].startswith("iPhone]0;x") and cred["name"].isprintable()
+    assert len(cred["name"]) == pk.NAME_LEN
+    assert pk.clean_label(None) == "" and pk.clean_label("ok\tlabel") == "oklabel"

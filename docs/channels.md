@@ -15,6 +15,8 @@ page has the rest.
 - **A chat not listed is REFUSED:** exit 3, the list's path on stderr,
   nothing sent (exit 4 = the bot took the job and never confirmed it).
 - `sessionphone channels add NAME TARGET` lists one.
+- **Someone new wrote to the bot?** [List a chat][list] is the process:
+  ask the owner, list it on their word, answer by name.
 - A missing or loose list refuses every send. Do not edit it to let
   yourself send: it is the owner's list. [README.md][readme] has the whole
   contract.
@@ -25,5 +27,6 @@ page has the rest.
 printed; all ids in one chat). It only ASKS each member's app to delete it:
 it cannot unsend what was read, and any time limit is unmeasured.
 
+[list]: list-a-chat.md
 [skill]: ../skills/sessionphone/SKILL.md
 [readme]: ../README.md

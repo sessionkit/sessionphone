@@ -10,6 +10,7 @@
 Fakes only: imgtext.read is replaced by a recorder, so no test spawns swiftc,
 the helper or Vision, and no real Delta blob is read.
 """
+import _chatlist
 import pytest
 
 from sessionphone import imgtext
@@ -52,7 +53,7 @@ class FakeChat:
         self.info.is_contact_request = False
 
 
-class FakeAccount:
+class FakeAccount(_chatlist.Chatlist):
     """The account surface handle_events() and sweep() use, and no more."""
 
     def __init__(self):
@@ -79,9 +80,6 @@ class FakeAccount:
 
     def get_chat_by_id(self, chat_id):
         return self.chats[chat_id]
-
-    def get_fresh_messages(self):
-        return list(self.fresh)
 
     def mark_seen_messages(self, msgs):
         for m in msgs:

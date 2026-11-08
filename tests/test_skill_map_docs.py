@@ -25,7 +25,7 @@ POINTER = ('Several agents in one seat? See the sessionkit skill\'s card, '
 
 # The pages the skill's long reference moved to.
 PAGES = ["first-run.md", "bot-install.md", "call-hearing.md", "calls.md", "call-guests.md",
-         "what-reaches-you.md", "callers.md", "channels.md", "bot-files.md"]
+         "what-reaches-you.md", "callers.md", "channels.md", "bot-files.md", "mini-apps.md"]
 
 # The card's own lines. The skill points to the card and repeats none of them.
 CARD_WORDS = ["Only the holder speaks", "speak when named", "--next", "--now", "--cc",

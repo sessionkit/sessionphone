@@ -168,7 +168,7 @@ install` carries into the job from your shell:
 | `SESSIONMAIL_SENDMAIL` | the carrier. `drop` writes straight into this host's mailboxes, with no MTA; anything else names the MTA. Unset, sessionmail reads the `sendmail` key in its `mail.json` (never `carrier`), else uses its default, `drop` |
 | `SESSIONMAIL_RELAY_DOMAIN` | the relay for general delivery |
 | `SESSIONMAIL_HOME` | this host's seat-files root |
-| `SESSIONMAIL_ROOT` | the maildir root the drop writes to |
+| `SESSIONMAIL_ROOT` | the mail root, the folder sessionmail keeps its boxes under; sessionphone asks `message path` for each box, and never spells the root |
 | `SESSIONMAIL_HOST` | the sender's host, and the host of the bot's Message-IDs |
 
 Whether postfix is installed does not pick the carrier: a job with no

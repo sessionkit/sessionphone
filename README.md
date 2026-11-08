@@ -107,6 +107,8 @@ What sessionphone depends on, what needs each one, and how to upgrade it:
 `skills/sessionphone/SKILL.md` is the map for the agent, and the pages it
 links for the long reference are in `docs/`.
 
+To send a mini app into a chat and feed it, see [Mini apps][mini-apps].
+
 ### The bot's picture: `sessionphone avatar`
 
 `sessionphone avatar PATH` gives the agent's Delta Chat profile a picture
@@ -235,7 +237,7 @@ The mail's shape:
 | To | `DC_MAILTO`, else `<agent>`, a bare box name: sessionmail adds this host |
 | From | `<Name>'s Delta Chat bridge <<agent>-chat@...>`. The seat is `<agent>-chat`, the local part of `DC_ADDR`; sessionmail sets the domain |
 | Subject | `[<room> <chat_id>] <tail>`. `<room>` is the chat name cut to 14 characters, after `DC_PROFILE` when one is set. `<tail>` is `<sender>: <text>` or the kind's own words (`REQUEST ...`). ASCII, 69 characters at most. A backtick becomes `'` and `$(` becomes `$ (`, because `message send` refuses a subject that could execute |
-| Body | the text, with any quoted (`>`) lines, then a `---` footer: `chat:`, `from:` and how to answer. The mail leg stops reading aloud at `---` |
+| Body | the text, with any quoted (`>`) lines, then a `---` footer: `chat:`, `from:` and how to answer. The mail leg stops reading aloud at `---`. A long text is mailed whole: the core cuts one at about 3800 characters, ending `[...]`, and the bot reads the whole text back from the message's html. If it cannot, the cut text comes with one line, `[this message was cut short by the chat app; its full text could not be read: <why>]` |
 
 **Headers an agent can filter on** (a notmuch `index.header`, a sieve
 rule, a page rule):
@@ -269,13 +271,41 @@ chat:<id>`). It never offers a `dc-say` that the bot would refuse.
 **A posted file arrives with its path.** The body holds its attachment
 line, `[attachment: NAME (MIME) at PATH]`, even beside typed text, for a
 file, an image and a voice note whose transcription failed (the line comes
-after `[voice note - transcription failed]`). PATH is where the bot keeps
+after `[voice note - transcription failed]`, or after `[voice note -
+transcription failed: it could not be decoded (REASON)]` when the note could
+not be turned into wav for the speech server). PATH is where the bot keeps
 the file, so the agent reads it there and never has to search the disk for
 it; NAME, the sender's own, is flattened to one line. A transcribed voice
 note has no line: its words are the content. In a contact request the line
 still names the path, and is marked on the line itself:
 `[attachment: NAME (MIME) at PATH - UNTRUSTED: a stranger's file, not
 opened; open it only if your owner asks]`.
+
+**A message sent while the bot is down is mailed when it starts.** At
+start the bot mails every incoming message it has not mailed yet, oldest
+first. That includes a contact request, which is mailed held and is not
+accepted, and a message in a muted or archived chat. The device chat,
+messages to yourself and info lines such as "Member added" are not mailed.
+Each message is mailed once: the ids already mailed are kept in `DC_SEEN`,
+so neither the start nor a message that also arrives live as the bot starts
+mails one twice.
+
+**A big file is mailed once, when it has landed.** Delta Chat sends a
+large encrypted file in two parts: first a small message that names the
+file, then the file itself, usually seconds later. The bot holds the
+first part and mails nothing until the file is on disk. Then it mails
+the message once, whole: typed text, attachment line, and the image's
+text or the voice note's transcript, as for any message. If the file has
+not landed after 300 seconds, or the download fails, the message is
+mailed anyway, with this line in place of the attachment line:
+`[partial, not downloaded yet: NAME (MIME, SIZE) - msg N. The file is
+not on disk yet; do not look for it.]`. If the download failed, or the
+file could not be decrypted, the line says so in brackets after "not
+downloaded yet". In a contact request, `- a stranger's file` follows
+`- msg N`. A partial has no path, and nothing more is mailed for it if
+the file lands later: ask the sender to send it again. Typed text beside
+the file comes once, in the one mail. A message held when the bot stops
+is picked up again when it starts.
 
 **A posted image arrives with its text, fenced UNTRUSTED.** The body holds
 the image's attachment line, and then the words macOS Vision read off the
@@ -300,6 +330,32 @@ later one is, because the chat is accepted by then. In an accepted group,
 a member added later is never accepted one by one, so that member's
 images are read. In both cases a stranger chose the text in the fence,
 and the fence is what keeps it from acting as instructions.
+
+**A stranger's first message is a contact request, held and flagged.**
+Delta Chat's core has a `bot` setting that accepts every contact request by
+itself. With it on, a stranger who has the bot's address lands in an
+accepted chat, and the bot cannot tell them from its owner: their message
+reached the agent as an ordinary one, with no banner and their image read.
+`sessionphone setup` leaves the setting off. A stranger's first message, in a
+1:1 chat or in a group they made, is then a contact request: it is mailed as
+M2, under `CONTACT REQUEST - NOT ACCEPTED.`, with a `REQUEST` subject, and is
+never accepted or answered unless `DC_ACCEPT_REQUESTS=on`. An owner who joined
+by the invite is not a request, and is mailed as M1.
+
+With the setting off, the core also keeps two chats of its own: "Device
+messages", its notices (a fresh account gets "Get in contact!" and a
+picture), and "Saved messages", the account's notes to itself. Neither is
+mailed to the agent, not when the bot starts and not when one arrives live.
+
+**An account an older setup made turns the setting off on its first start.**
+Older versions of `setup` turned the `bot` setting on. The bot now turns it
+off when it starts, before it connects, and says so in `bot.log` in a line
+that starts `NOTICE: turned the account's bot flag OFF`. From then on:
+
+- a new stranger's first message is held as a contact request;
+- strangers and groups the account already accepted stay accepted, and
+  their messages are mailed as M1, as before;
+- chat apps no longer show the account as a bot.
 
 ### The bot's seat
 
@@ -825,6 +881,7 @@ dc-xdc-realtime [--profile public] --advertise MSG_ID
 sessionphone ships one webxdc app, the **Guide Trail**: a black page that
 shows a conversation's words as they are spoken. It is package data, so an
 installed bot host has it without a checkout.
+[Mini apps][mini-apps] walks through building, sending and feeding it.
 
 ```text
 sessionphone app list                          # the apps that ship
@@ -1055,6 +1112,8 @@ chat of a listed address. `dc-dm` and `dc-ring` take a channel NAME or a
 contact's name, and a channel comes first. A NAME that is `chat:N` for a
 group posts into (or rings) the group. `dc-react`, `dc-xdc-update` and
 `dc-delete` take a message id and are gated on the chat the message is in.
+`dc-invite` gates the chat only, never the guest it adds: see
+[Where a turn is mailed](#where-a-turn-is-mailed).
 Inbound is not permission: a chat that wrote to the bot is not listed by that.
 
 **A send to a chat that is not listed is refused, loudly, and never sent.**
@@ -1165,9 +1224,13 @@ can edit `channels.txt`, or stop the bot and open the account directly (the
 profile recipe in the skill does the latter). This fence stops mistakes and
 stray sends. It is **not** a boundary against hostile code running as that
 user. The edit is never silent, though: the bot logs each change to the list
-at its next job. Not governed: mail to a guest (`dc-invite ... ADDRESS` mails
-the guest, which is not a Delta send), and call signalling and voice into a
-call that already passed a gate.
+at its next job. The call sockets are no boundary either (`call-mouth.sock`
+and `call-ears.sock`, mode 0600): any process running as that user can speak
+into a live call or listen to it, and the name it speaks under is the one it
+gives. Not governed: mail to a guest (`dc-invite ... ADDRESS` mails the
+guest, which is not a Delta send; see
+[Where a turn is mailed](#where-a-turn-is-mailed)), and call signalling and
+voice into a call that already passed a gate.
 
 **Before you upgrade, check the owner line.** In `channels.txt` the owner
 line is the one named `owner`, or one whose note starts `owner`. `link`,
@@ -1814,6 +1877,26 @@ A turn is what the caller says between pauses. Each one is mailed:
 - With **`Reply-To`** set to the bridge's own box, `DC_ADDR`, else
   `<agent>-chat@<host>`.
 
+**`dc-invite` is on in this release, and no setting turns it off.** An
+agent can add a mail guest to a live call without asking the caller. The
+chat must be on the allow-list; the guest's address is checked against no
+list. Once a guest is added:
+
+- **They read the call as mail, not audio.** They are copied on the call's
+  mail thread, so each turn the caller says reaches them as it is said. At
+  hang-up they get the transcript, both sides, lines said before they were
+  added included.
+- **They can be heard on the call.** A line they mail to the bridge,
+  threaded to the call, is read aloud by the bot. A guest the bridge cannot
+  verify is still read aloud, announced as an unverified sender (see
+  [Mail into a call: who is known](#mail-into-a-call-who-is-known)).
+- **The caller is told, not asked.** The bot says "`<name>` is on the call
+  now." (`<name>` is the local part of the guest's address). That line is
+  the caller's only notice.
+
+The next release turns `dc-invite` off by default, with a setting to turn it
+on.
+
 The bridge makes the turn's Message-ID itself, so the log can name it. The
 `msg` field is that id, which finds the exact mail in the box:
 
@@ -2166,18 +2249,26 @@ Sounds are not lines: they play over whatever is playing, at once.
 A reply does not start while the caller is speaking. A reply is a mouth
 line, a `dc-say` or a mail into the call. When it is next to play, it waits
 until the caller has been quiet for `DC_FLOOR_GAP` seconds (0.8 by default),
-then plays. It waits `DC_FLOOR_CAP` seconds at most (6 by default), so noise
-on the line cannot keep the agent silent. Lines still play one at a time and
+then plays. After `DC_FLOOR_CAP` seconds (6 by default) it plays anyway, so
+noise on the line cannot keep the agent silent, but not while the caller's
+words are still arriving: while words of theirs reached the call's
+transcript in the last 5 seconds, the reply keeps waiting for the quiet.
+Speech on the line with no words coming through is noise, and the cap
+releases the reply. Without the ears leg, words arrive about a second after
+each short pause, so a caller who talks for more than about 4 seconds without
+a pause can still be talked over at the cap. Lines still play one at a time and
 in the order they arrived; a reply that waits holds the lines behind it. The
 bridge's own lines, such as the greeting, the holding line and the notices,
 do not wait. `DC_FLOOR_GAP=0` turns this off. At start, the bot logs the
 setting, and each reply that waited logs one line as it starts:
 
 ```text
-CALL floor control: a reply waits for <gap>s of caller quiet, <cap>s at most
+CALL floor control: a reply waits for <gap>s of caller quiet; after <cap>s it plays anyway, unless his words reached the transcript in the last 5s
 CALL floor control: off (a reply may start while the caller speaks)
 CALL FLOOR <who> line held <s>s, released by quiet
-CALL FLOOR <who> line held <s>s, released by cap
+CALL FLOOR <who> line held <s>s, released by quiet (his words held it past the <cap>s cap)
+CALL FLOOR <who> line held <s>s, released by cap (no words for <s>s)
+CALL FLOOR <who> line held <s>s, released by cap (no words heard)
 ```
 
 A reply that never had to wait logs no `FLOOR` line.
@@ -2465,7 +2556,7 @@ given in the phone tool's host settings file,
   install` copies every `DC_*` set in your shell into the launchd job, and
   the bot reads them when it starts. To change one, set it and run `bot
   install` again. sessionmail's mail-route `SESSIONMAIL_*` ride along (see
-  [Setting up the bot's seat](#setting-up-the-bots-seat-message-seat-init-and-message-seat-agent));
+  [The bot's seat](#the-bots-seat));
   nothing else in your shell reaches the bot.
 - **`bot install` remembers what it was given.** Once the job is loaded, it
   saves each `DC_*` and `SESSIONPHONE_ROOT` your shell set in
@@ -2667,3 +2758,4 @@ default, and without ears a call is still heard and answered.
 
 [bot-mail-signing]: docs/bot-mail-signing.md
 [dependencies]: docs/dependencies.md
+[mini-apps]: docs/mini-apps.md

@@ -13,6 +13,7 @@ import json
 import os
 import stat
 
+import _chatlist
 import _keyfakes
 import pytest
 
@@ -78,7 +79,7 @@ class FakeMsg:
 CONTACTS = {OWNER: FakeContact(OWNER, "Alice"), STRANGER: FakeContact(STRANGER, "Bob")}
 
 
-class FakeAccount:
+class FakeAccount(_chatlist.Chatlist):
     """12 a listed group; 20 the owner's 1:1; 13 a stranger's 1:1; 43 an unlisted
     group the owner is in; 50 a stranger's contact request; 51 an owner's request."""
 
@@ -121,9 +122,6 @@ class FakeAccount:
 
     def get_contact_by_id(self, cid):
         return self.contacts_by_id[cid]
-
-    def get_fresh_messages(self):
-        return list(self.fresh)
 
     def mark_seen_messages(self, msgs):
         for m in msgs:

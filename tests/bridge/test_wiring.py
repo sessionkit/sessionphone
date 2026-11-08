@@ -80,10 +80,14 @@ async def main():
                                lambda *a, **k: None)
     await s._heard(pathlib.Path("caller-002.wav"), 2)
     assert (2, REAL) in s.turn_parts, f"dropped real speech: {s.turn_parts}"
+    # ... and, barge-in being on by default, it cut the 5 s still playing
+    if calls.BARGE_IN:
+        assert not s.voice.speaking(), "real speech over us did not cut"
+    posted.clear()
 
     # 4. barge-in: real speech while we are still talking cuts the audio.
-    #    Forced on here - it ships DEFAULT OFF because it depends on echo
-    #    suppression having been seen working on a live call first.
+    #    On by default (DC_BARGE_IN=0 turns it off); set here so the case
+    #    runs whatever DC_BARGE_IN the shell running this file holds.
     calls.BARGE_IN = True
     s2 = session()
     calls.tts_pcm48 = lambda text, voice: __import__("numpy").zeros(

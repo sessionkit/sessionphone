@@ -1,6 +1,6 @@
 [project]
 name = "sessionphone"
-version = "0.3.2"
+version = "0.3.3"
 description = "Ring your Claude Code session from your phone over Delta Chat"
 readme = "README.md"
 authors = [
@@ -53,14 +53,18 @@ sessionphone = "sessionphone.cli:main"
 requires = ["uv_build>=0.11.9,<0.12.0"]
 build-backend = "uv_build"
 
-# The dc-* tools a wheel install needs on its PATH. They are bash
-# and source their sibling dc-env, so they cannot be [project.scripts] (those
-# name a Python callable). They ship as wheel scripts instead: the installer
-# copies them, as they are, into the env's bin/ (and `uv tool install` links
-# them into ~/.local/bin), side by side with dc-env. wheel-bin/ is the
-# ALLOW-LIST: one relative symlink into bin/ per tool, so a wheel ships bin/'s
-# own bytes and a new bin/ tool joins it only by a link someone adds.
-# tests/test_wheel_dc_tools.py holds the shipped set exact.
+# The dc-* tools a wheel install needs on its PATH: every one the README,
+# docs, skill or --help text names, which today is every bin/dc-*. Most are
+# bash and source their sibling dc-env; dc-log and dc-log-web are Python
+# scripts that move to dc-env's Python before they import the package. None
+# can be [project.scripts] (those name a Python callable), so they ship as
+# wheel scripts: the installer copies them, as they are, into the env's bin/
+# (and `uv tool install` links them into ~/.local/bin), side by side with
+# dc-env and the env's python. wheel-bin/ is the ALLOW-LIST: one relative
+# symlink into bin/ per tool, so a wheel ships bin/'s own bytes and a new
+# bin/ tool joins it only by a link someone adds. bin/sessionphone and
+# bin/bridge-check never ship. tests/test_wheel_dc_tools.py holds the shipped
+# set exact, and fails when the user-facing text names a tool not linked here.
 [tool.uv.build-backend]
 data = { scripts = "wheel-bin" }
 

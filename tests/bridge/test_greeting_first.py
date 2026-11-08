@@ -267,7 +267,7 @@ def test_the_cap_counts_from_the_end_of_the_greeting(monkeypatch):
     assert order(runs) == [GREET, REPLY]
     assert abs(start_of(runs, REPLY) - (greeting_s() + CAP)) <= 2 * FRAME
     held, line = held_s(r.logged)
-    assert abs(held - CAP) <= 2 * FRAME and line.endswith("released by cap"), line
+    assert abs(held - CAP) <= 2 * FRAME and line.endswith("released by cap (no words heard)"), line
 
 
 def test_with_floor_control_off_the_reply_still_waits_for_the_greeting(monkeypatch):

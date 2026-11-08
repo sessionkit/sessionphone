@@ -68,7 +68,7 @@ moves it.
 | `DC_MESSAGE` | path | `message` on `PATH` | sessionmail's `message` binary. `bot install` pins it to an absolute path: launchd's `PATH` is short |
 | `DC_SIGNER_SOCK` | path | `SEAT_SOCKET` from `message seat agent --install` | the socket of the seat's key agent. Unset on the mail drop, the bot does not sign. When it signs (an MTA, or `--registry`) with neither `DC_SIGNER_*` set, `bot install` runs that command and uses what it prints (saved only with `--registry`); a sessionmail without `Capability: install` refuses instead |
 | `DC_SIGNER_PUB` | path | `SEAT_PUB` from `message seat agent --install` | the seat's `.pub`, or a copy kept apart from the key. Set both `DC_SIGNER_*` to use a seat agent you run yourself |
-| `DC_BOT_BOX` | path | `~/.mail/agents/<agent>-chat` | the bot's own mailbox, which it reads for mail into a call |
+| `DC_BOT_BOX` | path | the box `message path <agent>-chat` names | the bot's own mailbox, which it reads for mail into a call. Unset, sessionmail says where it is; with no such box the bot reads no mail into calls and makes none |
 | `DC_SAY` | command | `dc-say` | the reply command a bridged mail suggests |
 
 ## What bot install remembers
@@ -176,7 +176,7 @@ install.
 | `SESSIONMAIL_ORIGIN` | unset | the domain postfix appends to a bare address. NOT carried into the job: the reader verifies against its own, so set it in sessionmail's settings key `postfix.origin` |
 | `SESSIONMAIL_RELAY_DOMAIN` | unset | the relay for general delivery |
 | `SESSIONMAIL_HOME` | unset | this host's seat-files root |
-| `SESSIONMAIL_ROOT` | unset | the maildir root the drop writes to |
+| `SESSIONMAIL_ROOT` | unset: the `root` in sessionmail's `mail.json`, else sessionmail's default | the mail root, the folder sessionmail keeps its boxes under (sessionmail 0.3.3; before, it named the boxes folder itself). sessionphone never reads it: it carries it to `message`, and asks `message path` for every box |
 | `SESSIONMAIL_HOST` | the `host` in sessionmail's `mail.json`, else this machine's short name | the sender's host, and the host of the bot's Message-IDs. sessionphone reads it too |
 
 The defaults are sessionmail's; its own docs are the authority on them.
@@ -211,7 +211,7 @@ root itself, `DC_VOICES`, which every profile shares under `<root>`, and
 | `DC_CALLS_DIR` | `<home>/calls` | one directory per call |
 | `DC_LIVE` | `<home>/call-live.json` | the live call's state |
 | `DC_PID_FILE` | `<home>/bot.pid` | the running bot's pid, start time, command line and root, written once it holds the account and removed at its clean exit. `dc-live` reads it to know the bot is running |
-| `DC_EARS_SOCK` | `<home>/call-ears.sock` | the socket the ears open a call on |
+| `DC_EARS_SOCK` | `<home>/call-ears.sock` | the socket the ears open a call on. The bot serves the call's audio there at every setting, not only with `DC_EARS=1` |
 | `DC_MOUTH_SOCK` | `<home>/call-mouth.sock` | the socket the mouth speaks into a call on |
 | `DC_INVITE` | unset | a file the bot writes its live invite link to at start |
 | `DC_PROFILE` | unset | a second profile's name, such as `public`. Everything per-account then goes under `<root>/<profile>/`, its home |
@@ -333,12 +333,12 @@ never the default profile's.
 | `DC_NO_REPLY_S` | seconds | `0` (off) | after this long with no reply to a turn, say the holding line, once |
 | `DC_HOLDING_LINE` | text | `I heard you, give me a moment.` | the holding line |
 | `DC_FLOOR_GAP` | seconds | `0.8` | a reply (a `dc-say`, a mail into the call, a mouth line) does not start while the caller is speaking: it waits until the caller has been quiet this long. `0` turns it off |
-| `DC_FLOOR_CAP` | seconds | `6` | the longest a reply waits for that quiet. Then it plays anyway, so noise on the line cannot silence the agent |
+| `DC_FLOOR_CAP` | seconds | `6` | how long a reply waits for that quiet on the voice detector alone. Past it, the reply plays anyway, so noise on the line cannot silence the agent, unless the caller's words are still arriving: while words of theirs reached the call's transcript in the last 5 seconds (chunk transcripts that are words, not an echo or a `[COUGH]`; with ears, its finals), the reply keeps waiting for the quiet. Without the ears leg, words arrive about a second after each pause of 0.35 seconds, so a caller who talks for more than about 4 seconds without such a pause can still be talked over at the cap |
 | `DC_FIRST_CALL_WAIT` | `on`/`off` | `on` | while the speech models are still downloading, a call hears a line saying so, then the music file, until it can hear. Off, that first call is silent until the models are in |
 | `DC_WAIT_MUSIC` | path | `<root>/wait-music.opus` | the music for that wait: any audio file the bot can decode. Missing or unreadable, the line repeats every 20 s with the download's progress instead |
 | `DC_HOLD_TURN` | `1`/`0` | `1` | keep a turn open while the caller is still speaking. `0` lets a turn go out while they talk on |
 | `DC_PREVIEWS` | `1`/`0` | `0` | mail the turn so far as a preview while the caller speaks. Needs ears |
-| `DC_BARGE_IN` | `1`/`0` | `0` | stop speaking when the caller speaks |
+| `DC_BARGE_IN` | `1`/`0` | `1` | stop speaking when the caller talks over the bot: once their words are heard, the line playing is cut. A short murmur such as "yeah" does not cut, though "stop" or "wait" does. Words that sound like the bot's own voice coming back do not cut either. `0` turns it off. Does nothing with `DC_EARS=1` |
 | `DC_BARGE_IN_KEEP_TEXT` | `1`/`0` | `1` | on a cut, post the unspoken rest into the chat as text |
 | `DC_HEARD` | `1`/`on`/`true`/`yes` | off | write a call's words into VoiceMode's heard log, for the chats `DC_HEARD_CHATS` lists |
 | `DC_HEARD_CHATS` | chat ids, comma-separated | none | the chats whose calls may write the heard log |
@@ -353,7 +353,7 @@ never the default profile's.
 | --- | --- | --- | --- |
 | `DC_STT_URL` | URL | `mlx-audio+http://127.0.0.1:8890/v1/audio/transcriptions` | the speech-to-text server for voice notes and calls. Any OpenAI-compatible `/v1/audio/transcriptions` |
 | `DC_STT_MODEL` | text | unset: suits the URL's kind | the model asked for. `bot install` refuses a URL of unknown kind without it |
-| `DC_EARS` | `1`/`0` | `0` | hear calls through ears, in the bot's own process, instead of chunks |
+| `DC_EARS` | `1`/`0` | `0` | hear calls through ears, in the bot's own process, instead of chunks. The ears on `DC_EARS_SOCK` get the call either way. With it, `DC_BARGE_IN` does nothing: only the mouth cuts a line |
 | `DC_EARS_BACKEND` | `auto`/`apple`/`nemotron`/`whisper` | `auto` | the ears' recogniser |
 | `DC_EARS_TURNS` | `silence`/`smart` | `silence` | how the ears decide a turn has ended |
 | `DC_EARS_SRC` | path | set by `bot install` when ears is a uv tool | where the bot imports ears from |

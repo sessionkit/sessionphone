@@ -21,9 +21,10 @@ import numpy as np
 import pytest
 
 from sessionphone.bridge import calls, dc_env, mouthleg
-from sessionphone.bridge.floor import Floor
+from sessionphone.bridge.floor import WORDS_DEFAULT, Floor
 
 GAP, CAP, FRAME = 0.8, 6.0, 0.02
+WINDOW = WORDS_DEFAULT                  # his words this recent hold a line past the cap
 REPLY, BRIDGE, BEFORE = 5, 7, 3        # each line's samples carry its own value
 
 
@@ -52,6 +53,9 @@ class Rig:
                 if v and (not heard or heard[-1] != v):
                     heard.append(int(v))
         return heard
+
+    def floor_free(self):
+        return self.track.floor.verdict(None, self.track.floor.tick()) == "quiet"
 
     def reply(self, value=REPLY, seconds=0.1, who="agent", floor=True):
         ln = self.track.line(who, floor=floor)
@@ -107,7 +111,170 @@ def test_a_gap_of_zero_turns_it_off():
     assert not f.on and f.free(f.tick())
     assert "off" in f.line()
     assert Floor(lambda: False).line() == (
-        "floor control: a reply waits for 0.8s of caller quiet, 6s at most")
+        "floor control: a reply waits for 0.8s of caller quiet; after 6s it plays anyway, "
+        "unless his words reached the transcript in the last 5s")
+
+
+# ---- the cap waits while his words are still arriving -------------------------
+
+def test_the_cap_holds_while_his_words_are_still_arriving():
+    clock, vad = Clock(), types.SimpleNamespace(speaking=True)
+    f = Floor(lambda: vad.speaking, GAP, CAP, clock)
+    now = f.tick()
+    held = now - CAP - 3.0                      # held well past the cap
+    assert f.verdict(held, now) == "cap"        # no words ever heard: the cap, as before
+    f.heard()                                   # his words reach the transcript
+    clock.t += WINDOW - 0.05
+    assert f.verdict(held, f.tick()) is None    # recent words: he is talking, hold it
+    clock.t += 0.1
+    assert f.verdict(held, f.tick()) == "cap"   # no words for the window: noise, play it
+
+
+def test_words_before_the_window_do_not_hold_a_line_at_the_cap():
+    clock, vad = Clock(), types.SimpleNamespace(speaking=True)
+    f = Floor(lambda: vad.speaking, GAP, CAP, clock)
+    f.heard()
+    clock.t += WINDOW + 1.0                     # he spoke, then only noise
+    now = f.tick()
+    assert f.verdict(now - CAP, now) == "cap"
+
+
+def test_words_never_release_a_line_before_the_cap_or_over_his_speech():
+    clock, vad = Clock(), types.SimpleNamespace(speaking=True)
+    f = Floor(lambda: vad.speaking, GAP, CAP, clock)
+    now = f.tick()
+    f.heard()
+    assert f.verdict(now - CAP + 0.5, now) is None
+    assert f.verdict(None, now) is None
+
+
+def test_the_release_says_why():
+    clock, vad = Clock(), types.SimpleNamespace(speaking=True)
+    f = Floor(lambda: vad.speaking, GAP, CAP, clock)
+    now = f.tick()
+    assert f.reason("quiet", now - 1.0, now) == "quiet"
+    assert f.reason("cap", now - CAP, now) == "cap (no words heard)"
+    f.heard()
+    clock.t += 7.25
+    now = f.tick()
+    assert f.reason("cap", now - 12.0, now) == "cap (no words for 7.2s)"
+    assert f.reason("quiet", now - 9.0, now) == "quiet (his words held it past the 6s cap)"
+
+
+def test_a_held_line_waits_past_the_cap_while_his_words_arrive(logs):
+    r = Rig()
+    r.vad.speaking = True                       # he talks on and on
+    r.reply()
+    for _ in range(5):                          # a chunk's words every 2 s, for 10 s
+        assert r.frames(2.0) == []
+        r.track.floor.heard()
+    assert r.floor_free() is False
+    assert floor_lines(logs) == []              # 10 s held, past the 6 s cap: not released
+    r.vad.speaking = False                      # he stops: it plays a gap later, by quiet
+    assert r.frames(GAP - 0.1) == []
+    assert r.frames(0.2) == [REPLY]
+    (line,) = floor_lines(logs)
+    assert line == ("CALL FLOOR agent line held 10.8s, "
+                    "released by quiet (his words held it past the 6s cap)"), line
+
+
+def test_a_held_line_plays_at_the_cap_once_his_words_stop_and_noise_goes_on(logs):
+    r = Rig()
+    r.vad.speaking = True
+    r.reply()
+    assert r.frames(4.0) == []
+    r.track.floor.heard()                       # his last words, 4 s into the hold
+    assert r.frames(WINDOW - 0.1) == []         # past the cap, but words 4.9 s ago: held
+    assert r.frames(0.2) == [REPLY]             # the window is up, VAD noise goes on: the cap
+    (line,) = floor_lines(logs)
+    assert line.startswith("CALL FLOOR agent line held 9.0s, released by cap (no words for 5.0s)"), line
+
+
+def test_noise_with_no_words_is_released_at_the_cap_past_the_window(logs):
+    r = Rig()
+    r.vad.speaking = True
+    r.frames(1.0)
+    r.track.floor.heard()                       # he said something, then a fan came on
+    r.frames(WINDOW)
+    r.reply()
+    assert r.frames(CAP - 0.1) == []
+    assert r.frames(0.2) == [REPLY]             # words long gone: the cap still frees the agent
+    (line,) = floor_lines(logs)
+    assert line.startswith("CALL FLOOR agent line held 6.0s, released by cap (no words for 11.0s)"), line
+
+
+def test_quiet_still_releases_as_before_with_words_on_the_feed(logs):
+    r = Rig()
+    r.vad.speaking = True
+    r.reply()
+    r.frames(1.0)
+    r.track.floor.heard()
+    r.vad.speaking = False
+    assert r.frames(GAP - 0.1) == []
+    assert r.frames(0.2) == [REPLY]
+    assert floor_lines(logs) == ["CALL FLOOR agent line held 1.8s, released by quiet"]
+
+
+# ---- the call's transcript feeds the floor its words --------------------------
+
+def _words_session():
+    s = object.__new__(calls.CallSession)
+    s.chat_id, s.lines, s.turn_parts, s.turn_pending = 12, [], [], set()
+    s.voice = calls.PipVoiceTrack()
+    s.clock = Clock()
+    s.voice.floor = Floor(lambda: True, GAP, CAP, s.clock)
+    s.echo = types.SimpleNamespace(check=lambda text: None)
+    s.heard = types.SimpleNamespace(partial=lambda *a, **k: None)
+    s.previews, s._turn_arm = None, lambda: None
+    return s
+
+
+@pytest.mark.parametrize("text, words", [
+    ("so the build is still red", True),
+    ("[COUGH]", False),
+    ("(coughing)", False),
+    ("", False),
+])
+def test_a_transcribed_chunk_stamps_the_floor_only_when_it_is_words(text, words, logs, monkeypatch, tmp_path):
+    monkeypatch.setattr(calls, "_hooks", calls.Hooks(logs.append, lambda p: text, lambda *a, **k: None))
+    monkeypatch.setattr(calls, "PREVIEWS", False)
+    monkeypatch.setattr(calls, "BARGE_IN", False)
+    s = _words_session()
+    chunk = tmp_path / "caller-001.wav"
+    chunk.write_bytes(b"")
+    asyncio.run(s._heard(chunk, 1))
+    assert s.voice.floor.last_words == (s.clock.t if words else None)
+
+
+def test_an_echo_chunk_does_not_stamp_the_floor(logs, monkeypatch, tmp_path):
+    monkeypatch.setattr(calls, "_hooks", calls.Hooks(logs.append, lambda p: "here is the answer", None))
+    s = _words_session()
+    s.echo = types.SimpleNamespace(check=lambda text: "our own line")
+    chunk = tmp_path / "caller-001.wav"
+    chunk.write_bytes(b"")
+    asyncio.run(s._heard(chunk, 1))
+    assert s.voice.floor.last_words is None
+
+
+@pytest.mark.parametrize("text, words", [
+    ("so the build is still red", True),
+    ("  ", False),
+    ("[BLANK_AUDIO]", False),
+])
+def test_an_ears_final_stamps_the_floor_only_when_it_is_words(text, words, logs):
+    s = _words_session()
+    e = types.SimpleNamespace(type="final", text=text, seg=1, start=0.0, end=1.0, t=1.2)
+    s._ears_dispatch(e)
+    assert s.voice.floor.last_words == (s.clock.t if words else None)
+
+
+def test_words_on_a_session_with_no_floor_are_harmless(logs):
+    s = _words_session()
+    s.voice.floor = None
+    e = types.SimpleNamespace(type="final", text="hello there", seg=1, start=0.0, end=1.0, t=1.2)
+    s._ears_dispatch(e)
+    del s.voice
+    s._ears_dispatch(e)                         # a test fake with no track at all
 
 
 # ---- the track: a reply waits for the caller ----------------------------------

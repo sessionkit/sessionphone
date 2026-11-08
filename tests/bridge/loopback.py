@@ -17,7 +17,7 @@ _callers.write_text(CALLER + "\n")
 os.environ["DC_CALLERS_FILE"] = str(_callers)
 from sessionphone.bridge import calls
 from sessionphone.bridge.bot import transcribe
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer
 
 clip = sys.argv[1]
@@ -49,7 +49,7 @@ class Account:
     def get_message_by_id(self, i): return Msg(self.phone)
 
 async def phone_call():
-    phone = RTCPeerConnection()
+    phone = RTCPeerConnection(RTCConfiguration(iceServers=[]))
     phone.createDataChannel("iceTrickling", negotiated=True, id=1)
     muted = phone.createDataChannel("mutedState", negotiated=True, id=3)
     muted.on("message", lambda d: print("  phone got mutedState:", d))

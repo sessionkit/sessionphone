@@ -20,11 +20,13 @@ What it does:
 # subprocess: no call here (every mail goes by seatmail's `message send`), but the test
 # rigs stub bot.subprocess.run, which is the shared module's run: keep the name.
 import atexit, concurrent.futures, json, os, pathlib, shlex, signal, subprocess, sys, threading, time, traceback, typing  # noqa: F401
+import html.parser, re   # a long text the core cut: its html, read back as text
 # when this process started, as near as it can know: a call of this bot can
 # be no older, so a call-live.json older than this was left by an earlier bot
 STARTED = time.time()
 from deltachat_rpc_client import Rpc, DeltaChat, EventType
 from deltachat_rpc_client.const import ViewType   # Voice for a voice-message file job
+from deltachat_rpc_client.const import MessageState, SpecialContactId   # the startup sweep's listing
 # The agent may be NAMED IN ARGV - the launchd job passes it:
 #   python -m sessionphone.bridge.bot AGENT
 # so `ps` tells two bots on one machine apart. dc-live never reads argv: it
@@ -620,8 +622,13 @@ def transcribe(path):
     """Voice note -> text, on the STT server voicemode already runs.
     The point: with no laptop, the owner can still TALK to the agent.
     DC_STT_URL is the endpoint and DC_STT_MODEL the model; unset, the model
-    suits the endpoint's kind. Every failure is logged (see bridge/stt.py)."""
-    return stt.transcribe(path, dc_env.STT_URL, dc_env.STT_MODEL, log)
+    suits the endpoint's kind. Every failure is logged (see bridge/stt.py).
+    A note that isn't wav (a Delta voice note arrives as M4A) is decoded to
+    16 kHz mono wav first, and the wav is posted; a call's chunks are wav and
+    go as they are. A note that can't be decoded raises stt.Undecodable,
+    logged, with the plain reason message_text() puts in the mail."""
+    with stt.as_wav(path, log) as wav:
+        return stt.transcribe(wav, dc_env.STT_URL, dc_env.STT_MODEL, log)
 
 
 def quote_block(snap):
@@ -643,15 +650,30 @@ def quote_block(snap):
     return f"> in reply to {who} (msg {qid}):\n> {said[:300]}\n\n"
 
 
+_SEEN_LOCK = threading.Lock()   # remember() is a read-modify-write; a held message's timer calls it too
+
+
 def remember(mid):
     """Record a bridged message id so the startup sweep never replays it.
     The sweep kept its own set and the LIVE path recorded nothing, so every
     restart re-bridged whatever had arrived live: five duplicates on the
-    first restart after the calls port."""
-    seen = set(SEEN.read_text().split()) if SEEN.exists() else set()
-    if str(mid) not in seen:
-        seen.add(str(mid))
-        SEEN.write_text("\n".join(sorted(seen)) + "\n")
+    first restart after the calls port.
+    Under _SEEN_LOCK: the event thread and a held message's timer thread may
+    both call it, and an id dropped here is mailed twice on the next restart."""
+    with _SEEN_LOCK:
+        seen = set(SEEN.read_text().split()) if SEEN.exists() else set()
+        if str(mid) not in seen:
+            seen.add(str(mid))
+            SEEN.write_text("\n".join(sorted(seen)) + "\n")
+
+
+def seen(mid):
+    """Has this message id been bridged (or recorded) already? Under
+    _SEEN_LOCK, as remember() writes. The live path asks it first: the
+    startup sweep runs before the event thread, so a message fetched at
+    start is both swept and queued as IncomingMsg."""
+    with _SEEN_LOCK:
+        return SEEN.exists() and str(mid) in SEEN.read_text().split()
 
 
 UNTRUSTED_FILE = " - UNTRUSTED: a stranger's file, not opened; open it only if your owner asks"
@@ -677,23 +699,188 @@ def attachment_line(snap, path, mime, ocr=True):
             + ("" if ocr else UNTRUSTED_FILE) + "]")
 
 
+# >>> premessage-hold
+# A big end-to-end-encrypted file is sent as two messages: a small
+# pre-message, then a post-message carrying the file. The core raises
+# IncomingMsg for the pre-message (download_state Available), and when the
+# file lands it puts it on the SAME msg row and raises only MsgsChanged.
+# So a pre-message is HELD: not mailed, not remembered, not marked seen. It
+# is mailed once, whole, when MsgsChanged shows Done; or, past
+# PREMESSAGE_WAIT_S, mailed with partial_line() and no path. Download states:
+# deltachat-rpc-server 2.62.0 --openrpc, DownloadState. Compared as strings:
+# the 2.62.0 client's const.DownloadState has no Undecipherable.
+PREMESSAGE_WAIT_S = 300.0   # the full file landed 0-95 s after its pre-message on all four photos seen
+HOLD_TIMER = threading.Timer    # a module name, so tests fire the bound by hand
+PENDING = ("Available", "InProgress")   # the file is still to come
+GAVE_UP = {"Failure": "failure", "Undecipherable": "undecipherable"}   # core gave up -> partial reason
+PARTIAL_WHY = {"timeout": "", "failure": " (the download failed)",
+               "undecipherable": " (it could not be decrypted)"}  # partial reason -> its words
+HELD = {}                   # msg id -> {"chat_id", "route", "ocr", "timer"}
+HELD_LOCK = threading.Lock()    # the pop under it is the exactly-once point
+
+
+def download_state(snap):
+    """The snapshot's download state as a string. Missing counts as Done:
+    a whole message, and every fake that predates the field."""
+    v = getattr(snap, "download_state", None)
+    v = getattr(v, "value", v)
+    return str(v) if v else "Done"
+
+
+def is_pending(snap):
+    return download_state(snap) in PENDING
+
+
+def size_text(n):
+    """345.9 KiB: the size the phone shows on a pre-message's placeholder."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KiB"
+    return f"{n / (1024 * 1024):.1f} MiB"
+
+
+def partial_reason(snap):
+    """Why a message is mailed without its file: "failure" or
+    "undecipherable" when the core gave up, else "timeout" (a pending message
+    is mailed only when its hold runs out)."""
+    return GAVE_UP.get(download_state(snap), "timeout")
+
+
+def partial_line(snap, reason, ocr=True):
+    """The line a message whose file is NOT on disk carries instead of
+    attachment_line(): the name, type and size the pre-message knows, and the
+    msg id. No path: there is no file to open. The lead, "partial, not
+    downloaded yet", is fixed, so an agent can grep it.
+    reason: "timeout", "failure" or "undecipherable" (partial_reason()), its
+    own slot so a later tail or record can key on it. The ONE place the line
+    is built."""
+    why = PARTIAL_WHY.get(reason, "")
+    name = (one_line(getattr(snap, "file_name", None) or "")
+            or one_line(str(getattr(snap, "view_type", "") or "")) or "file")
+    mime = getattr(snap, "file_mime", "") or "unknown type"
+    size = size_text(getattr(snap, "file_bytes", None))
+    return (f"[partial, not downloaded yet{why}: {name} "
+            f"({mime}{', ' + size if size else ''}) - msg {getattr(snap, 'id', '?')}"
+            + ("" if ocr else " - a stranger's file")
+            + ". The file is not on disk yet; do not look for it.]")
+# <<< premessage-hold
+
+
+# >>> long-text: with the core's bot flag off, the core cuts a long incoming
+# text at about 3.8K chars, ends it with CUT_MARK and sets has_html; the
+# whole text is only in the message's html (rpc get_message_html).
+CUT_MARK = "[...]"
+HTML_BLOCKS = {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+               "blockquote", "pre", "table", "ul", "ol", "hr"}   # a line of their own
+HTML_SKIP = {"script", "style", "head", "title"}                # never text
+
+
+class _HtmlText(html.parser.HTMLParser):
+    """html -> the text a reader sees: tags dropped, entities unescaped,
+    script, style and head left out, <br> and block tags as line breaks."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip, self.pre = [], 0, 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in HTML_SKIP:
+            self.skip += 1
+        elif tag == "br":
+            self.out.append("\n")
+        elif tag in HTML_BLOCKS:
+            self.out.append("\n")
+            self.pre += tag == "pre"
+
+    def handle_startendtag(self, tag, attrs):
+        if tag == "br":
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in HTML_SKIP:
+            self.skip = max(0, self.skip - 1)
+        elif tag in HTML_BLOCKS:
+            self.out.append("\n")
+            self.pre = max(0, self.pre - (tag == "pre"))
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        # as a browser shows it: a source newline is a space, a run one space;
+        # <pre> keeps its own (no-break, so html_text() trims no indent of it)
+        self.out.append(data.replace(" ", "\xa0") if self.pre
+                        else re.sub(r"[ \t\r\n\f]+", " ", data))
+
+
+def html_text(page):
+    """The plain text of an html page. Line edges trimmed of plain spaces
+    (a no-break space, the core's indent, is kept as a space), at most one
+    blank line in a row."""
+    p = _HtmlText()
+    p.feed(page or "")
+    p.close()
+    lines = [l.strip(" \t").replace("\xa0", " ") for l in "".join(p.out).split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def whole_text(snap, text):
+    """The typed text, whole. A text the core cut (has_html, ending CUT_MARK)
+    is read again from the message's html; else it is returned as it is, and
+    no html is read. The html cannot be read: the cut text and one line that
+    says so. A reply's html repeats what it quotes; quote_block() carries that,
+    so its leading "> " lines are dropped here."""
+    if not (getattr(snap, "has_html", False) and text.endswith(CUT_MARK)):
+        return text
+    try:
+        msg = snap.message
+        whole = html_text(msg.account.manager.rpc.get_message_html(msg.account.id, msg.id))
+        if not whole:
+            raise ValueError("the html had no text")
+    except Exception as e:      # any failure keeps the cut text, and says so
+        why = one_line(f"{type(e).__name__}: {e}")[:200]
+        log(f"LONG TEXT msg {getattr(snap, 'id', '?')} cut, html not read: {why}")
+        return (text + "\n\n[this message was cut short by the chat app; "
+                f"its full text could not be read: {why}]")
+    if getattr(snap, "quote", None):
+        whole = re.sub(r"\A(?:>[^\n]*\n)+\s*", "", whole + "\n").strip()
+    log(f"LONG TEXT msg {getattr(snap, 'id', '?')}: {len(text)} chars cut, {len(whole)} read from its html")
+    return whole
+# <<< long-text
+
+
 def message_text(snap, ocr=True):
     """The words in a message, whether typed, spoken or on a posted image.
     A file of any kind gets attachment_line(), kept beside typed text; a
     transcribed voice note does not (its words are the content).
     ocr=False: an image is not read (a contact request's: a stranger's image
-    never goes through OCR), and the line is marked UNTRUSTED."""
+    never goes through OCR), and the line is marked UNTRUSTED.
+    A message whose file has not landed (download_state not Done) gets
+    partial_line() instead: no path, no OCR, no transcription."""
     text = (getattr(snap, "text", "") or "").strip()
+    text = whole_text(snap, text)       # a long text the core cut, read whole
     path = getattr(snap, "file", None)
     mime = (getattr(snap, "file_mime", "") or "")
     head = text + "\n\n" if text else ""
+    if download_state(snap) != "Done":
+        return quote_block(snap) + head + partial_line(snap, partial_reason(snap), ocr)
     if path and (mime.startswith("audio/") or
                  str(getattr(snap, "view_type", "")).lower() in ("voice", "audio")):
-        said = transcribe(path)
+        why = ""
+        try:
+            said = transcribe(path)
+        except stt.Undecodable as e:           # logged by stt.as_wav; nothing was posted
+            said, why = None, f": it could not be decoded ({e})"
         if said:
             log(f"TRANSCRIBED {len(said)} chars from {mime or 'audio'}")
             return quote_block(snap) + head + said
-        return head + "[voice note - transcription failed]\n" + attachment_line(snap, path, mime, ocr)
+        return head + f"[voice note - transcription failed{why}]\n" + attachment_line(snap, path, mime, ocr)
     if path and imgtext.is_image(mime, getattr(snap, "view_type", "")):
         # the image line even beside typed text, then its text
         said = attachment_line(snap, path, mime, ocr)
@@ -1371,6 +1558,104 @@ def call_event_line(event):
             f"chat {getattr(event, 'chat_id', '?')} video={getattr(event, 'has_video', '?')}")
 
 
+# >>> premessage-hold: the held path (the constants are above message_text)
+def bridge_one(account, mid, chat_id, snap, route, ocr):
+    """Mail one live message the way a whole message is mailed: a held
+    contact request via request_in() (route "request"), anything else as a
+    message. Then remember() it, then mark it seen. remember() goes FIRST, so
+    a failed mark-seen can never turn into a second mail. Marking a HELD
+    request seen sends the stranger no read receipt: core markseen_msgs
+    (chatmail/core src/message.rs, main branch, not the 2.62.0 tag, not
+    measured live) sends an MDN only when the chat is Blocked::Not, "We also
+    don't send read receipts for contact requests." The live path and a
+    released pre-message both come here."""
+    info = account.get_chat_by_id(chat_id).get_basic_snapshot()
+    if route == "request":
+        request_in(info.name, chat_id, snap, msg_id=mid, channel=chat_channel(account, chat_id))
+    else:
+        who = snap.sender.get_snapshot()
+        log(f"RECV msg {mid} chat {chat_id} <{who.display_name}>: {(snap.text or '<no text>')[:70]}")
+        mail_in(info.name, chat_id, who.display_name, message_text(snap, ocr=ocr),
+                kind="message", dc_msg_id=mid, dc_sender=getattr(who, "address", None),
+                channel=chat_channel(account, chat_id))
+    remember(mid)
+    account.mark_seen_messages([account.get_message_by_id(mid)])
+
+
+def hold(account, mid, chat_id, route, ocr, snap=None):
+    """A pre-message: its file is still to come. Not mailed, not remembered,
+    not marked seen: a restart's sweep finds it fresh, and the read receipt
+    waits until the agent has the message. The route is fixed NOW, so a file
+    that came as a stranger's stays marked a stranger's if the chat is
+    accepted while it is held. A timer bounds the wait."""
+    with HELD_LOCK:
+        if mid in HELD:
+            return
+        timer = HOLD_TIMER(PREMESSAGE_WAIT_S, expire, (account, mid))
+        timer.daemon = True     # a stop is never held up by a wait
+        HELD[mid] = {"chat_id": chat_id, "route": route, "ocr": ocr, "timer": timer}
+    timer.start()
+    size = size_text(getattr(snap, "file_bytes", None)) if snap is not None else ""
+    log(f"HELD msg {mid} chat {chat_id}: pre-message, file not downloaded yet "
+        f"(route {route}{', ' + size if size else ''}); waiting up to {PREMESSAGE_WAIT_S:g} s")
+
+
+def release(account, mid, why):
+    """Mail a held message once, from a fresh snapshot: whole if its file
+    landed, else with partial_line(). The pop under HELD_LOCK is the
+    exactly-once point: a MsgsChanged and the timer may both get here, and
+    only the first finds it. -> True if this call mailed it."""
+    with HELD_LOCK:
+        held = HELD.pop(mid, None)
+    if held is None:
+        return False
+    if held["timer"] is not None:
+        held["timer"].cancel()
+    snap = account.get_message_by_id(mid).get_snapshot()
+    state = download_state(snap)
+    bridge_one(account, mid, held["chat_id"], snap, held["route"], held["ocr"])
+    if why == "timeout" and state in PENDING:
+        log(f"HELD msg {mid}: not downloaded after {PREMESSAGE_WAIT_S:g} s; mailed as partial")
+    log(f"RELEASED msg {mid} ({why}, {state})")
+    return True
+
+
+def expire(account, mid):
+    """The timer's end of a hold. Runs on the timer's thread, so it never
+    raises: a failure is logged, and the message, never remembered, is the
+    next restart's sweep's."""
+    try:
+        release(account, mid, "timeout")
+    except Exception:
+        log(f"HELD msg {mid}: release on timeout failed:\n" + traceback.format_exc())
+
+
+def recheck_held(account, event):
+    """MsgsChanged, with something held. msgId is the one message changed,
+    or 0 for many; chatId likewise (2.62.0 --openrpc). Re-read each held
+    message it may name: Done is released whole; Failure or Undecipherable
+    now, as a partial (the core has given up); still pending stays held."""
+    mid = getattr(event, "msg_id", 0) or 0
+    cid = getattr(event, "chat_id", 0) or 0
+    with HELD_LOCK:
+        if mid:
+            ids = [mid] if mid in HELD else []
+        elif cid:
+            ids = [m for m, h in HELD.items() if h["chat_id"] == cid]
+        else:
+            ids = list(HELD)
+    for m in ids:
+        try:
+            state = download_state(account.get_message_by_id(m).get_snapshot())
+            if state == "Done":
+                release(account, m, "landed")
+            elif state not in PENDING:
+                release(account, m, state)
+        except Exception:
+            log(f"HELD msg {m}: recheck on MsgsChanged failed:\n" + traceback.format_exc())
+# <<< premessage-hold
+
+
 def handle_events(account):
     """Blocking event loop. wait_for_event() takes NO timeout - passing one
     raises TypeError, which in the first version was swallowed by a bare
@@ -1390,42 +1675,67 @@ def handle_events(account):
             log(call_event_line(event))
         if kind == EventType.INCOMING_MSG:
             try:
+                if seen(event.msg_id):
+                    # Already mailed, or recorded, by the startup sweep: it
+                    # runs before this thread, and start_io() before it, so a
+                    # message fetched at start is both swept and queued here.
+                    # A repeated IncomingMsg for a mailed id lands here too.
+                    # Nothing else: no mail, no mark-seen, no accept, no hold.
+                    # A held id is never in SEEN (hold() does not remember()),
+                    # so the release below still runs for it.
+                    log(f"RECV msg {event.msg_id}: already bridged (SEEN), skipped")
+                    continue
                 msg = account.get_message_by_id(event.msg_id).get_snapshot()
                 chat = account.get_chat_by_id(event.chat_id)
                 info = chat.get_basic_snapshot()
+                if getattr(info, "is_device_chat", False) or getattr(info, "is_self_talk", False):
+                    # The core's own notices and the account's notes to
+                    # itself: never the agent's mail, as the sweep leaves
+                    # them out (unseen_incoming). With the bot flag off the
+                    # core makes both chats. Nothing else: no mail, no
+                    # mark-seen, no remember, no accept, no hold.
+                    where = "Device messages" if getattr(info, "is_device_chat", False) else "Saved messages"
+                    log(f"RECV msg {event.msg_id}: {where} chat, not mailed")
+                    continue
                 who = msg.sender.get_snapshot()
                 sender = who.display_name
                 request = getattr(info, "is_contact_request", False)
                 if not inbound_ok(account, event.chat_id, "contact-request" if request else "message",
                                   getattr(who, "address", None), sender):
-                    pass    # public profile, unlisted chat: recorded, never mailed or accepted
-                elif request and not ACCEPT_REQUESTS:
-                    request_in(info.name, event.chat_id, msg, msg_id=event.msg_id,
-                               channel=chat_channel(account, event.chat_id))
+                    # public profile, unlisted chat: recorded, never mailed,
+                    # accepted or held. remember() it and mark it seen, as a
+                    # bridged message is (bridge_one), remember() first.
+                    remember(event.msg_id)
+                    account.mark_seen_messages([account.get_message_by_id(event.msg_id)])
                 else:
-                    if request:
+                    if request and ACCEPT_REQUESTS:
                         chat.accept()
                         log(f"ACCEPTED contact request, chat {event.chat_id}")
-                    log(f"RECV msg {event.msg_id} chat {event.chat_id} <{sender}>: {(msg.text or '<no text>')[:70]}")
-                    mail_in(info.name, event.chat_id, sender, message_text(msg, ocr=not request),
-                            kind="message", dc_msg_id=event.msg_id,
-                            dc_sender=getattr(who, "address", None),
-                            channel=chat_channel(account, event.chat_id))
-                # BOTH branches, held request or bridged message (as the original bridge did):
-                # remember() it, or the next restart's sweep mails a held request
-                # again (the held branch used to `continue` past this); then
-                # mark it seen, as the sweep does, or it stays fresh on every
-                # device. remember() goes FIRST, so a failed mark-seen can
-                # never turn into a second mail. Marking a HELD request seen
-                # sends the stranger no read receipt: core markseen_msgs
-                # (chatmail/core src/message.rs, main branch, not the 2.62.0
-                # tag, not measured live) sends an MDN only when the chat is
-                # Blocked::Not, "We also don't send read receipts for contact
-                # requests." The sweep has always marked held requests seen.
-                remember(event.msg_id)
-                account.mark_seen_messages([account.get_message_by_id(event.msg_id)])
+                    # BOTH routes, held request or bridged message, are
+                    # remember()ed and marked seen in bridge_one(), or the
+                    # next restart's sweep mails a held request again.
+                    route = "request" if request and not ACCEPT_REQUESTS else "message"
+                    if is_pending(msg):
+                        hold(account, event.msg_id, event.chat_id, route, not request, msg)
+                    elif event.msg_id in HELD:
+                        # The sweep held it: start_io() runs before the
+                        # sweep, so a message fetched at start is both fresh
+                        # and queued as IncomingMsg. Its file has landed
+                        # since. release() pops HELD, so it is mailed once,
+                        # by whichever of this, MsgsChanged or the timer
+                        # gets there first.
+                        release(account, event.msg_id, "landed")
+                    else:
+                        bridge_one(account, event.msg_id, event.chat_id, msg, route, not request)
             except Exception:
                 log("RECV handler failed:\n" + traceback.format_exc())
+        elif kind == EventType.MSGS_CHANGED and HELD:
+            # A held pre-message's file has landed, maybe. MsgsChanged fires
+            # on every send and draft, so with nothing held it costs nothing.
+            try:
+                recheck_held(account, event)
+            except Exception:
+                log("MSGS_CHANGED handler failed:\n" + traceback.format_exc())
         elif kind == EventType.INCOMING_REACTION:
             try:
                 snap = account.get_contact_by_id(event.contact_id).get_snapshot()
@@ -1493,6 +1803,40 @@ def handle_events(account):
             log(f"IncomingCallAccepted msg {event.msg_id} from_this_device={getattr(event, 'from_this_device', '?')}")
 
 
+def unseen_incoming(account):
+    """Every incoming message core still holds as unseen (InFresh), in any
+    chat the chatlist shows: contact requests and muted chats included,
+    archived chats included. Out: the device chat, self-talk, info
+    messages, anything from a special contact, and blocked chats (core keeps
+    them out of the chatlist). Oldest first.
+
+    Not get_fresh_messages(): that is core's notification badge query, and
+    it leaves out muted chats and contact requests ("these messages should
+    not be notified"). A bridge must see every unhandled message. Reading a
+    request chat's messages does not accept it."""
+    out = []
+    chats = (account.get_chatlist(no_specials=True)
+             + account.get_chatlist(archived_only=True, no_specials=True))
+    for chat in chats:
+        want = chat.get_fresh_message_count()       # muted or not, request or not
+        if not want:
+            continue
+        basic = chat.get_basic_snapshot()
+        if basic.is_device_chat or basic.is_self_talk:
+            continue
+        found = 0
+        for m in reversed(chat.get_messages()):     # newest back; stop at `want`
+            snap = m.get_snapshot()
+            if snap.state != MessageState.IN_FRESH:
+                continue
+            found += 1
+            if not snap.is_info and snap.from_id > SpecialContactId.LAST_SPECIAL:
+                out.append((snap.timestamp, m.id, m))
+            if found >= want:
+                break
+    return [m for _, _, m in sorted(out, key=lambda t: (t[0], t[1]))]
+
+
 def sweep(account):
     """The startup sweep, run once before the event loop starts.
 
@@ -1503,36 +1847,57 @@ def sweep(account):
     # are not replayed on restart, so without this a message sent during
     # a gap is lost in plain sight - which is exactly what happened on
     # the first build.
-    seen_file = SEEN
-    seen = set(seen_file.read_text().split()) if seen_file.exists() else set()
+    #
+    # The list is unseen_incoming(): contact requests and muted chats
+    # included, which core's get_fresh_messages() leaves out, oldest first.
+    # The live path skips an id this remember()s (seen()), so a message
+    # fetched at start, both listed here and queued as IncomingMsg, is
+    # mailed once.
+    #
+    # A pre-message whose file has not landed is HELD, as on the
+    # live path: not remembered, not marked seen, with a fresh timer. Its
+    # MsgsChanged waits in the client's event queue until handle_events
+    # reads it. Everything else is remember()ed BEFORE it is mailed, and on
+    # any failure, so a message that breaks the sweep is not retried forever.
+    seen = set(SEEN.read_text().split()) if SEEN.exists() else set()
     try:
-        for m in account.get_fresh_messages():
+        for m in unseen_incoming(account):
             if str(m.id) in seen:
                 continue
-            seen.add(str(m.id))
-            seen_file.write_text("\n".join(sorted(seen)) + "\n")
-            snap = m.get_snapshot()
-            chat = account.get_chat_by_id(snap.chat_id)
-            info = chat.get_basic_snapshot()
-            request = getattr(info, "is_contact_request", False)
-            who = snap.sender.get_snapshot()
-            sender = who.display_name
-            if not inbound_ok(account, snap.chat_id, "contact-request" if request else "message",
-                              getattr(who, "address", None), sender):
-                account.mark_seen_messages([m])     # recorded, not mailed, as the live path
-                continue
-            if request and not ACCEPT_REQUESTS:
-                request_in(info.name, snap.chat_id, snap, msg_id=m.id,
-                           channel=chat_channel(account, snap.chat_id))
+            held = False
+            try:
+                snap = m.get_snapshot()
+                chat = account.get_chat_by_id(snap.chat_id)
+                info = chat.get_basic_snapshot()
+                request = getattr(info, "is_contact_request", False)
+                who = snap.sender.get_snapshot()
+                sender = who.display_name
+                if not inbound_ok(account, snap.chat_id, "contact-request" if request else "message",
+                                  getattr(who, "address", None), sender):
+                    remember(m.id)
+                    account.mark_seen_messages([m])     # recorded, not mailed, as the live path
+                    continue
+                if request and ACCEPT_REQUESTS:
+                    chat.accept()
+                if is_pending(snap):
+                    held = True
+                    hold(account, m.id, snap.chat_id,
+                         "request" if request and not ACCEPT_REQUESTS else "message", not request, snap)
+                    continue
+                remember(m.id)
+                if request and not ACCEPT_REQUESTS:
+                    request_in(info.name, snap.chat_id, snap, msg_id=m.id,
+                               channel=chat_channel(account, snap.chat_id))
+                    account.mark_seen_messages([m])
+                    continue
+                log(f"SWEEP chat {snap.chat_id} <{sender}>: {(snap.text or '<no text>')[:70]}")
+                mail_in(info.name, snap.chat_id, sender, message_text(snap, ocr=not request),
+                        kind="message", dc_msg_id=m.id, dc_sender=getattr(who, "address", None),
+                        channel=chat_channel(account, snap.chat_id))
                 account.mark_seen_messages([m])
-                continue
-            if request:
-                chat.accept()
-            log(f"SWEEP chat {snap.chat_id} <{sender}>: {(snap.text or '<no text>')[:70]}")
-            mail_in(info.name, snap.chat_id, sender, message_text(snap, ocr=not request),
-                    kind="message", dc_msg_id=m.id, dc_sender=getattr(who, "address", None),
-                    channel=chat_channel(account, snap.chat_id))
-            account.mark_seen_messages([m])
+            finally:
+                if not held:
+                    remember(m.id)
     except Exception:
         log("startup sweep failed:\n" + traceback.format_exc())
 
@@ -1912,6 +2277,30 @@ def stop_on_sigterm():
 # <<< stale-live
 
 
+# >>> bot-flag: an account an older `sessionphone setup` made carries the
+# core's `bot` flag, and with it set the core accepts every contact request
+# by itself, so a stranger reached the agent as an ordinary message. Turned
+# off here, before start_io(), so every NEW stranger is a request again.
+def bot_flag_off(account):
+    """Turn the core's `bot` flag off if it is on, and say so in bot.log.
+    -> True if it was turned off. A failure is logged; the bot runs on."""
+    try:
+        if str(account.get_config("bot") or "") != "1":
+            return False
+        account.set_config("bot", "0")
+    except Exception as e:  # noqa: BLE001 - a config call never stops the bot
+        log(f"WARNING: could not turn the account's bot flag off ({type(e).__name__}: {e}): "
+            "the core may still accept strangers' contact requests by itself")
+        return False
+    log("NOTICE: turned the account's bot flag OFF (it was on, set by an older setup). "
+        "A stranger's first message is now held as a contact request, flagged, "
+        "instead of reaching the agent as an ordinary message. Strangers and "
+        "groups this account already accepted stay accepted. Chat apps no "
+        "longer show this account as a bot.")
+    return True
+# <<< bot-flag
+
+
 def main():
     # FIRST: the mail host in sessionmail's full order, its mail.json included
     # (dc_env's import took the environment only), so every address and id
@@ -1992,6 +2381,7 @@ def main():
         clear_stale_live()
         stop_on_sigterm()
         # <<< stale-live
+        bot_flag_off(account)       # bot-flag: before start_io, so no stranger is auto-accepted
         account.start_io()
         # >>> caller-keys: a callers file from an older version is pinned to
         # keys once, here (keygate.migrate: owner line only, backup kept).

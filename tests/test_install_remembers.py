@@ -56,7 +56,7 @@ def rig(monkeypatch, tmp_path, launchd, given_seat):
     root.mkdir(mode=0o700)
     monkeypatch.setenv("SESSIONPHONE_ROOT", str(root))
     monkeypatch.setenv("SESSIONMAIL_HOME", str(home / ".sessionmail"))
-    monkeypatch.setenv("SESSIONMAIL_ROOT", str(home / ".mail" / "agents"))
+    monkeypatch.setenv("SESSIONMAIL_ROOT", str(home / ".mail"))     # the mail ROOT (sessionmail 0.3.3)
     for k, v in FIRST.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(service, "plist_path", lambda name=None: tmp_path / "job.plist")

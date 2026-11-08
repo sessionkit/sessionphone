@@ -775,12 +775,6 @@ def _ask_mail_file(exe: str) -> dict[str, tuple[object, str]] | None:
         return None
 
 
-def _mail_value(var: str, value: str) -> str:
-    """The mail.json value for VAR's VALUE: `root`'s variable names the
-    agents folder, and the key holds its parent."""
-    return str(pathlib.Path(value).parent) if var == "SESSIONMAIL_ROOT" else value
-
-
 def mail_text(probe: dict | None, key: str) -> str | None:
     """The value sessionmail's own file gives KEY, as sessionmail itself takes
     it (its file_text): only from the file (FILE_SOURCES), a non-empty string,
@@ -821,7 +815,7 @@ def mail_note(var: str, value: str | None, probe: dict | None) -> str | None:
         if not in_file:
             return None
         return f"{mail_from(key, filed[1])} (not carried: the bot's `message` reads it)"
-    want = _mail_value(var, value)
+    want = value        # each variable names what its key holds (SESSIONMAIL_ROOT: the root, SM 0.3.3)
     write = f'write "{key}": {json.dumps(shown(want))} in {shown(MAIL_FILE)}'
     if probe is None:
         return (f"this shell (NOT kept: this sessionmail reads it from the environment only; "

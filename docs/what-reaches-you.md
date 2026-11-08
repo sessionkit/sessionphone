@@ -32,14 +32,17 @@ README's agent contract has the whole contract.
   JSON line each (`seq` and `via: "realtime"`, no `serial`), and only from
   an app the bot joined. Unset, it is dropped, and it is never mailed. It
   is a different file from `DC_XDC_IN`.
-- **The Guide Trail** shows the owner's words live, in their own 1:1 chat
-  only: the feed binds only a chat listed in `DC_XDC_FEED_CHATS`.
+- **The Guide Trail** shows both sides live, the owner's words and this
+  agent's replies, in the owner's own 1:1 chat only: the feed binds only a
+  chat listed in `DC_XDC_FEED_CHATS`.
 
   ```bash
   dc-send-file CHAT_ID "$(sessionphone app build guide-trail)"   # ack: msg N
   dc-xdc-realtime --feed N                                         # stream into it
   dc-xdc-realtime --feed N --stop                                  # stop
   ```
+
+  [Mini apps][mini-apps] has the walk-through.
 - **A mail the bot could not send is kept** in `~/.sessionkit/phone/state/undelivered/`
   and retried, call turns included; a call mail is never sent twice.
   `dc-live` and `sessionphone bot status` say how many wait and how many
@@ -51,3 +54,4 @@ README's agent contract has the whole contract.
 
 [skill]: ../skills/sessionphone/SKILL.md
 [readme]: ../README.md
+[mini-apps]: mini-apps.md

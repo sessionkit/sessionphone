@@ -34,11 +34,16 @@ HOST = "testhost"
 FAKE_MESSAGE = r'''#!{python}
 import json, os, pathlib, sys
 a = sys.argv[1:]
-# as sessionmail before SM-910: `path` and `setup` read only the legacy
-# SESSION_MAIL_ROOT; `send` (the drop) reads SESSIONMAIL_ROOT first
-legacy = os.environ.get("SESSION_MAIL_ROOT")
-fresh = os.environ.get("SESSIONMAIL_ROOT")
-root = pathlib.Path((fresh if a[:1] == ["send"] else None) or legacy or os.environ["FAKE_ROOT"])
+# as sessionmail 0.3.3: every verb reads ONE variable, SESSIONMAIL_ROOT, and it
+# names the mail ROOT: boxes sit in agents/ while that is a folder and stores/
+# is not, else in stores/. Unset, FAKE_ROOT is the fake's own boxes folder.
+given = os.environ.get("SESSIONMAIL_ROOT")
+if given:
+    top = pathlib.Path(given)
+    old = top / "agents"
+    root = old if old.is_dir() and not (top / "stores").is_dir() else top / "stores"
+else:
+    root = pathlib.Path(os.environ["FAKE_ROOT"])
 with open(os.environ["FAKE_LOG"], "a") as fh:
     fh.write(json.dumps(a) + "\n")
 if a[:1] == ["path"]:
@@ -286,40 +291,32 @@ def test_no_cc_asks_nothing(drop):
     assert drop.argvs() == []
 
 
-# ---- SM-910 workaround: SESSIONMAIL_ROOT set, the box check and the drop agree ----
+# ---- SESSIONMAIL_ROOT set: one variable, the box check and the drop agree ----
 
 def test_sessionmail_root_set_the_box_check_and_the_drop_agree(drop, tmp_path, monkeypatch):
-    """`message path`/`setup` read only SESSION_MAIL_ROOT (SM-910) while the
-    drop reads SESSIONMAIL_ROOT: the box tools get both, so the box the start
-    makes is the box the send delivers to, and the Cc guard sees it too."""
-    other = tmp_path / "other" / "agents"
-    other.mkdir(parents=True)
+    """sessionmail reads one root variable in every verb (0.3.3), and it names
+    the mail root: the box the start makes is the box the send delivers to,
+    and the Cc guard sees it too. A fresh root gets stores/."""
+    other = tmp_path / "other"
+    other.mkdir()
     monkeypatch.setenv("SESSIONMAIL_ROOT", str(other))
     env = {**os.environ, "DC_MAILTO": f"claude@{HOST}"}
     box = seat.have_box(env, env)
-    assert box.path == str(other / "claude") and not (drop.root / "claude").exists()
-    (other / "guest" / "new").mkdir(parents=True)
+    boxes = other / "stores"
+    assert box.path == str(boxes / "claude") and not (drop.root / "claude").exists()
+    (boxes / "guest" / "new").mkdir(parents=True)
     sent = seatmail.send(f"claude@{HOST}", "s", "b", cc=[f"guest@{HOST}"])
     assert sent.ok and sent.dropped == [], sent.error
-    assert len(list((other / "claude" / "new").glob("*"))) == 1
-    assert len(list((other / "guest" / "new").glob("*"))) == 1
+    assert len(list((boxes / "claude" / "new").glob("*"))) == 1
+    assert len(list((boxes / "guest" / "new").glob("*"))) == 1
 
 
-def test_without_the_root_workaround_they_would_disagree(drop, tmp_path, monkeypatch):
-    """The control: with no SESSION_MAIL_ROOT mirror, `path` looks in the
-    default root while the drop delivers under SESSIONMAIL_ROOT."""
-    other = tmp_path / "other" / "agents"
-    (other / "claude" / "new").mkdir(parents=True)
-    monkeypatch.setenv("SESSIONMAIL_ROOT", str(other))
-    monkeypatch.setattr(seatmail, "root_env", dict)
-    assert not seatmail.box_there("claude")
-
-
-def test_root_env_mirrors_only_a_set_root():
-    assert seatmail.root_env({"SESSIONMAIL_ROOT": " /r "})["SESSION_MAIL_ROOT"] == "/r"
-    assert "SESSION_MAIL_ROOT" not in seatmail.root_env({"SESSIONMAIL_ROOT": ""})
-    assert seatmail.root_env({"SESSION_MAIL_ROOT": "/old"}) == {"SESSION_MAIL_ROOT": "/old"}
-    assert seat.tool_env({"SESSIONMAIL_ROOT": "/r", "PATH": "/bin"}, "/x/message")["SESSION_MAIL_ROOT"] == "/r"
+def test_the_tools_get_the_root_as_given_and_no_retired_name():
+    """The SM-910 mirror is gone: `message path`/`setup` read SESSIONMAIL_ROOT
+    themselves, and SESSION_MAIL_ROOT is retired (never read, never set)."""
+    env = seat.tool_env({"SESSIONMAIL_ROOT": "/r", "PATH": "/bin"}, "/x/message")
+    assert env["SESSIONMAIL_ROOT"] == "/r" and "SESSION_MAIL_ROOT" not in env
+    assert not hasattr(seatmail, "root_env")
 
 
 # ---- 3. sessionmail's warnings, once per run ---------------------------------------

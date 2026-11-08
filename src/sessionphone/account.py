@@ -109,11 +109,18 @@ def setup(display_name: str, status: str = "", relay_qr: str | None = None) -> d
     chatmail relay that answers fastest, which is what makes this work on
     someone else's Mac. A `DCACCOUNT:` QR names a specific relay instead.
     Idempotent: a second run keeps the account and prints the invite again.
+
+    The core's `bot` flag is left unset on purpose. With it set, the core
+    accepts every contact request by itself: a stranger who has the address
+    lands in an accepted chat, and the bot can no longer tell them from its
+    owner, so their message reached the agent unflagged. Unset, a stranger's
+    first message (1:1 or group) stays a contact request, which the bot holds
+    and flags. The bot turns the flag off at start on an account an older
+    setup made (bridge/bot.py, bot_flag_off).
     """
     for account in _open(create=True):
         fresh = not account.is_configured()
         if fresh:
-            account.set_config("bot", "1")
             account.init_transports(relay_qr) if relay_qr else account.init_transports()
         account.set_config("displayname", display_name)
         if status:

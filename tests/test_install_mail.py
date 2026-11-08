@@ -59,7 +59,7 @@ def test_empty_sessionmail_sendmail_is_absent(clean):
 
 MAIL_ROUTE = {"SESSIONMAIL_SENDMAIL": "/opt/mta/sendmail",
               "SESSIONMAIL_RELAY_DOMAIN": "relay.example", "SESSIONMAIL_HOME": "/h/.sessionmail",
-              "SESSIONMAIL_ROOT": "/h/.mail/agents", "SESSIONMAIL_HOST": "mac"}
+              "SESSIONMAIL_ROOT": "/h/.mail", "SESSIONMAIL_HOST": "mac"}
 # the installing seat's own settings, read by sessionmail but never the bot's
 SEAT_KEYS = {"SESSIONMAIL_SUBSCRIBE": "proj+task.foreman", "SESSIONMAIL_FROM_NAME": "Some Seat",
              "SESSIONMAIL_PAGE_RULES": "to:me page", "SESSIONMAIL_PAGER_REQUIRED": "1",
