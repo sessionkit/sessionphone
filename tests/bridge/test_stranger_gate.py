@@ -179,10 +179,13 @@ def test_a_config_call_that_fails_is_logged_and_never_stops_the_bot(world):
 
 
 def test_main_turns_the_flag_off_before_start_io():
-    """main() cannot run here (rpc-server, account); its source is the check."""
+    """main() cannot run here (rpc-server, account); its source is the check.
+    The order is bot_flag_off, then core_limit (download-policy point A: it
+    reads the flag, so it must see it off), then start_io, nothing between."""
     lines = [line.strip() for line in inspect.getsource(bot.main).splitlines()]
     flag = next(i for i, line in enumerate(lines) if line.startswith("bot_flag_off(account)"))
-    assert lines[flag + 1] == "account.start_io()"
+    assert lines[flag + 1].startswith("core_limit(account)"), lines[flag + 1]
+    assert lines[flag + 2] == "account.start_io()"
 
 
 # -- a stranger on the default profile: held and flagged, image not read -------

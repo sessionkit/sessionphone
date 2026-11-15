@@ -14,6 +14,359 @@ under the new version.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
+### A download size and kinds, set on the host, and a fetch for what was left
+
+- The host now sets the largest file the bot downloads and passes on by
+  itself, `download_limit` (16 MB by default, so a full-resolution phone
+  photo comes whole), and the kinds it passes on, `download_types`
+  (`image`, `sticker`, `voice`, `audio`, `video`, `file`, `webxdc`,
+  `vcard`; every kind by default). The bot also tells Delta Chat the limit,
+  so a big encrypted file stays on the server.
+- A file over the limit, or of a kind that is off, is never dropped in
+  silence. It is mailed with the `[partial, not downloaded yet ...]` line,
+  its reason in brackets, and no path. Over the limit, the message is
+  mailed at once rather than held for a file that will not come. A kind
+  that is off is not saved, read or transcribed.
+- New tool, `dc-fetch MSG_ID`: fetch a file the bot mailed as not
+  downloaded, whether the size or kind settings turned it away or its
+  download timed out or failed. The message is then mailed whole, once.
+  Any other id is refused, and so is a contact request until the owner
+  accepts the chat. The partial line ends `Fetch it: dc-fetch N`, or, for
+  a stranger's file, `To have it, ask your owner.`
+
+### Each file is saved to one folder, and a stranger's apart
+
+- A file the bot passes on is copied to `save_dir`, by default
+  `attachments` in the bot's home, as `chat-<chat id>/<msg id>-<name>`, and
+  the attachment line names that copy rather than Delta Chat's own. Folders
+  are 0700 and files 0600. Two files with one name never overwrite each
+  other. The folder is a stable place for another program to watch.
+- A stranger's file, from a contact request, is saved under `untrusted/`
+  in that folder, never beside a trusted one, and keeps its `- UNTRUSTED`
+  mark. Its image is still never read.
+
+### The three keys are host-only
+
+- `download_limit`, `download_types` and `save_dir` are read from
+  `phone.json` and its drop-ins alone, never from the environment or from
+  any agent, seat or session settings: an agent cannot change them. Each
+  value is a JSON string. `sessionphone bot install --set KEY=VALUE` writes
+  one, `_locked` holds one, and `bot status` prints all three, each with
+  the file that set it.
+- A value the bot cannot use takes its default and is logged; a setting
+  never stops the bot. `bot install` also installs the package's schema
+  for `phone.json` beside it.
+
+### The bot says where its call sockets are
+
+- While its call legs serve, the bot keeps a symlink to each call socket it
+  bound in one fixed folder: `~/.sessionkit/phone/run/<agent>/call-mouth.sock`
+  and `call-ears.sock`, or `run/<agent>.<profile>/` for a named profile. The
+  mouth and the ears can find a bot's sockets there whatever its root is,
+  including a root set only in its launchd job or in `phone.json`.
+- The link points at the socket actually bound, so `DC_MOUTH_SOCK` and
+  `DC_EARS_SOCK` are covered. `run/` and each entry are 0700. A restarted
+  bot replaces its own stale link; at exit it removes the link only if it
+  is still its own.
+- The web demo (`sessionphone web --legs`) publishes nothing there. A folder
+  that cannot be written is logged, and the bot serves its sockets anyway.
+- The folder is documented as a stable contract for readers in
+  `docs/calls.md`.
+
+### A second call on the same chat is the live call
+
+- When a caller rang again while an earlier call in the chat was still held
+  open, `dc-say --call` with the new call's id was refused as "over", while
+  a plain `dc-say` was spoken twice, once into each call. The new call's
+  first log lines were also tagged with the old call's id.
+- The newest call in a chat is now the one live call: `dc-live`,
+  `dc-say --call`, `dc-say` and `dc-invite` all name it, and a line is
+  spoken once, into it, as is a mail on a stale call root. `dc-say --call`
+  with the old call's id is refused, and nothing is sent or spoken.
+- Each call's log lines carry its own id from its first line, and an old
+  call closing no longer clears the newer call's tag or `call-live.json`.
+  When the newest call ends while an older one is still live, the older one
+  takes both back, so `dc-live` and `dc-say --call` still agree.
+- A connected call with no audio from the caller for 5 minutes no longer
+  counts as live. It is not hung up for that.
+- With recording on, the second call recorded into the first call's
+  `full-in.wav` and `full-out.wav`, in the first call's directory, and the
+  first call's hang-up ended the second call's recording. Each call now
+  keeps its own recording, closed only by its own hang-up or by recording
+  being turned off during that call.
+
+### `bot install` says when the bot will speak in the default voice
+
+- With no `DC_VOICE`, the bot speaks in the default voice, `af_sky`, and
+  nothing said so. On a Mac shared with other agents that may already be
+  another agent's voice, so a caller heard the wrong person.
+- The `speaking:` line of `bot install` and `bot status` now says, when
+  the job sets no `DC_VOICE` (nor its deprecated alias `PIP_CHAT_VOICE`),
+  that the bot will speak in the default voice and may sound like another
+  agent. It says to set `DC_VOICE` (a Kokoro id, or a clone directory under
+  `DC_VOICES_ROOT`), then run `sessionphone bot install` again.
+- With `DC_VOICE` set, or `DC_TTS=apple`, the line is unchanged.
+
+### A call whose connection dies is ended on the phone too
+
+- When a call's connection died with no hang-up from the caller (the
+  caller's audio or network went away), the bot closed its own side but
+  never told Delta Chat, so the caller's app kept showing the call live and
+  they could talk into a dead call.
+- The bot now ends such a call in Delta Chat once, so the caller's app
+  shows it over. The drop line still posts to the chat. A caller who hangs
+  up is unchanged: nothing more is sent.
+
+### `bot status` says when a dc-* tool on the PATH is not this install's
+
+- A shell runs the first `dc-*` of a name on the PATH. When an older copy
+  sat ahead of this install's, it answered instead, and wrongly: `dc-live`
+  said the bot was not running while it ran, `dc-say NAME` failed, and
+  `dc-log 12` said "unknown arg". Nothing said why.
+- `sessionphone bot status` now has a `dc tools:` line. It names each `dc-*`
+  tool on the PATH that is not this install's own copy, the folder it is
+  in, where it links, this install's copies, and how to fix it. When every
+  one is this install's, it says ok. It never changes the exit code.
+
+### A caller's mute reaches the agent on the call
+
+- When the caller muted their microphone on a call, the bot only logged it,
+  so a muted caller could talk for minutes with nobody hearing and no agent
+  knowing why. The call looked like a silent or dropped one.
+- Now a mute is one `MUTED <caller>` line to the agent, and an unmute after
+  it one `UNMUTED <caller>` line, both threaded on the call. The same state
+  again sends nothing more. The bot says nothing aloud: the agent decides
+  what the caller hears.
+
+### A bot under a root of its own keeps its logs in that root
+
+- A bot run with its own root (`DC_ROOT`, `SESSIONPHONE_ROOT`, or a root
+  `bot install` keeps in `phone.json`), such as a test bot or a second bot,
+  wrote `bot.log` and `bot.launchd.log` into the default bot's folder,
+  `~/.sessionkit/phone/log/<agent>/`.
+- Such a bot now keeps both logs in its root, `<root>/log/<agent>/`
+  (`<root>/log/<agent>/<profile>/` for a named profile). `bot status`,
+  `dc-log` and the `dc-*` tools read them there.
+- The default root, `~/.sessionkit/phone/state/` (or the old
+  `~/.sessionphone`), is judged by its path, however it is named, and its
+  logs stay in `~/.sessionkit/phone/log/<agent>/`. `DC_LOG` still wins.
+- A job installed before this change keeps writing its old `bot.launchd.log`
+  until `sessionphone bot install` runs again. No log is moved or deleted.
+
+### A bridged mail's reply line runs this install's dc-say
+
+- The footer told the agent `dc-say NAME 'your reply'`, the word bare, so
+  the agent's shell ran the first `dc-say` on its PATH. When another tool's
+  copy came first, it answered instead, refused the channel NAME, and the
+  reply was not sent.
+- The footer now names this install's own `dc-say` by its full path, in
+  every form: a channel name, a chat id, `--quote`, a call's `--call`
+  fallback, and a second profile's `DC_OUTBOX=...` line. `DC_SAY`, set, is
+  still used exactly as given.
+- A group job's ack (`made group ...`) said `then dc-say NAME TEXT`, the
+  same bare word. It now names the same `dc-say` the footer does.
+
+### `dc-say --quote` answers a chat line as a quote-reply
+
+- `dc-say --quote N CHAT "text"` posts the text as a quote-reply to message
+  N, so in a group with several agents the reader sees which line each one
+  answers. It combines with `--call`, `--text-only`, `--html`, `--who` and
+  `--profile`; the quote is on the chat message only, never spoken.
+- The bot checks N: a message in another chat, or no such message, is
+  refused (exit 3, the reason on stderr and in the bot log), and nothing is
+  sent or spoken. N that is not a positive number is a usage error (exit 1,
+  nothing queued).
+- The footer of a bridged chat mail that carries `X-Delta-Chat-Msg-Id` now
+  reads `dc-say --quote N NAME 'your reply'`, so an agent answers the line it
+  got without reading headers. A mail with no message id keeps the plain
+  form.
+- A bot started before this change does not read the new job key: the tool
+  refuses a `--quote` job and says to restart the bot.
+
+### `bot install` on Linux says plainly it is macOS only
+
+- `bot install`, `bot uninstall` and `bot status` drive the bot's launchd
+  job. On a host without launchd (Linux) they failed with a raw
+  `[Errno 2]` about `launchctl`, and `bot status` and `bot uninstall`
+  printed a traceback.
+- Each now refuses at once (exit 2) in one line, and install writes
+  nothing first:
+
+  ```text
+  sessionphone bot install: macOS only (launchd). On Linux, run the bot with `sessionphone bot run`.
+  ```
+
+- On a Mac whose `PATH` has no `launchctl`, the line says to put `/bin` on
+  `PATH` instead.
+- `bot run` is unchanged and works on Linux.
+
+### The dc-* tools are on the PATH after a kit install
+
+- After a sessionkit install, `dc-say` and the other `dc-*` tools were not
+  on the PATH. They sat only in the kit's own tool folder, so an agent told
+  to run `dc-say` could not find it. `uv tool install sessionphone` was not
+  affected.
+- Each `dc-*` tool is now a console script, a command the kit can put on
+  the PATH as it does `sessionphone`. Once the kit declares them, a kit
+  install puts every `dc-*` tool on the PATH with no extra step.
+- The tools themselves are unchanged. `dc-env` is no longer on the PATH:
+  the tools read it, and no one runs it by name.
+
+### A call that drops says so in its chat
+
+- When a connected call ends and the bot did not end it (the connection
+  failed, or the phone ended it), the bot posts one line to the call's chat:
+  when it dropped, how long the call ran, and how long before the end the
+  caller was last heard, for example
+  `call dropped 14:05:30 after 600 s; last audio heard 20 s before the close`.
+  Someone talking into a call that has died now learns it from the chat.
+- The line is text only, never spoken, and goes through `channels.txt` like
+  every in-call post. A call ended by `dc-hangup`, a decline, or the bot
+  stopping posts nothing. A send that fails is logged and never holds up the
+  transcript.
+
+### The log says why a call ended
+
+- The `closing msg <n>: ...` line in `bot.log` now names the path that
+  closed the call: `consent failed after <n> misses` when the ICE library's
+  consent checks went unanswered, `remote closed` when the far side ended
+  it, or `hung up by <agent>`. Before, different drops printed the same
+  line.
+- A call this side ended reads `ended by this side (...)`, not `remote
+  closed`, when the far side's end-of-call event, the echo of this side's own
+  hang-up, reaches the close first.
+- When the caller's audio track ended before the close, the line adds it,
+  with the ICE state at that moment and how long before the close it
+  happened.
+- Logging only: no call ends sooner or later than before.
+
+### An owner left unpinned by the key upgrade is told, by mail
+
+- At the first start after an update, the one-time key upgrade pins the
+  owner line to the one key contact with its address. With none (or two or
+  more) it pinned nothing, and said so only in the bot's log: the owner could
+  no longer ring, and the bot wrote to no 1:1 chat with the owner, with
+  nobody told.
+- Now an owner line the upgrade leaves unpinned, in `callers.txt` or
+  `channels.txt`, is mailed to the agent once, with the fix in words: pin the
+  key by hand (`sessionphone callers pin ADDR --key FPR`, FPR from the owner's
+  phone, Encryption), or re-link with `sessionphone link` and pin. Both files
+  at one start make one mail.
+- A refused send is tried again at the next start until one is accepted; an
+  owner pinned by then is not mailed. No later start mails it again.
+
+### A first "call me" on a fresh install runs clean
+
+- The skill checks "already set up?" with one quiet line that prints `set
+  up` or `not set up` and always exits 0, so a fresh install shows no red
+  error. It tells the agent never to probe by hand, and to say a failed
+  command in words, never paste the raw error.
+- Step 1 no longer asks a question with one answer: the agent names itself
+  "Claude" unless told otherwise, and says that
+  `sessionphone setup --name "NEW"` changes it.
+- Someone not set up is told in one line what Delta Chat is: a free chat app
+  for their phone.
+- The agent says hearing works only when it read a `hearing:` line that says
+  `yes` in this run; otherwise it says nothing about hearing.
+- Step 5 carries the phone walk-through itself, so a first call reads no
+  file outside the user's working directory. The longer
+  `skills/sessionphone/references/user-setup.md` stays for people reading
+  the repo.
+- Step 6 expects the phone to join before the walk-through ends: `link`
+  exiting 0 is the join, and the agent goes on without re-checking who
+  joined.
+- The skill's call-troubleshooting tip moved to the README's
+  "Call troubleshooting" section, which now opens its never-connects part
+  with the `grep` to start from.
+
+### A call has one greeting, not two
+
+- On a call the bot answers, the agent was not told the caller had been
+  greeted, so it often greeted them too. The caller heard two greetings
+  back to back.
+- The `CALL CONNECTED` mail now says the caller has already been greeted,
+  quotes the line the bot said (the greeting, the voicemail greeting, the
+  hello on a call the bot made, or a line chosen for the call), and asks
+  the agent to reply instead of greeting again. The skill and the calls
+  guide say the same.
+
+### The README's links work on the PyPI page
+
+- PyPI shows the README with no repository around it, so its links into
+  `docs/` led nowhere there.
+- `make publish` now uploads what `make pypi-dist` builds: the dists come
+  from the release tag, with the README's relative links pinned to that
+  tag's files on GitHub, and both the wheel and the sdist are checked for
+  any relative link left. The README in the repository keeps its relative
+  links.
+
+### The log says why a call was slow to connect
+
+- When a call's ICE checks end, `bot.log` gets an `ice checks:` line: how
+  long checking took, when the caller chose its path and what state that
+  pair was in, and how many of the caller's checks reached a pair whose own
+  check was still running. One more line per pair type gives how many pairs
+  succeeded or failed, and when. All in seconds, by pair type only: never an
+  address, a port or a credential.
+- Logging only: no call connects sooner or later than before.
+
+### `make pypi-dist` refuses a public tag on another commit
+
+- The check before a PyPI build asked only whether the release tag was on
+  the public repository. A public tag on a different commit passed, and the
+  README links on PyPI then pointed at files that were not the ones built.
+- It now refuses unless the local tag and the public tag are the same
+  commit, and names both commits when they differ.
+
+### `bot install` keeps the install when the seat agent's service file is not written
+
+- sessionmail's `message seat agent --install` now exits 3 when the seat's
+  agent is installed and answers, but its service file
+  (`~/.sessionkit/mail/services/seat-agents/<seat>.json`) could not be
+  written. `bot install` took any non-zero as a failure, so it stopped and
+  said nothing of the bot was installed, while the agent was running.
+- On exit 3 `bot install` now goes on with the signer the agent printed,
+  and says one warning line: it names the service file, quotes
+  sessionmail's `FAILED` line, and says to run `message seat agent
+  --install <seat>` again to write the file. Exit 3 with no socket or key
+  printed is still a failure, and exits 1 and 2 are unchanged.
+
+### `dc-* -h` answers before it reads any phone config
+
+- `dc-say -h`, `dc-call --help` and every other dc-* tool now print their
+  help and exit 0 before they look up the bot, its root or its log. Asking
+  for help no longer asks sessionmail, reads `phone.json` or starts the
+  package's Python, and no longer says `bot claude (the default: ...)` on
+  stderr. Help works on a host with no phone config at all.
+- Only the first argument counts, as before: `-h` later in the arguments is
+  not help.
+
+### Every alert the bot mails carries `X-Delta-Chat-Alert`
+
+- The bot's own alerts (a refused channels list, an owner left with no key
+  pinned) are marked with `X-Delta-Chat-Alert`, so a page rule can tell them
+  from a chat or call line and let them ride. Any other alert the bot sends
+  now carries it too, as `bot`.
+- Chat, request, reaction, app and call mail never carry it, and an alert
+  carries no `X-Delta-Chat-Kind`.
+
+### A call never speaks an auto-reply
+
+- Mail threaded to a live call whose `Auto-Submitted:` header is anything but
+  `no` (an out-of-office or other autoresponder) is no longer read aloud or
+  posted to the call's chat. The bot logs one line naming its Message-ID, and
+  nothing of what it says. A reply with `Auto-Submitted: no`, or none, is
+  spoken as before.
+
+### The release archive leaves out `openspec/`
+
+- `openspec/config.yaml` only points the openspec tool at the project's
+  private spec store, so it meant nothing to a reader of the release archive.
+  The archive (`git archive`, the GitHub tarball) no longer carries
+  `openspec/`; it stays in the repository.
+
 ## [0.3.3] - 2026-11-08
 
 ### A voice note in M4A or Ogg reaches the agent as its words

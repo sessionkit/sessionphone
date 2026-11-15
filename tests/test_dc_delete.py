@@ -167,5 +167,5 @@ def test_help_prints_the_header(tmp_path):
 def test_in_the_wheel():
     """The README, the docs and the skill name dc-delete, so a wheel ships it
     (once bin/ only, like dc-react; tests/test_wheel_dc_tools.py holds the set)."""
-    link = BIN.parent / "wheel-bin" / "dc-delete"
-    assert link.is_symlink() and link.readlink() == Path("../bin/dc-delete")
+    link = BIN.parent / "src" / "sessionphone" / "dcbin" / "dc-delete"
+    assert link.is_symlink() and link.readlink() == Path("../../../bin/dc-delete")

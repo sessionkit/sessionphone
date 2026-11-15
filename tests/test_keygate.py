@@ -232,7 +232,7 @@ def test_migrate_refuses_to_choose_between_two_keys(tmp_path):
     said = []
     acc = kf.Account([kf.Contact(10, "owner@example.org", kf.K1), kf.Contact(11, "owner@example.org", kf.K2)])
     got = keygate.migrate(acc, f, said.append)
-    assert [d.kind for d in got] == ["ambiguous"]
+    assert [(d.kind, d.owner) for d in got] == [("ambiguous", True)]
     assert keygate.read_caller_entries(f)[0].key is None
     line = next(s for s in said if "AMBIGUOUS" in s)
     assert kf.FPR_K1 in line and kf.FPR_K2 in line and "none pinned" in line
@@ -247,6 +247,7 @@ def test_migrate_never_pins_a_non_owner_line_unattended(tmp_path):
     acc = kf.Account([kf.Contact(10, "owner@example.org", kf.K1), kf.Contact(11, "ann@example.org", kf.K2)])
     got = keygate.migrate(acc, f, said.append)
     assert [(d.addr, d.kind) for d in got] == [("owner@example.org", "pinned"), ("ann@example.org", "unpinned")]
+    assert [d.owner for d in got] == [True, False]      # the start alert reads which is the owner's
     assert keygate.read_caller_entries(f)[1].key is None
     assert any(f"callers pin ann@example.org --key {kf.FPR_K2}" in s for s in said)
 

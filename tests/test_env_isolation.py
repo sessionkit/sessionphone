@@ -37,16 +37,14 @@ def test_import_time_settings_are_a_bare_install(suite_home, monkeypatch) -> Non
 
 def test_no_seat_variable_survives_into_a_test() -> None:
     # the autouse tripwires set DC_SENDMAIL, DC_MESSAGE, DC_SIGNER_* and DC_STT_URL per test. And
-    # importing bridge/bot.py fills an unset DC_AGENT from sys.argv[1] (the launchd
-    # job names the agent there); under pytest that is pytest's own argument, never
-    # the seat's. And home_is_tmp sets SESSIONPHONE_ROOT to this test's tmp HOME's
-    # default root (PHONE-264), never the seat's. Nothing else may be set.
+    # home_is_tmp sets SESSIONPHONE_ROOT to this test's tmp HOME's default root
+    # (PHONE-264), never the seat's. Nothing else may be set: not even the DC_AGENT
+    # importing bridge/bot.py fills from sys.argv[1] (pytest's own argument), which
+    # the conftest puts back after collection and after every test (PHONE-332).
     tripwires = {"DC_SENDMAIL", "DC_MESSAGE", "DC_SIGNER_SOCK", "DC_SIGNER_PUB", "DC_STT_URL"}
     left = {k: v for k, v in os.environ.items()
             if (k in ("CLAUDE_CODE_AGENT", "SESSIONPHONE_ROOT") or k.startswith(("DC_", "PIP_CHAT_")))
             and k not in tripwires}
-    if len(sys.argv) > 1 and left.get("DC_AGENT") == sys.argv[1]:
-        del left["DC_AGENT"]
     if left.get("SESSIONPHONE_ROOT") == os.path.join(os.environ["HOME"], ".sessionkit", "phone", "state"):
         del left["SESSIONPHONE_ROOT"]
     assert left == {}

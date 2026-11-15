@@ -276,9 +276,9 @@ def test_with_pyav_a_failed_decode_is_never_posted_raw(tmp_path, tmpwav, posted,
     assert not any("posting it as it came" in line for line in logged)
 
 
-def snap(path, mime="audio/mp4", name="voice-message.m4a"):
+def snap(path, mime="audio/mp4", name="voice-message.m4a", quote=None):
     return SimpleNamespace(id=7, text="", file=path, file_mime=mime, file_name=name,
-                           view_type="Voice", quote=None)
+                           view_type="Voice", quote=quote)
 
 
 def test_the_agents_mail_says_why_the_note_was_not_decoded(tmp_path, tmpwav, posted, logged):
@@ -301,6 +301,36 @@ def test_a_failed_post_keeps_todays_line(tmp_path, tmpwav, monkeypatch, logged):
     assert text == ("[voice note - transcription failed]\n"
                     f"[attachment: voice-message.m4a (audio/mp4) at {note}]")
     assert leftovers(tmpwav) == []
+
+
+# ---- a failed note sent as a REPLY keeps its quote (PHONE-278) -------------
+# Every other branch of message_text() starts with quote_block(snap); the
+# failed-note branch did not, so the agent got no "> in reply to" line.
+
+QUOTE = {"authorDisplayName": "Owner", "text": "shall I book it?", "messageId": 412}
+QUOTED = "> in reply to Owner (msg 412):\n> shall I book it?\n\n"
+
+
+def test_a_failed_post_sent_as_a_reply_keeps_its_quote(tmp_path, tmpwav, monkeypatch, logged):
+    """The speech server returns nothing: the quote, then today's two lines."""
+    monkeypatch.setattr(bot.stt, "transcribe", lambda *a, **k: None)
+    note = make_m4a(tmp_path / "voice-message.m4a")
+    text = bot.message_text(snap(note, quote=QUOTE))
+    assert text == (QUOTED + "[voice note - transcription failed]\n"
+                    f"[attachment: voice-message.m4a (audio/mp4) at {note}]")
+
+
+def test_an_undecodable_note_sent_as_a_reply_keeps_its_quote(tmp_path, tmpwav, posted, logged):
+    """stt.Undecodable: the quote, then the failed line with its reason."""
+    junk = tmp_path / "voice-message.m4a"
+    junk.write_bytes(b"\x00" * 512)
+    text = bot.message_text(snap(str(junk), quote=QUOTE))
+    assert text.startswith(QUOTED)
+    first, second = text[len(QUOTED):].split("\n")
+    assert first.startswith("[voice note - transcription failed: it could not be decoded (")
+    assert first.endswith(")]")
+    assert second == f"[attachment: voice-message.m4a (audio/mp4) at {junk}]"
+    assert posted == []
 
 
 def test_a_decoded_note_reaches_the_agent_as_its_words(tmp_path, tmpwav, posted, logged):

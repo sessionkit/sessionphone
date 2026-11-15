@@ -607,18 +607,37 @@ def tts_mode(environ: dict) -> str:
     return (dc_env._get(environ, "TTS") or "auto").strip().lower()
 
 
+def default_voice_lines(environ: dict) -> list[tuple[str, str]]:
+    """The paragraph that says the bot will speak in the default voice: one,
+    when the job sets no DC_VOICE (nor its deprecated alias), else none. On
+    a Mac that runs more than one agent's bot, that default may already be
+    another agent's voice, so the caller would hear the wrong person
+    (PHONE-298)."""
+    if dc_env._get(environ, "VOICE"):
+        return []
+    return [_p(f"No DC_VOICE is set, so the bot speaks in the default voice, "
+               f"{dc_env.DEFAULT_VOICE}. On a Mac shared with other agents, that may be "
+               "another agent's voice, and a caller would hear the wrong person. To give "
+               "this bot its own, set DC_VOICE (a Kokoro id, or a clone directory under "
+               f"DC_VOICES_ROOT), then run `{REINSTALL}` again.")]
+
+
 def speaking_lines(environ: dict, head: str = SPEAK_HEAD) -> list[str]:
     """The `speaking:` lines for a bot run with `environ`: is there an ffmpeg
     to turn the speech server's replies into call audio? A NO names ffmpeg,
-    says spoken replies go as chat text, and gives the fix as a command."""
+    says spoken replies go as chat text, and gives the fix as a command.
+    With no DC_VOICE in `environ`, they also name the default voice the bot
+    will speak in (default_voice_lines). DC_TTS=apple speaks by macOS say,
+    which DC_VOICE does not choose, so it says nothing of the voice."""
     mode = tts_mode(environ)
     ff = ffmpeg_for(environ)
     if mode == "apple":
         return _render([_p("yes. DC_TTS=apple: replies are spoken by macOS say, "
                            "which needs no ffmpeg.")], head)
+    voice = default_voice_lines(environ)
     if ff.ok:
         return _render([_p(f"yes. ffmpeg at {ff.path} ({ff.came}) turns the speech server's "
-                           "replies into call audio.")], head)
+                           "replies into call audio."), *voice], head)
     if ff.setting:
         where = (f"not on the job's PATH ({ff.job_path})" if os.sep not in ff.path
                  else "not a file the bot can run")
@@ -636,6 +655,7 @@ def speaking_lines(environ: dict, head: str = SPEAK_HEAD) -> list[str]:
         _p(f"NO. {looked} The bot turns each spoken reply from the speech server into call "
            "audio with ffmpeg, so every spoken reply will fail and go to the caller as chat text "
            f"instead.{when}"),
+        *voice,
         _p(fix),
         _cmd(FFMPEG_FIX),
         _cmd(REINSTALL),

@@ -1,8 +1,10 @@
-"""PHONE-168, PHONE-172: the release archive leaves CLAUDE.md and design/ out.
+"""PHONE-168, PHONE-172, PHONE-336: the release archive leaves CLAUDE.md,
+design/ and openspec/ out.
 
 CLAUDE.md is agent context for this checkout, not for a plugin user, and the
 repo root is the plugin root. design/ holds the maintainers' internal notes.
-`.gitattributes` marks both export-ignore, so `git archive` (and the GitHub
+openspec/ holds config.yaml, a pointer to the project's private OpenSpec store
+(the kit's rule, SK-223, copied). `.gitattributes` marks all three export-ignore, so `git archive` (and the GitHub
 tarball) drops them while they stay in the tree. A shipped doc must then not
 point into design/: that guard reads files only, so it runs in an archive too.
 
@@ -11,9 +13,9 @@ the rule fails before it is committed. Outside a git checkout (an sdist, say)
 the checks skip, with a reason.
 
 A git clone of the export is a checkout too, but the export already dropped
-CLAUDE.md and design/. So a test about an export-ignored input keys on that
+CLAUDE.md, design/ and openspec/. So a test about an export-ignored input keys on that
 input being in the tree, never on .git alone: absent, it skips with a reason.
-In the private checkout both are present, so every test here runs.
+In the private checkout all are present, so every test here runs.
 """
 import io
 import shutil
@@ -72,11 +74,12 @@ def test_claude_md_is_export_ignored():
                                   "skills/sessionphone/SKILL.md",
                                   "skills/sessionphone/CLAUDE.md",
                                   "skills/sessionphone/design/notes.md",
-                                  "src/design/notes.md"])
+                                  "src/design/notes.md",
+                                  "skills/sessionphone/openspec/config.yaml"])
 def test_the_rule_is_anchored_to_the_root(path):
-    """Only the root CLAUDE.md and the root design/ are dropped: the rest
-    still ships, and a nested CLAUDE.md or design/ would not be caught by the
-    anchored `/CLAUDE.md` and `/design/` lines."""
+    """Only the root CLAUDE.md, design/ and openspec/ are dropped: the rest
+    still ships, and a nested CLAUDE.md, design/ or openspec/ would not be
+    caught by the anchored `/CLAUDE.md`, `/design/` and `/openspec` lines."""
     assert export_ignore(path) == "unspecified"
 
 
@@ -97,17 +100,54 @@ def test_design_notes_are_export_ignored():
         assert export_ignore(path) == "set", path
 
 
+def openspec_files():
+    return git("ls-files", "-z", "--", "openspec").split("\0")[:-1]
+
+
 @needs_checkout
-def test_the_archive_drops_design_and_nothing_else_new():
-    """The archive of the working-tree rules holds no design/ entry at all,
-    and every other tracked file is still in it, bar the root CLAUDE.md."""
+@needs_present("openspec")
+def test_openspec_pointer_is_export_ignored():
+    """openspec/ stays in the tree, and the directory and every tracked file
+    in it (config.yaml, the store pointer) are export-ignore `set`: `/openspec`
+    drops the directory entry, and `/openspec/**` marks each file."""
+    files = openspec_files()
+    assert "openspec/config.yaml" in files, "openspec/config.yaml stays in the tree"
+    assert export_ignore("openspec") == "set"
+    for path in files:
+        assert export_ignore(path) == "set", path
+
+
+def archive_names():
+    """The entries `git archive` writes for HEAD under the working-tree rules,
+    so an edit to `.gitattributes` is tested before it is committed."""
     out = subprocess.run(["git", "-C", str(ROOT), "archive", "--worktree-attributes", "HEAD"],
                          capture_output=True, check=True).stdout
     with tarfile.open(fileobj=io.BytesIO(out)) as tar:
-        names = set(tar.getnames())
-    assert not [n for n in names if n == "design" or n.startswith("design/")]
+        return set(tar.getnames())
+
+
+def under(name, top):
+    return name == top or name.startswith(top + "/")
+
+
+@needs_checkout
+@needs_present("openspec")
+def test_the_archive_drops_openspec():
+    """The archive holds no openspec/ entry at all: not the file, and not an
+    empty directory left behind."""
+    assert not [n for n in archive_names() if under(n.rstrip("/"), "openspec")]
+
+
+@needs_checkout
+def test_the_archive_drops_design_and_nothing_else_new():
+    """The archive of the working-tree rules holds no design/ entry at all,
+    and every other tracked file is still in it, bar the root CLAUDE.md and
+    openspec/."""
+    names = archive_names()
+    assert not [n for n in names if under(n.rstrip("/"), "design")]
     in_head = set(git("ls-tree", "-r", "-z", "--name-only", "HEAD").split("\0")[:-1])
-    shipped = {n for n in in_head if n != "CLAUDE.md" and not n.startswith("design/")}
+    shipped = {n for n in in_head if n != "CLAUDE.md"
+               and not under(n, "design") and not under(n, "openspec")}
     assert shipped - names == set()
 
 

@@ -65,8 +65,14 @@ def rig(tmp_path):
     assert len(str(long_tmp)) >= 90
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DC_", "PIP_CHAT_", "SESSIONPHONE_"))}
     env.update(HOME=str(tmp_path / "home"), DC_ROOT=str(tmp_path / "root"), TMPDIR=str(long_tmp),
-               SEEN=str(tmp_path / "seen"))
+               SEEN=str(tmp_path / "seen"), XDG_CACHE_HOME=str(tmp_path / "cache"))
     return copy, env, long_tmp, tmp_path / "seen"
+
+
+def kept(env):
+    """The run dirs a RED bridge-check copied out, oldest first."""
+    base = Path(env["XDG_CACHE_HOME"]) / "sessionphone" / "bridge-check"
+    return sorted(base.iterdir()) if base.is_dir() else []
 
 
 def stand_in(copy, body, name="test_stand_in.py"):
@@ -87,6 +93,7 @@ def test_a_long_tmpdir_is_all_green_and_leaves_nothing(rig):
     assert given.startswith("/tmp/dcc.") and len(given) + len("/el-xxxxxxxx/s.sock") < LIMIT
     assert not Path(given).parent.exists()          # the scratch root went, with what the test left
     assert list(long_tmp.iterdir()) == []           # and nothing landed in the caller's TMPDIR
+    assert kept(env) == []                          # a green run keeps nothing
 
 
 def test_an_over_long_socket_path_is_said_in_words(rig):
@@ -128,3 +135,42 @@ def test_a_killed_run_removes_its_scratch_root(rig):
             p.wait()
     assert p.returncode != 0
     assert not root.exists()
+
+
+# Fails after printing what it saw and leaving a file under its TMPDIR, as the
+# loopback echo rig's stub call does: both must outlive the scratch root.
+FAILS_WITH_EVIDENCE = '''
+import os, pathlib, tempfile
+pathlib.Path(os.environ["SEEN"]).write_text(tempfile.gettempdir())
+pathlib.Path(tempfile.mkdtemp(prefix="ev-"), "r.json").write_text('{"self_cuts": 1}')
+raise SystemExit("counts seen: self_cuts=1 caller_cuts=0")
+'''
+
+
+def test_a_red_run_keeps_its_logs_and_scratch_files(rig):
+    copy, env, _, seen = rig
+    stand_in(copy, FAILS_WITH_EVIDENCE, "test_fails.py")
+    r = check(copy, env)
+    assert r.returncode == 1 and "RED - do not commit" in r.stdout, r.stdout + r.stderr
+    [k] = kept(env)
+    assert f"kept in {k}" in r.stdout
+    assert "self_cuts=1 caller_cuts=0" in (k / "test_fails.py.log").read_text()
+    [left] = (k / "tmp").glob("ev-*/r.json")
+    assert left.read_text() == '{"self_cuts": 1}'
+    assert not Path(seen.read_text()).parent.exists()   # the scratch root itself still went
+
+
+def test_only_the_newest_ten_red_runs_are_kept(rig):
+    copy, env, _, _ = rig
+    base = Path(env["XDG_CACHE_HOME"]) / "sessionphone" / "bridge-check"
+    for i in range(12):                                  # older runs, oldest first
+        d = base / f"20300609-0000{i:02d}-1"
+        d.mkdir(parents=True)
+        os.utime(d, (946684800 + i, 946684800 + i))   # age is the mtime (`ls -t`), not the name
+    stand_in(copy, "raise SystemExit('red')\n")
+    r = check(copy, env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    left = kept(env)
+    assert len(left) == 10
+    assert not (base / "20300609-000000-1").exists()     # the oldest went
+    assert any(f"kept in {d}" in r.stdout for d in left)  # this run's is among them

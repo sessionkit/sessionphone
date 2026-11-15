@@ -9,8 +9,11 @@ defaults: DC_BARGE_IN and DC_EARS are removed, so barge-in is on and the
 energy-VAD path listens.
 
 One call: the greeting, then one long reply line (BOT_TEXT). With a caller,
-his line (CALLER_TEXT) starts --caller-at seconds into that reply; with
---echo-only he is silent, so every BARGE-IN is a self-cut.
+his line (CALLER_TEXT) starts --caller-at seconds into that reply, counted
+in the reply's own audio as the phone heard it (samples since its first
+sound), not on the wall clock: on a busy machine a wall-clock start moved
+him against the bot's words, and which echo words shared his chunk changed
+the verdict. With --echo-only he is silent, so every BARGE-IN is a self-cut.
 
 THE VOICE, by default a STUB, in-process; nothing reaches a speech server.
 The stub TTS says each line as a chirp: one frequency band per line, rising
@@ -190,6 +193,18 @@ def net_audit(own):
     return audit, net, procs, away
 
 
+def loopback_ice():
+    """Both peers (the bridge's and the fake phone's, in this process) gather
+    ICE on 127.0.0.1 only. By default aioice offers every address but
+    loopback, so the call ran over this machine's LAN, VPN and IPv6
+    addresses: a host firewall that refuses inbound UDP to this interpreter
+    there failed every call (it never connected), and checking each pair
+    across several interfaces stalled the connect 30-90 s on a busy machine.
+    Which address the call rides is not what the rig measures."""
+    import aioice.ice
+    aioice.ice.get_host_addresses = lambda use_ipv4, use_ipv6: ["127.0.0.1"] if use_ipv4 else []
+
+
 # ---------------------------------------------------------------- the handset
 
 def db(gain_db):
@@ -205,18 +220,48 @@ def mono16(a, channels):
     return a.astype(np.int16)
 
 
+# a heard frame this loud is the bot's voice; quieter is the silence between lines
+ONSET_RMS = 100.0
+# the reply's first sound follows at least this much silence: the greeting's
+# tail, the pause before the reply and the reply's own lead-in
+ONSET_QUIET_S = 0.5
+
+
 class EchoPath:
     """What the phone's speaker sends back into its own microphone: the bot's
     audio, `gain_db` down and `delay_s` late. Fed as the phone hears it
-    (heard()), read as the mic samples (take()), both on a clock."""
+    (heard()), read as the mic samples (take()), both on a clock.
+
+    It also counts what the phone heard, in samples: once arm()ed, the first
+    sound after ONSET_QUIET_S of silence is the onset of the next line, and
+    since_onset() is how far into that line the phone has heard. Samples, not
+    seconds on the wall clock: the bot's track sends a frame every 20 ms,
+    silence included, so a count of them is the line's own clock however
+    late the frames arrive."""
 
     def __init__(self, gain_db, delay_s):
         self.gain, self.delay = db(gain_db), delay_s
         self.arrived = deque()                    # (time heard, int16 samples)
         self.pending = np.zeros(0, dtype=np.int16)
+        self.heard_n, self.quiet_n = 0, 0         # samples heard; of them, silent in a row
+        self.armed, self.onset_n, self.onset_at = False, None, None
+
+    def arm(self):
+        """Look for the next line's onset from here on."""
+        self.armed, self.onset_n, self.onset_at = True, None, None
+
+    def since_onset(self):
+        """Samples heard since the armed line's first sound; None before it."""
+        return None if self.onset_n is None else self.heard_n - self.onset_n
 
     def heard(self, pcm, at):
-        self.arrived.append((at, np.asarray(pcm, dtype=np.int16)))
+        pcm = np.asarray(pcm, dtype=np.int16)
+        loud = len(pcm) and np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) >= ONSET_RMS
+        if loud and self.armed and self.onset_n is None and self.quiet_n >= ONSET_QUIET_S * RATE:
+            self.onset_n, self.onset_at = self.heard_n, at
+        self.quiet_n = 0 if loud else self.quiet_n + len(pcm)
+        self.heard_n += len(pcm)
+        self.arrived.append((at, pcm))
 
     def take(self, n, now):
         """n samples of echo for the mic frame at `now`: what played `delay` ago."""
@@ -232,18 +277,30 @@ class EchoPath:
 class Mic:
     """The phone's microphone: the caller's clip (from `start`, once set) plus
     the echo. Mixed in float, clipped to int16. Keeps per-frame energy of each
-    part, so a run can say how loud the echo was against the caller."""
+    part, so a run can say how loud the echo was against the caller.
+
+    cue(seconds) starts the caller once the phone has heard that much of the
+    armed line (EchoPath.since_onset), on the first mic frame after it:
+    `start` is then that frame's time."""
 
     def __init__(self, clip, echo):
         self.clip, self.echo = np.asarray(clip, dtype=np.int16), echo
         self.start = None                         # wall time the caller starts speaking
+        self.cue_n = None                         # ...or: once this many samples of the line are heard
         self.at = 0
         self.echo_rms, self.caller_rms = [], []
+
+    def cue(self, seconds):
+        self.cue_n = round(seconds * RATE)
 
     def caller_window(self):
         return None if self.start is None else (self.start, self.start + len(self.clip) / RATE)
 
     def frame(self, now):
+        if self.start is None and self.cue_n is not None:
+            heard = self.echo.since_onset()
+            if heard is not None and heard >= self.cue_n:
+                self.start = now
         e = self.echo.take(FRAME, now)
         c = np.zeros(FRAME, dtype=np.float32)
         if self.start is not None and now >= self.start and self.at < len(self.clip):
@@ -431,15 +488,18 @@ def caller_clip_real(url, path):
 
 # ---------------------------------------------------------------- one call
 
-def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None):
+def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None, phone_lag_ms=0):
     """Run one call in THIS process; return the result dict. Isolates the
-    environment before calls.py is imported: call it once per process."""
+    environment before calls.py is imported: call it once per process.
+    phone_lag_ms: the phone hears each frame of the bot that much later than
+    it arrived, a busy machine's scheduling delay, injected (tests only)."""
     real_home = os.path.expanduser("~")
     before = real_home_snapshot(real_home)
     # this machine's own addresses (the ICE host candidates): traffic to them stays here
     from aioice.ice import get_host_addresses
     audit, net, procs, away = net_audit(set(get_host_addresses(True, True)))
     sys.addaudithook(audit)
+    loopback_ice()
 
     home, root = isolate()
     if speech_url:
@@ -573,13 +633,19 @@ def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None):
         phone.createDataChannel("mutedState", negotiated=True, id=3)
         phone.addTrack(MicTrack())
 
+        lag = phone_lag_ms / 1000.0
+
         @phone.on("track")
         def on_track(track):
             async def sink():
                 try:
                     while True:
                         f = await track.recv()
-                        path.heard(mono16(f.to_ndarray(), len(f.layout.channels)), time.time())
+                        pcm = mono16(f.to_ndarray(), len(f.layout.channels))
+                        if lag:              # heard late, in order, stamped when heard
+                            loop.call_later(lag, lambda pcm=pcm: path.heard(pcm, time.time()))
+                        else:
+                            path.heard(pcm, time.time())
                 except Exception as e:  # noqa: BLE001 - the track ends with the call
                     print(f"  phone: track ended ({e.__class__.__name__})", flush=True)
             asyncio.ensure_future(sink())
@@ -590,9 +656,8 @@ def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None):
 
         def sess():
             return next(iter(calls._manager.sessions.values()), None)
-        # ICE on loopback host candidates sometimes stalls 30-60 s before it
-        # completes: a slow connect is not a failed call, so it is waited for
-        # and recorded (connect_s), never measured as if it were a call
+        # a slow connect is not a failed call, so it is waited for and
+        # recorded (connect_s), never measured as if it were a call
         t_call = time.time()
         ok = await wait_for(lambda: sess() is not None and sess().connected, 90)
         connect_s = round(time.time() - t_call, 1)
@@ -605,11 +670,14 @@ def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None):
         ok = ok and await wait_for(lambda: not s.voice.opening and not s.voice.speaking()
                                    and any("SPOKE" in m for _, m in lines), 60)
         await asyncio.sleep(0.5)
+        # the caller is cued on the reply's own audio, as the phone hears it:
+        # caller_at seconds of it after its first sound, however late it lands
+        path.arm()
+        if not echo_only:
+            mic.cue(caller_at)
         task = asyncio.ensure_future(s.speak(BOT_TEXT))
         started = await wait_for(lambda: s.voice.speaking(), 30, 0.02)
         line_at = time.time()
-        if started and not echo_only:
-            mic.start = line_at + caller_at
         said = await task                                   # every sentence on the track, or cut
         await wait_for(lambda: not s.voice.speaking(), 90)
         await wait_for(lambda: mic.caller_window() is None or time.time() > mic.caller_window()[1], 30)
@@ -643,9 +711,13 @@ def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None):
     turns = [m.split(": ", 1)[-1].rsplit(" [call ", 1)[0] for m in msgs
              if m.startswith("CALL TURN (")]
     first_caller_cut = next((v for v in verdicts if v["by_time"] == "caller"), None)
+    # when he started, against the line: by the wall clock (line_at) and by
+    # the reply's audio as the phone heard it (its first sound)
+    caller_from_line = None if mic.start is None else mic.start - r["line_at"]
+    heard_onset = None if path.onset_at is None else round(path.onset_at - r["line_at"], 2)
     return {
         "voice": f"real: mlx-audio at {speech_url}" if speech_url else "stub: ToneVoice",
-        "gain_db": gain, "delay_ms": delay_ms, "echo_only": echo_only,
+        "gain_db": gain, "delay_ms": delay_ms, "echo_only": echo_only, "phone_lag_ms": phone_lag_ms,
         "caller_at_s": None if echo_only else caller_at,
         "ok": r["ok"], "connect_s": r["connect_s"], "sentences": r["said"].get("n", 0),
         "barge_in": len(verdicts),
@@ -657,8 +729,10 @@ def one_call(gain, delay_ms, caller_at, echo_only, speech_url=None):
         "echo_drops": sum(m.startswith("CALL ECHO ") for m in msgs),
         "chunks": len(chunks),
         "echo_leaked_as_heard": len(leaked),
-        "caller_cut_latency_s": (round(first_caller_cut["at"] - caller_at, 2)
-                                 if first_caller_cut and not echo_only else None),
+        "caller_cut_latency_s": (round(first_caller_cut["at"] - caller_from_line, 2)
+                                 if first_caller_cut and caller_from_line is not None else None),
+        "caller_started_s": None if caller_from_line is None else round(caller_from_line, 2),
+        "reply_heard_at_s": heard_onset,
         "echo_dbfs": dbfs(mic.echo_rms), "caller_dbfs": dbfs(mic.caller_rms),
         "echo_p90_dbfs": dbfs(mic.echo_rms, 90), "caller_p90_dbfs": dbfs(mic.caller_rms, 90),
         "echo_frames_over_vad_start": sum(x > VAD_START for x in mic.echo_rms),
@@ -718,7 +792,7 @@ def summary(r):
     if "barge_in" not in r or not r.get("ok"):
         return (f"gain {r['gain_db']} delay {r['delay_ms']} "
                 f"{'echo only' if r['echo_only'] else 'caller'}: FAILED (the call did not come "
-                f"up and play in time; nothing measured)")
+                f"up and play in time; nothing measured; connect {r.get('connect_s')}s)")
     return (f"gain {r['gain_db']:>4} dB delay {r['delay_ms']:>3} ms "
             f"{'echo only' if r['echo_only'] else 'caller   '} | BARGE-IN {r['barge_in']} "
             f"(self {r['self_cuts']}, caller {r['caller_cuts']}) held {r['held']} "
@@ -752,12 +826,16 @@ def main(argv=None):
     ap.add_argument("--gain", type=float, default=-30.0, help="echo level, dB (default -30)")
     ap.add_argument("--delay", type=int, default=120, help="echo delay, ms (default 120)")
     ap.add_argument("--caller-at", type=float, default=6.0,
-                    help="seconds into the bot's line the caller starts (default 6)")
+                    help="seconds into the bot's line the caller starts, counted in that "
+                         "line's audio as the phone heard it from its first sound (default 6)")
     ap.add_argument("--echo-only", action="store_true", help="the caller is silent")
     ap.add_argument("--speech-url", default=None, metavar="URL",
                     help="OPT-IN, reaches a speech server: real TTS and STT on the mlx-audio "
                          "server at URL (e.g. http://HOST:PORT). Default: the in-process stub, "
                          "no server")
+    ap.add_argument("--phone-lag", type=int, default=0, metavar="MS",
+                    help="tests only: the phone hears the bot MS later than it arrived, a "
+                         "busy machine's scheduling delay, injected (default 0)")
     ap.add_argument("--grid", action="store_true", help="every --gains x --delays, both ways")
     ap.add_argument("--gains", type=float, nargs="+", default=[0.0, -6.0, -10.0, -20.0, -30.0, -40.0])
     ap.add_argument("--delays", type=int, nargs="+", default=[60, 120, 200])
@@ -772,7 +850,8 @@ def main(argv=None):
         args.keep = args.keep or tempfile.mkdtemp(prefix="dc-echo-grid-")
         args.out = args.out or str(pathlib.Path(args.keep) / "results.json")
         return grid(args)
-    r = one_call(args.gain, args.delay, args.caller_at, args.echo_only, args.speech_url)
+    r = one_call(args.gain, args.delay, args.caller_at, args.echo_only, args.speech_url,
+                 args.phone_lag)
     if args.json:
         pathlib.Path(args.json).write_text(json.dumps(r, indent=1))
     print("\nRESULT", summary(r))

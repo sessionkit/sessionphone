@@ -23,6 +23,7 @@ import contextlib
 import json
 import os
 import pathlib
+import select
 import signal
 import subprocess
 import sys
@@ -35,7 +36,11 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 DC_LIVE = REPO / "bin" / "dc-live"
 DC_ENV = REPO / "bin" / "dc-env"
 PS_ENV = {"TZ": "UTC0", "LC_ALL": "C"}      # as dc-live and the bot ask ps
-SLEEP = "import time; time.sleep(120)"
+READY = "ready"
+SLEEP = f"import time; print({READY!r}, flush=True); time.sleep(120)"
+# The shape a framework CPython (Homebrew, python.org) gives ps: it re-execs as its
+# app bundle's binary, so ps never shows sys.executable. The path need not exist.
+FRAMEWORK = "/Library/Frameworks/Python.framework/Versions/3.99/Resources/Python.app/Contents/MacOS/Python"
 
 
 # ---- the rig -----------------------------------------------------------------
@@ -85,16 +90,29 @@ def _running(r: subprocess.CompletedProcess) -> bool:
 
 
 @contextlib.contextmanager
-def _stand_in(argv: list[str], shows: str):
-    """A sleeping process whose command line starts with SHOWS. Its own session
-    (so its own process group), stopped by killing that group, never by name."""
+def _stand_in(argv: list[str], ends: str, says_ready: bool):
+    """A sleeping process whose command line, once it runs its own code, ends
+    with ENDS. Its own session (so its own process group), stopped by killing
+    that group, never by name.
+
+    Ready means exec has settled, so `_record` copies the line ps will show for
+    as long as it lives. A python stand-in (SAYS_READY) prints READY from its own
+    code: any re-exec of the interpreter (a framework build re-execs as
+    Python.app) is over by then. The interpreter's path is never the test: it is
+    not what ps shows under every build. Any other stand-in is ready when ps
+    shows ENDS."""
     p = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.PIPE if says_ready else subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 10
-        while not _ps(p.pid, "command").startswith(shows):
+        if says_ready:
+            ready, _, _ = select.select([p.stdout], [], [], 10)
+            said = p.stdout.readline().decode(errors="replace").strip() if ready else ""
+            assert said == READY, f"stand-in never said {READY!r} (exit {p.poll()}, said {said!r}): {argv}"
+        while not _ps(p.pid, "command").endswith(ends):
             assert p.poll() is None, f"stand-in exited {p.returncode}: {argv}"
-            assert time.monotonic() < deadline, f"stand-in never showed {shows!r}: {_ps(p.pid, 'command')!r}"
+            assert time.monotonic() < deadline, f"stand-in never showed {ends!r}: {_ps(p.pid, 'command')!r}"
             time.sleep(0.02)
         yield p
     finally:
@@ -107,27 +125,56 @@ def _stop(p: subprocess.Popen) -> None:
     with contextlib.suppress(ProcessLookupError):
         os.killpg(p.pid, signal.SIGTERM)
     p.wait(timeout=10)
+    if p.stdout:
+        p.stdout.close()
 
 
-def _python(*args: str) -> tuple[list[str], str]:
-    """A python stand-in carrying ARGS, as the measurement ran it."""
-    return [sys.executable, "-c", SLEEP, *args], sys.executable
+def _python(*args: str, shows: str | None = None) -> tuple[list[str], str, bool]:
+    """A python stand-in carrying ARGS, as the measurement ran it. With SHOWS,
+    ps shows SHOWS where the interpreter's path would be (`exec -a`), as a
+    framework build shows its Python.app binary and never sys.executable."""
+    own = ["-c", SLEEP, *args]
+    if shows is None:
+        return [sys.executable, *own], " ".join(own), True
+    return ["bash", "-c", 'exec -a "$0" "$@"', shows, sys.executable, *own], " ".join(own), True
 
 
-def _named(argv0: str) -> tuple[list[str], str]:
+def _named(argv0: str) -> tuple[list[str], str, bool]:
     """A stand-in whose whole command line is ARGV0 (then sleep's own 120)."""
-    return ["bash", "-c", 'exec -a "$0" sleep 120', argv0], argv0
+    return ["bash", "-c", 'exec -a "$0" sleep 120', argv0], f"{argv0} 120", False
+
+
+# ---- the rig under any interpreter --------------------------------------------
+
+# A python stand-in as the interpreter shows itself to ps: as invoked
+# (sys.executable), or as a framework build does (its Python.app binary).
+SHOWS = [pytest.param(None, id="as-invoked"), pytest.param(FRAMEWORK, id="framework")]
+
+
+@pytest.mark.parametrize("args", [("-m", "sessionphone.bridge.bot", "claude-xrig"),
+                                  ("/venv/bin/sessionphone", "bot", "run")])
+def test_a_python_stand_in_is_ready_though_ps_never_shows_sys_executable(args):
+    """A framework CPython re-execs as its Python.app binary, so ps never shows
+    sys.executable. The rig waited for it and timed out on every case. Ready
+    keys on the stand-in's own arguments, which every build shows."""
+    with _stand_in(*_python(*args, shows=FRAMEWORK)) as p:
+        cmd = _ps(p.pid, "command")
+        assert not cmd.startswith(sys.executable), cmd
+        assert cmd.endswith(" ".join(["-c", SLEEP, *args])), cmd
+        assert p.poll() is None
 
 
 # ---- the six measured cases, one test each -----------------------------------
 
-def test_row1_the_real_launchd_form_is_this_roots_bot_and_no_other_roots(tmp_path):
+@pytest.mark.parametrize("shows", SHOWS)
+def test_row1_the_real_launchd_form_is_this_roots_bot_and_no_other_roots(tmp_path, shows):
     """`python -m sessionphone.bridge.bot A`, with its bot.pid in its root: a bot
     for that root. The same agent on another root with no bot of its own is
-    NOT running (pgrep was root-blind: it said running there too)."""
+    NOT running (pgrep was root-blind: it said running there too). The same
+    under a framework build, whose ps line starts with Python.app."""
     agent = _agent()
     mine, other = _root(tmp_path, "mine"), _root(tmp_path, "other")
-    with _stand_in(*_python("-m", "sessionphone.bridge.bot", agent)) as bot:
+    with _stand_in(*_python("-m", "sessionphone.bridge.bot", agent, shows=shows)) as bot:
         (mine / "bot.pid").write_text(_record(bot.pid, mine))
         assert _running(_live(tmp_path, mine, agent))
         r = _live(tmp_path, other, agent)
@@ -164,13 +211,14 @@ def test_rows3_to_5_a_process_whose_argv_carries_the_bots_name_is_no_bot(tmp_pat
         assert f"no {root / 'bot.pid'}" in r.stderr
 
 
-def test_row6_the_foreground_bot_run_form_is_this_roots_bot(tmp_path):
+@pytest.mark.parametrize("shows", SHOWS)
+def test_row6_the_foreground_bot_run_form_is_this_roots_bot(tmp_path, shows):
     """`sessionphone bot run` runs the bot in-process: its argv never carries
     `sessionphone.bridge.bot`, so pgrep said NOT RUNNING while it ran. Its
-    bot.pid says it runs."""
+    bot.pid says it runs, under a framework build too."""
     agent = _agent()
     root = _root(tmp_path)
-    with _stand_in(*_python("/venv/bin/sessionphone", "bot", "run")) as bot:
+    with _stand_in(*_python("/venv/bin/sessionphone", "bot", "run", shows=shows)) as bot:
         (root / "bot.pid").write_text(_record(bot.pid, root))
         assert _running(_live(tmp_path, root, agent))
         r = _live(tmp_path, root, agent, "--id")
@@ -179,10 +227,11 @@ def test_row6_the_foreground_bot_run_form_is_this_roots_bot(tmp_path):
 
 # ---- a stale bot.pid reads NOT running ---------------------------------------
 
-def test_a_bot_pid_naming_a_dead_pid_is_not_running(tmp_path):
+@pytest.mark.parametrize("shows", SHOWS)
+def test_a_bot_pid_naming_a_dead_pid_is_not_running(tmp_path, shows):
     agent = _agent()
     root = _root(tmp_path)
-    with _stand_in(*_python("/venv/bin/sessionphone", "bot", "run")) as bot:
+    with _stand_in(*_python("/venv/bin/sessionphone", "bot", "run", shows=shows)) as bot:
         (root / "bot.pid").write_text(_record(bot.pid, root))
         assert _running(_live(tmp_path, root, agent))
     r = _live(tmp_path, root, agent)        # the stand-in is gone; its file stays
@@ -275,12 +324,13 @@ def test_dc_live_asks_no_process_list_by_pattern():
 
 # ---- the bot's own writer, and dc-env's path ---------------------------------
 
-def test_the_bots_own_record_is_the_one_dc_live_reads(tmp_path):
+@pytest.mark.parametrize("shows", SHOWS)
+def test_the_bots_own_record_is_the_one_dc_live_reads(tmp_path, shows):
     """bridge/pidfile.py writes the four lines `_record` writes, so the cases
-    above stand for the real bot."""
+    above stand for the real bot, under a framework build too."""
     from sessionphone.bridge import pidfile
     root = _root(tmp_path)
-    with _stand_in(*_python("/venv/bin/sessionphone", "bot", "run")) as bot:
+    with _stand_in(*_python("/venv/bin/sessionphone", "bot", "run", shows=shows)) as bot:
         assert pidfile.record(root, bot.pid) == _record(bot.pid, root)
 
 

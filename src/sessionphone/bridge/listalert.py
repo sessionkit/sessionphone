@@ -47,23 +47,25 @@ Send = Callable[[str, str, "dict[str, str]"], "tuple[bool, str, str | None]"]
 Log = Callable[[str], None]
 
 
-def record_path(outbox: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(outbox) / RECORD
+def record_path(outbox: pathlib.Path, name: str = RECORD) -> pathlib.Path:
+    return pathlib.Path(outbox) / name
 
 
-def read_record(outbox: pathlib.Path) -> dict | None:
-    """The record, or None if there is none or it is not a JSON object."""
+def read_record(outbox: pathlib.Path, name: str = RECORD) -> dict | None:
+    """The record NAME (this alert's by default), or None if there is none or
+    it is not a JSON object."""
     try:
-        rec = json.loads(record_path(outbox).read_text(encoding="utf-8"))
+        rec = json.loads(record_path(outbox, name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return rec if isinstance(rec, dict) else None
 
 
-def write_record(outbox: pathlib.Path, rec: dict) -> None:
-    """REC to the record, 0600, whole: written beside it, then os.replace. Raises OSError."""
-    path = record_path(outbox)
-    part = path.with_name(f"{RECORD}.{os.getpid()}.part")
+def write_record(outbox: pathlib.Path, rec: dict, name: str = RECORD) -> None:
+    """REC to the record NAME (this alert's by default), 0600, whole: written
+    beside it, then os.replace. Raises OSError."""
+    path = record_path(outbox, name)
+    part = path.with_name(f"{name}.{os.getpid()}.part")
     fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
         os.write(fd, (json.dumps(rec, ensure_ascii=True, indent=1) + "\n").encode("ascii"))
@@ -140,7 +142,7 @@ def build_mail(listing, fix: list[str], *, profile: str, account: str, pid: int,
         "Fix it:\n" + "".join(f"  {line}\n" for line in fix) + "\n"
         "The bot re-reads the list on every job, so no restart is needed.\n"
         "This is the only mail about it until the reason changes or the bot restarts\n"
-        f"(and not again within the hour). Log: {dc_env.log_file(agent=dc_env.AGENT, profile_name=dc_env.PROFILE)}\n"
+        f"(and not again within the hour). Log: {dc_env.log_file(agent=dc_env.AGENT, profile_name=dc_env.PROFILE, root=dc_env.ROOT)}\n"
     )
     headers = {"X-Delta-Chat-Bridge": "1", "X-Delta-Chat-Alert": f"channels-{listing.kind}"}
     if profile:

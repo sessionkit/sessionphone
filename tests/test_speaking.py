@@ -24,6 +24,7 @@ from test_ffmpeg_check import (  # noqa: F401 - fixtures
 from test_hearing import FakeCurl, _flat, _install, rig  # noqa: F401 - rig is a fixture
 
 from sessionphone import hearing, service
+from sessionphone.bridge import dc_env
 from sessionphone.cli import main as cli
 
 
@@ -160,7 +161,7 @@ def test_apple_tts_needs_no_ffmpeg(monkeypatch, tmp_path):
 
 def test_found_says_yes_and_where(tmp_path):
     f = _exe(tmp_path / "ffmpeg")
-    out = hearing.speaking_lines({"DC_FFMPEG": str(f)})
+    out = hearing.speaking_lines({"DC_FFMPEG": str(f), "DC_VOICE": "am_adam"})
     assert _flat(out) == (f"speaking: yes. ffmpeg at {f} (DC_FFMPEG) turns the speech server's "
                           "replies into call audio.")
 
@@ -234,6 +235,7 @@ def test_status_says_no_ffmpeg_and_keeps_its_exit_code(monkeypatch):
 @pytest.mark.usefixtures("rig", "an_ffmpeg")
 def test_status_says_yes_with_an_ffmpeg(monkeypatch):
     ff = os.environ["DC_FFMPEG"]     # the stand-in an_ffmpeg made
+    monkeypatch.setenv("DC_VOICE", "am_adam")    # a voice named: no default-voice paragraph
     r, _ = _install(monkeypatch, FakeCurl())
     assert r.exit_code == 0, r.output
     st = CliRunner().invoke(cli, ["bot", "status"])
@@ -245,3 +247,101 @@ def test_status_says_yes_with_an_ffmpeg(monkeypatch):
 def test_status_with_no_job_says_nothing_about_speaking(monkeypatch):
     st = CliRunner().invoke(cli, ["bot", "status"])
     assert "(not installed)" in st.output and "speaking:" not in st.output, st.output
+
+
+# ---- the voice: with no DC_VOICE, say the default and how to set one -------
+# PHONE-298: with no DC_VOICE the bot speaks in dc_env.DEFAULT_VOICE, which on
+# a Mac shared by agents may already be another agent's voice.
+
+def _voice_said(text: str) -> bool:
+    return "No DC_VOICE is set" in text
+
+
+def test_no_voice_names_the_default_and_the_setting(tmp_path):
+    f = _exe(tmp_path / "ffmpeg")
+    out = hearing.speaking_lines({"DC_FFMPEG": str(f)})
+    text = _flat(out)
+    assert text.startswith(f"speaking: yes. ffmpeg at {f} (DC_FFMPEG) turns the speech server's "
+                           "replies into call audio. No DC_VOICE is set")
+    assert f"the default voice, {dc_env.DEFAULT_VOICE}." in text
+    assert "another agent's voice" in text
+    assert "set DC_VOICE (a Kokoro id, or a clone directory under DC_VOICES_ROOT)" in text
+    assert text.endswith("then run `sessionphone bot install` again.")
+
+
+def test_the_default_named_is_the_one_constant(monkeypatch, tmp_path):
+    """The line reads dc_env.DEFAULT_VOICE: there is no second literal to drift."""
+    monkeypatch.setattr(dc_env, "DEFAULT_VOICE", "zz_test")
+    f = _exe(tmp_path / "ffmpeg")
+    assert "the default voice, zz_test." in _flat(hearing.speaking_lines({"DC_FFMPEG": str(f)}))
+
+
+def test_the_bridge_falls_back_to_the_named_default():
+    assert dc_env.DEFAULT_VOICE == "af_sky"
+
+
+@pytest.mark.parametrize("env", [{"DC_VOICE": "am_adam"}, {"PIP_CHAT_VOICE": "am_adam"},
+                                 {"DC_VOICE": "", "PIP_CHAT_VOICE": "am_adam"}])
+def test_a_voice_set_says_nothing_of_the_default(tmp_path, env):
+    f = _exe(tmp_path / "ffmpeg")
+    text = _flat(hearing.speaking_lines({"DC_FFMPEG": str(f), **env}))
+    assert not _voice_said(text) and "default voice" not in text
+
+
+def test_an_empty_dc_voice_counts_as_unset(tmp_path):
+    f = _exe(tmp_path / "ffmpeg")
+    assert _voice_said(_flat(hearing.speaking_lines({"DC_FFMPEG": str(f), "DC_VOICE": ""})))
+
+
+def test_no_ffmpeg_and_no_voice_says_both_and_ends_on_the_fix(monkeypatch, tmp_path):
+    monkeypatch.setattr(hearing.os.path, "exists", lambda p: False)
+    out = hearing.speaking_lines({"PATH": str(tmp_path)})
+    text = _flat(out)
+    assert text.startswith("speaking: NO.") and _voice_said(text)
+    assert text.index("No DC_VOICE is set") < text.index("Install ffmpeg")
+    assert [ln.strip() for ln in out[-2:]] == [FIX, "sessionphone bot install"]
+
+
+def test_apple_tts_says_nothing_of_the_voice(monkeypatch, tmp_path):
+    """DC_TTS=apple speaks by macOS say: DC_VOICE does not choose its voice."""
+    monkeypatch.setattr(hearing.os.path, "exists", lambda p: False)
+    assert not _voice_said(_flat(hearing.speaking_lines({"PATH": str(tmp_path), "DC_TTS": "apple"})))
+
+
+@pytest.mark.usefixtures("rig", "an_ffmpeg")
+def test_install_with_no_voice_names_the_default_and_dc_voice(monkeypatch):
+    r, _ = _install(monkeypatch, FakeCurl())
+    assert r.exit_code == 0, r.output
+    text = _flat(_speaking(r.output))
+    assert text.startswith("speaking: yes.") and _voice_said(text)
+    assert f"the default voice, {dc_env.DEFAULT_VOICE}." in text and "set DC_VOICE" in text
+    st = CliRunner().invoke(cli, ["bot", "status"])
+    assert _voice_said(_flat(_speaking(st.output)))       # bot status shares the line
+
+
+@pytest.mark.usefixtures("rig", "an_ffmpeg")
+def test_install_with_dc_voice_says_nothing_of_the_default(monkeypatch):
+    monkeypatch.setenv("DC_VOICE", "am_adam")
+    r, _ = _install(monkeypatch, FakeCurl())
+    assert r.exit_code == 0, r.output
+    text = _flat(_speaking(r.output))
+    assert text.startswith("speaking: yes.") and not _voice_said(text), r.output
+
+
+@pytest.mark.usefixtures("rig", "an_ffmpeg")
+def test_a_job_with_the_deprecated_alias_says_nothing_of_the_default(monkeypatch):
+    """The line reads the job's plist as the bot reads its environment: a
+    PIP_CHAT_VOICE there names the voice, so no default is spoken."""
+    real = service.install
+
+    def install(**kw):
+        p = real(**kw)
+        j = plistlib.loads(p.read_bytes())
+        j["EnvironmentVariables"]["PIP_CHAT_VOICE"] = "am_adam"
+        p.write_bytes(plistlib.dumps(j))
+        return p
+    monkeypatch.setattr(service, "install", install)
+    r, _ = _install(monkeypatch, FakeCurl())
+    assert r.exit_code == 0, r.output
+    text = _flat(_speaking(r.output))
+    assert text.startswith("speaking: yes.") and not _voice_said(text), r.output

@@ -12,3 +12,14 @@
 # `/design/**` marks each file, which `git check-attr` reports per path.
 /design/ export-ignore
 /design/** export-ignore
+# openspec/ holds one file, config.yaml, `store: sessionphone`: a pointer that
+# sends the openspec CLI to the project's OpenSpec store, where the specs live.
+# That store is private, so the pointer means nothing to a reader of the
+# archive, and the archive leaves openspec/ out. To ship the pointer, delete
+# the two lines below. A pattern that matches a directory does not match the
+# paths inside it, so `/openspec/**` sets export-ignore on each file, and
+# `/openspec` drops the directory entry that would otherwise be left in the
+# archive, empty. Every line is anchored with a leading `/`. docs/internal/
+# does not exist in this repo; add its two lines here if it is ever created.
+/openspec export-ignore
+/openspec/** export-ignore

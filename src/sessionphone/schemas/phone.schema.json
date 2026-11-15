@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "phone",
+  "description": "sessionphone's host settings (phone.json and phone.d/*.json): one map per bot under `bots`, every value a JSON string. Installed beside phone.json by `sessionphone bot install`; the package owns it, so nobody edits the copy.",
+  "type": "object",
+  "properties": {
+    "bots": {
+      "description": "One map per bot, named by its agent (DC_AGENT). A DC_* key is an environment setting `bot install` keeps; download_limit, download_types and save_dir are host-only keys, read from these files alone and never from the environment.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "download_limit": {
+            "description": "The largest attachment, in bytes (decimal digits), the bot fetches and passes on without being asked. \"0\" means no limit. Host-only.",
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "default": "16000000"
+          },
+          "download_types": {
+            "description": "The attachment kinds passed on without being asked, comma-separated: image, sticker, voice, audio, video, file, webxdc, vcard; or \"none\". Absent: every kind. Host-only.",
+            "type": "string",
+            "pattern": "^ *(none|(image|sticker|voice|audio|video|file|webxdc|vcard)( *, *(image|sticker|voice|audio|video|file|webxdc|vcard))*) *$",
+            "default": "image,sticker,voice,audio,video,file,webxdc,vcard"
+          },
+          "save_dir": {
+            "description": "The folder a passed-on attachment is copied to: an absolute path, `~` allowed. Absent: <home>/attachments, under the bot's own state root. Host-only.",
+            "type": "string",
+            "pattern": "^[/~]"
+          }
+        },
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    },
+    "_locked": {
+      "description": "Dotted key paths (bots.<agent>.<key>, or bots.<agent>) a later file and `bot install` may not change.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

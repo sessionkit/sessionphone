@@ -28,7 +28,6 @@ def lines(monkeypatch):
     """The CALL log lines, captured."""
     got = []
     monkeypatch.setattr(calls, "_hooks", calls.Hooks(got.append, lambda p: "", lambda *a, **k: None))
-    monkeypatch.setattr(calls, "_recorder", None)
     return got
 
 
@@ -143,7 +142,7 @@ def test_an_ears_call_with_recording_on_keeps_the_caller_on_full_in(tmp_path, li
     s = calls.CallSession.__new__(calls.CallSession)
     s.dir = tmp_path / "call"
     asyncio.run(s._listen_ears(SpeechTrack()))
-    calls._recorder.close()            # what hang-up does
+    s._rec_close()                     # what hang-up does: the call closes its own tape
     n, data = frames(s.dir / "full-in.wav")
     assert n > 0 and np.frombuffer(data, dtype=np.int16).any()
     closed = [m for m in lines if "recording_closed full-in.wav" in m]

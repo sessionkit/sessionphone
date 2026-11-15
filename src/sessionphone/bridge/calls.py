@@ -29,9 +29,9 @@ What this does with a call:
 Runs in its own thread with its own asyncio loop; the bot's RPC calls are
 sync and are pushed to the default executor.
 """
-import asyncio, collections, concurrent.futures, email, email.policy, email.utils, fractions
-import json, os, pathlib, re, shlex, subprocess
-import threading, time, traceback, types, uuid, wave
+import asyncio, collections, concurrent.futures, contextvars, email, email.policy, email.utils, fractions
+import json, logging, os, pathlib, re, shlex, subprocess
+import threading, time, traceback, types, uuid, wave, weakref
 
 import numpy as np
 # >>> echo-patch import
@@ -128,6 +128,22 @@ def post_to_chat(account, chat_id, text, what):
     account.get_chat_by_id(chat_id).send_text(text)
     return True
 # <<< channels-gate
+
+
+# >>> drop-line: a connected call the bot did not end says so in its chat.
+# Someone can talk for minutes into a call that has died; one plain line in the
+# chat (never speech) tells them when it dropped, how long it ran, and how long
+# before the close the caller was last heard.
+def drop_line(closed_at, started, last_heard):
+    """The chat line for a dropped call, from three wall times (last_heard None
+    = no frame ever came). A clock step never gives a negative number."""
+    stamp = time.strftime("%H:%M:%S", time.localtime(closed_at))
+    ran = f" after {max(0, round(closed_at - started))} s" if started else ""
+    if last_heard is None:
+        return f"call dropped {stamp}{ran}; no audio was heard from the caller"
+    ago = max(0, round(closed_at - last_heard))
+    return f"call dropped {stamp}{ran}; last audio heard {ago} s before the close"
+# <<< drop-line
 
 
 # >>> recording-notice: the longest the greeting waits on the chat line's result,
@@ -246,10 +262,12 @@ def settle_greetings(display):
         dc_env.GREETING, dc_env.GREETING_OUT, dc_env.GREETING_VOICEMAIL)
 
 
-# The RINGING mail tells its reader what to run, and the package puts
-# no dc-* tool on any PATH (pyproject installs only `sessionphone`). The bridge
-# always runs from its checkout, so name the checkout's own bin/ tool by its
-# absolute path; a bare name is the fallback only when that file is absent.
+# The RINGING mail tells its reader what to run. An install puts every dc-*
+# tool on the PATH as a console script (PHONE-314), but a bare name runs the
+# FIRST dc-* of that name on PATH, which may be an older, foreign copy
+# (PHONE-302). The bridge always runs from its checkout, so name the
+# checkout's own bin/ tool by its absolute path; a bare name is the fallback
+# only when that file is absent.
 TOOL_BIN = pathlib.Path(__file__).resolve().parents[3] / "bin"
 
 
@@ -451,7 +469,17 @@ def _rec_prune(force=False):
 # The live call's id, so every CALL line can say which call it belongs to.
 # Set where the LIVE file is written, cleared where it is cleared. 99.3% of
 # this log could not be attributed to a call before this (10,076 of 10,146).
+#
+# PHONE-297: one global was not enough. With a call held open, a second
+# call's setup lines were stamped with the first call's id, and the first
+# call's close would have unstamped the second. So a call's own work carries
+# its own id (_call_ctx: a context variable, set at the top of each call's
+# coroutines, which every task it starts inherits); _call_id stays as the
+# newest call that opened, for a line logged outside any call (a thread, the
+# executor), and only its own call's close clears it.
 _call_id = None
+_NO_CALL = object()             # _call_ctx unset: not a call's own work
+_call_ctx = contextvars.ContextVar("sessionphone_call_id", default=_NO_CALL)
 
 
 def set_call_id(n):
@@ -459,10 +487,28 @@ def set_call_id(n):
     _call_id = n
 
 
+def unset_call_id(n):
+    """Call N closed: stop stamping with N, and only N. A newer call that
+    opened meanwhile keeps its stamp."""
+    global _call_id
+    if n is not None and _call_id is not None and int(_call_id) == int(n):
+        _call_id = None
+
+
+def call_scope(n):
+    """From here on this task, and every task it starts, logs as call N
+    (None: a call that has no id yet, so no stamp, never another call's).
+    Call it inside a coroutine only: a task's context is its own copy."""
+    _call_ctx.set(n)
+
+
 def log(msg):
     # The tag goes at the END: dc-log parses this text with regexes, and
     # every existing `grep "CALL recording_closed"` has to keep working.
-    tag = f" [call {_call_id}]" if _call_id else ""
+    n = _call_ctx.get()
+    if n is _NO_CALL:
+        n = _call_id
+    tag = f" [call {n}]" if n else ""
     _hooks.log(f"CALL {msg}{tag}")
 # <<< call-id-log
 
@@ -618,6 +664,103 @@ def watch_ice(pc):
                 log(line)
     return pc
 # <<< ice-log
+
+
+# >>> close-cause
+# `closing msg N: <why>` names WHICH path closed the call. Drops with different
+# causes used to print the same line, so a drop could not be told from the log.
+# LOGGING ONLY: the `why` a close path passes is unchanged everywhere else it
+# goes (s.closed, the missed-call mail, the ear leg's end frame); only the close
+# line reads these. Nothing here waits, retries or changes when a call ends.
+#
+# Consent loss: aioice's consent check (RFC 7675) closes the ICE connection
+# after CONSENT_FAILURES missed checks and tells aiortc nothing but "closed".
+# The one sign it leaves is its "Consent to send expired" INFO record, whose
+# first argument is the Connection itself. A filter on aioice's logger marks
+# that Connection; the close line looks for its own pc's Connection among the
+# marked ones. Read here only because pyproject pins aioice==0.10.2
+# (ice.py query_consent); a pin bump must re-check it. The filter passes on
+# only what aioice's logger passed before, so no new line is printed anywhere.
+import aioice.ice
+
+_consent_lost = weakref.WeakSet()    # aioice Connections closed by their consent check
+REMOTE_WHYS = ("CallEnded event", "connection closed")   # the far side, unless consent says otherwise
+DEAD_WHYS = ("connection failed", "connection closed")   # on_state's close: the connection died (PHONE-299)
+
+
+class _ConsentWatch(logging.Filter):
+    """On aioice's ice logger: marks a Connection whose consent expired, then
+    passes a record on only if the logger would have passed it before."""
+
+    def __init__(self, logger, level):
+        super().__init__()
+        self.logger, self.level = logger, level   # level: the logger's own, before this
+
+    def filter(self, record):
+        try:
+            if (isinstance(record.msg, str) and record.msg.endswith("Consent to send expired")
+                    and record.args):
+                _consent_lost.add(record.args[0])
+        except Exception:  # noqa: BLE001 - a log line must never break a call
+            pass
+        floor = self.level or self.logger.parent.getEffectiveLevel()
+        return record.levelno >= floor
+
+
+def watch_consent():
+    """Install the consent watch on aioice's ice logger, once."""
+    lg = logging.getLogger("aioice.ice")
+    if any(isinstance(f, _ConsentWatch) for f in lg.filters):
+        return
+    lg.addFilter(_ConsentWatch(lg, lg.level))
+    if lg.getEffectiveLevel() > logging.INFO:
+        lg.setLevel(logging.INFO)           # so the INFO record is made at all
+
+
+watch_consent()
+from sessionphone.bridge import ice_checks  # >>> ice-checks (PHONE-329): per-call check timings by pair TYPE; installs on import, AFTER watch_consent
+
+
+def consent_misses(pc):
+    """aioice's CONSENT_FAILURES if this pc's ICE connection was closed by its
+    consent check, else None. Read from aioice, never hard-coded: the check
+    gives up at exactly that many misses. May raise: callers catch."""
+    for ice in _ice_transports(pc):
+        conn = getattr(ice, "_connection", None)
+        if conn is not None and conn in _consent_lost:
+            return aioice.ice.CONSENT_FAILURES
+    return None
+
+
+def close_cause(why, misses=None, track_end=None, now=None, bot_ends=False):
+    """The close line's text. `why` is what the close path passed; `misses` is
+    consent_misses(); `track_end` is (exception class, ICE state, epoch) from a
+    listen loop that ended before the close; `bot_ends` is true once this side
+    has begun ending the call itself (the core's end_call emits CallEnded, and
+    that echo can reach close() before this side's own close does). The path
+    that closed comes first, then anything seen before it."""
+    why = str(why)
+    notes = []
+    if misses and why.startswith("connection "):
+        head = f"consent failed after {misses} misses ({why})"
+    else:
+        if why not in REMOTE_WHYS:
+            head = why
+        elif bot_ends:
+            head = f"ended by this side ({why})"    # the echo of its own end, not the far side
+        else:
+            head = f"remote closed ({why})"
+        if misses:
+            notes.append(f"consent failed after {misses} misses")
+    if track_end:
+        kind, state, t = track_end
+        what = "remote track ended" if kind == "MediaStreamError" else "listen ended"
+        note = f"{what} ({kind}) with ICE still {state}"
+        if now is not None and t is not None:
+            note += f", {max(0.0, now - t):.1f} s earlier"
+        notes.append(note)
+    return "; ".join([head, *notes])
+# <<< close-cause
 
 
 # ---------------------------------------------------------------- voice out
@@ -852,12 +995,11 @@ class Recorder:
         self._in = self._out = None
 
 
-_recorder = None          # the live call's Recorder, or None
-
-
-def set_recorder(rec):
-    global _recorder
-    _recorder = rec
+# A Recorder belongs to the call that opened it (CallSession.recorder), and
+# only that call closes it. There is no module-wide "live" Recorder: with two
+# calls up on one chat, one shared tape took both calls' audio, and either
+# call's close ended the other's recording (PHONE-297). The call's voice
+# track and its VAD write to it through the call's tape getter.
 # <<< recording-patch
 
 def _line_log(msg):
@@ -983,6 +1125,7 @@ class PipVoiceTrack(MediaStreamTrack):
         self.waiting = collections.deque()    # VoiceLines behind it, in arrival order
         self.floor = None                     # bridge/floor.py's Floor: the call sets it; None = no gate
         self.opening = False                  # the call's opening holds every other line (CallSession sets it)
+        self.tape = None                      # () -> the call's Recorder or None: CallSession sets it; a web call has none
         self._start = None
         self._timestamp = 0
 
@@ -1215,9 +1358,10 @@ class PipVoiceTrack(MediaStreamTrack):
             if wait > 0:
                 await asyncio.sleep(wait)
         samples = self._next_samples()
-        # >>> recording-out
-        if _recorder is not None:
-            _recorder.write_out(samples)
+        # >>> recording-out: this call's tape, never another call's
+        rec = self.tape() if self.tape is not None else None
+        if rec is not None:
+            rec.write_out(samples)
         # <<< recording-out
         frame = AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
         frame.pts = self._timestamp
@@ -1711,7 +1855,12 @@ class MailLeg(threading.Thread):
             # Only an issued root: a call-<chatid>-<digits> string is not one.
             chats = ISSUED.chats(ids)
             if chats:
-                live = [s for s in up if s.chat_id in chats]
+                # >>> overlap (PHONE-297): THE live call in each chat, the
+                # newest (sessions keeps arrival order), so a chat holding
+                # an old call open hears the line once, as dc-say does
+                newest = {s.chat_id: s for s in up if s.chat_id in chats}
+                live = list(newest.values())
+                # <<< overlap
                 if live:
                     log(f"mail leg: root is stale, but chat "
                         f"{sorted(chats)} has a live call - speaking there")
@@ -1721,6 +1870,17 @@ class MailLeg(threading.Thread):
         if own_mail(addr):             # by local part, any host spelling
             self.seen(f)               # the bridge's own mail, never spoken
             return
+        # >>> auto-submitted (PHONE-334 PC, sessionmail SM-1047): an
+        # autoresponder's mail is never spoken in the sender's voice, nor
+        # posted. RFC 3834: any Auto-Submitted keyword but "no" (case folded,
+        # parameters and comments dropped). One line, no content; marked read.
+        auto = self.auto_submitted(msg)
+        if auto:
+            log(f"mail leg: {msg.get('Message-ID', '(no Message-ID)')} is "
+                f"Auto-Submitted: {auto}, not spoken")
+            self.seen(f)
+            return
+        # <<< auto-submitted
         text = mail_speech(msg)
         if not text:
             log(f"mail leg: {addr} sent nothing sayable, skipped")
@@ -1746,6 +1906,17 @@ class MailLeg(threading.Thread):
                 log(f"mail leg: could not post to chat {s.chat_id}: {e}")
         self.seen(f)
 
+    @staticmethod
+    def auto_submitted(msg):
+        """The first Auto-Submitted keyword in MSG other than "no", lower
+        case and cut to 40, or "" (no such header, or every one is "no": a
+        human's mail). An empty one is not "no": "(empty)", skipped."""
+        for value in msg.get_all("Auto-Submitted") or ():
+            word = re.split(r"[;(\s]", str(value).strip(), maxsplit=1)[0].lower()[:40]
+            if word != "no":
+                return word or "(empty)"
+        return ""
+
     def seen(self, f):
         """maildir: new/NAME -> cur/NAME:2,S, in the box F was read from. Done
         before speaking finishes, so a slow TTS cannot make the same mail be
@@ -1768,10 +1939,12 @@ class Utterances:
     and the rest carries into the next chunk. Putting the chunks back together
     into one turn is CallSession's job."""
 
-    def __init__(self, call_dir):
+    def __init__(self, call_dir, tape=None):
         self.call_dir = call_dir
         # >>> recording-open: the Recorder is CallSession._rec_start's, and only
-        # while recording is on; this only writes the chunks STT reads.
+        # while recording is on; TAPE is that call's getter for it (None: no
+        # tape). Besides the tape, this only writes the chunks STT reads.
+        self.tape = tape
         # <<< recording-open
         self.floor = 200.0
         self.buf = []            # frames of the current chunk
@@ -1794,8 +1967,9 @@ class Utterances:
         keep = max(200.0, self.floor * 2.0)
         loud = rms > (keep if self.in_speech else start)
         # >>> recording-in
-        if _recorder is not None:
-            _recorder.write_in(frame16)
+        rec = self.tape() if self.tape is not None else None
+        if rec is not None:
+            rec.write_in(frame16)
         # <<< recording-in
         self.buf.append(frame16)
         self.rms.append(rms)
@@ -1968,6 +2142,8 @@ class CallSession:
     awaiting = ()        # (n, msgid, t_mailed) of mailed turns with no reply yet, by n
     # <<< turn-log
     wait_task = None     # >>> first-call-wait: the wait's task while it runs; close() cancels it
+    track_end = None     # >>> close-cause: (exception class, ICE state, epoch) when a listen loop ended
+    caller_muted = False  # >>> caller-mute: the mute state last told to the seat; a call starts unmuted
 
     def __init__(self, manager, account, chat_id, msg_id=None, offer_sdp=None, has_video=False):
         self.manager, self.account = manager, account
@@ -2131,6 +2307,47 @@ class CallSession:
             log("ringing mail failed - it will go to voicemail unless someone "
                 "picks up:\n" + traceback.format_exc())
 
+    # >>> caller-mute (PHONE-303)
+    def _on_muted(self, data):
+        """The caller's app sent its mute state on the mutedState channel:
+        {"videoEnabled": ..., "audioEnabled": ...}. A CHANGE in audioEnabled is
+        one line to the seat (_mail_muted, off the loop); the same state again
+        says nothing. Bad JSON or no boolean audioEnabled: logged, nothing mailed.
+        Nothing is spoken: the seat decides what the caller hears."""
+        log(f"caller mutedState: {data}")
+        try:
+            audio = json.loads(data).get("audioEnabled")
+        except (ValueError, TypeError, AttributeError):
+            audio = None
+        if not isinstance(audio, bool):
+            log("caller mutedState: no boolean audioEnabled, not told")
+            return
+        now_muted = not audio
+        if now_muted == self.caller_muted:
+            return
+        self.caller_muted = now_muted
+        log(f"caller {'MUTED' if now_muted else 'UNMUTED'} on msg {self.msg_id}: telling the seat")
+        _keep(asyncio.get_running_loop().run_in_executor(None, self._mail_muted, now_muted))
+
+    def _mail_muted(self, now_muted):
+        """One line to the seat, threaded on the call. Runs in the executor."""
+        if now_muted:
+            word = "MUTED"
+            text = (f"{self.caller} MUTED their microphone. Nothing they say "
+                    "reaches the call until they unmute; you will be told when they do.")
+        else:
+            word = "UNMUTED"
+            text = f"{self.caller} UNMUTED their microphone: the call hears them again."
+        try:
+            _hooks.mail_in(
+                self.chat_name, self.chat_id, "call", text,
+                in_reply_to=self.root_id, reply_to=dc_env.ADDR,
+                call=self.msg_id,
+                subject=f"{word} {self.caller}")
+        except Exception:
+            log(f"caller {word.lower()} mail failed:\n" + traceback.format_exc())
+    # <<< caller-mute
+
     async def _names(self):
         loop = asyncio.get_running_loop()
         try:
@@ -2181,7 +2398,7 @@ class CallSession:
 
         @muted.on("message")
         def on_muted(data):
-            log(f"caller mutedState: {data}")
+            self._on_muted(data)
 
         @pc.on("track")
         def on_track(track):
@@ -2204,10 +2421,26 @@ class CallSession:
         pc.addTrack(self.voice)
         return pc
 
-    def _connected_text(self, stamp, way):
-        """The CALL CONNECTED mail: how to answer, the mouth first."""
+    def _greeting_line(self):
+        """The line the call opens with: a chosen line, else the voicemail
+        greeting, the incoming greeting, or the outgoing hello."""
+        if self.greeting:
+            return self.greeting
+        if self.outgoing:
+            if PROFILE and self.caller:
+                return f"Hi {self.caller}, {dc_env.GREETING_NAME} here."   # a public-profile ring names whoever it rings
+            return GREETING_OUT
+        return GREETING_VOICEMAIL if self.voicemail else GREETING      # >>> ring-first
+
+    def _connected_text(self, stamp, way, greeted=None):
+        """The CALL CONNECTED mail: how to answer, the mouth first. GREETED is
+        the line the bot opens the call with; the mail quotes it so the agent
+        replies instead of greeting a second time."""
+        said = (f"They have already been greeted: \"{greeted}\" Do not greet "
+                "them again; reply to what they say.\n") if greeted else ""
         return (
             f"CALL CONNECTED with {self.caller} at {stamp} ({way}).\n"
+            f"{said}"
             f"{dc_env.reply_hint(self.chat_id, self.msg_id, PROFILE)}\n"
             "Either is spoken into the call. Keep it short. Every line "
             "heard is a reply to this mail; the transcript lands here at "
@@ -2242,8 +2475,21 @@ class CallSession:
     async def _open(self):
         """The call is up: the chat line, the mail, the notice, the greeting."""
         self.started = time.time()
-        self._live_write()              # >>> call-id: dc-say can now see us
-        set_call_id(self.msg_id)        # >>> call-id-log: stamp every line
+        # >>> overlap (PHONE-297): the newest call in a chat is THE live call.
+        # A call that opens behind a newer one in its chat (it rang first,
+        # connected later) leaves the live file and the stamp to that one.
+        newer = self._newer_calls()
+        if newer:
+            log(f"msg {self.msg_id} opened behind a newer call in chat {self.chat_id}: "
+                f"msg {newer[-1].msg_id} keeps the live file")
+        else:
+            older = [x.msg_id for x in self._older_calls()]
+            if older:
+                log(f"msg {self.msg_id} supersedes msg {', '.join(map(str, older))} in chat "
+                    f"{self.chat_id}: dc-say, dc-invite and call-live.json are msg {self.msg_id}'s")
+            self._live_write()          # >>> call-id: dc-say can now see us
+            set_call_id(self.msg_id)    # >>> call-id-log: stamp every line
+        # <<< overlap
         # >>> recording-ears-open: both paths meet here (or at their listener,
         # if it started first): the switch is read and said once a call
         self._rec_start()
@@ -2253,24 +2499,20 @@ class CallSession:
         way = f"{dc_env.AGENT_NAME} rang" if self.outgoing else f"rang {dc_env.AGENT_NAME}"
         if self.voicemail:        # >>> ring-first
             way += f"; VOICEMAIL, no {ANSWER_CMD} in {RING_WAIT:.0f} s"
+        # a chosen line and voice win; who = the voice, so the transcript says who spoke
+        greeting = self._greeting_line()
         self.manager.loop.run_in_executor(
             None, lambda: _hooks.mail_in(
                 self.chat_name, self.chat_id, "call",
-                self._connected_text(stamp, way),
+                self._connected_text(stamp, way, greeting),
                 msgid=self.root_id, subject=f"CALL {stamp} with {self.caller}",
                 reply_to=dc_env.ADDR, cc=self.guest_list(), call=self.msg_id))
         self.heard.chat_name = self.chat_name   # M8: the call opens in the heard log
         self.heard.event("call-started", direction="out" if self.outgoing else "in")
-        hello = GREETING_OUT
-        if self.outgoing and PROFILE and self.caller:
-            hello = f"Hi {self.caller}, {dc_env.GREETING_NAME} here."   # a public-profile ring names whoever it rings
-        # a chosen line and voice win; who = the voice, so the transcript says who spoke
-        first = GREETING_VOICEMAIL if self.voicemail else GREETING      # >>> ring-first
         if FIRST_CALL_WAIT and self.wait_task is None:   # >>> first-call-wait: beside the greeting
             self.wait_task = asyncio.ensure_future(self._first_call_wait())
         await self._rec_notice_speak()  # >>> recording-notice: before the greeting
-        await self.speak(self.greeting or (first if not self.outgoing else hello),
-                         self.greet_voice, self.greet_voice or None, opening=True)
+        await self.speak(greeting, self.greet_voice, self.greet_voice or None, opening=True)
 
     # >>> first-call-wait
     async def _first_call_wait(self):
@@ -2296,6 +2538,7 @@ class CallSession:
     # ---- incoming
 
     async def run(self):
+        call_scope(self.msg_id)         # >>> overlap: its lines are its own from the first
         await self._names()
         log(f"INCOMING msg {self.msg_id} chat {self.chat_id} ({self.chat_name}) from {self.caller}, video={self.has_video}")
         loop = asyncio.get_running_loop()
@@ -2356,6 +2599,22 @@ class CallSession:
         except Exception as e:
             log(f"call dir relabel failed: {e}")
 
+    # >>> overlap
+    def _rivals(self):
+        """The live calls in this call's chat, oldest first (the manager's
+        rule), or [] for a session made without a manager that keeps one."""
+        live = getattr(self.manager, "live_for_chat", None)
+        return live(self.chat_id) if callable(live) else []
+
+    def _older_calls(self):
+        live = self._rivals()
+        return live[:live.index(self)] if self in live else []
+
+    def _newer_calls(self):
+        live = self._rivals()
+        return live[live.index(self) + 1:] if self in live else []
+    # <<< overlap
+
     def _live_write(self):
         # whole or not at all: a temp sibling renamed in, so a bot stopped
         # mid-write never leaves a torn file for dc-live to doubt
@@ -2375,20 +2634,40 @@ class CallSession:
                 pass
 
     def _live_clear(self):
+        """Remove call-live.json if this call owns it. -> True if it did."""
         try:
             if not LIVE_FILE.exists():
-                return
+                return False
             d = json.loads(LIVE_FILE.read_text())
             if int(d.get("call_id", -1)) != int(self.msg_id if self.msg_id else -2):
-                return                  # a newer call owns the file; leave it
+                return False            # a newer call owns the file; leave it
             LIVE_FILE.unlink()
+            return True
         except Exception as e:
             log(f"live file clear failed: {e}")
+            return False
     # <<< call-id
+
+    # >>> overlap (PHONE-297): one id everywhere, after a close too
+    def _live_hand_on(self):
+        """This call owned call-live.json and has closed. If another call in
+        its chat is still live, the newest of them is now THE live call
+        (live_call_id names it): it takes the file and the stamp. If none is,
+        neither names a call."""
+        pick = getattr(self.manager, "live_session", None)
+        heir = pick(self.chat_id) if callable(pick) else None
+        if heir is None or heir is self:
+            return
+        log(f"msg {self.msg_id} closed while msg {heir.msg_id} is still live in chat "
+            f"{self.chat_id}: dc-say, dc-invite and call-live.json are msg {heir.msg_id}'s")
+        heir._live_write()
+        set_call_id(heir.msg_id)
+    # <<< overlap
 
     # ---- outgoing
 
     async def dial(self):
+        call_scope(None)                # >>> overlap: no id yet, so no other call's stamp
         await self._names()
         log(f"DIALING chat {self.chat_id} ({self.chat_name})")
         loop = asyncio.get_running_loop()
@@ -2403,6 +2682,7 @@ class CallSession:
         chat = self.account.get_chat_by_id(self.chat_id)
         msg = await loop.run_in_executor(None, chat.place_outgoing_call, sdp, False)
         self.msg_id = msg.id
+        call_scope(self.msg_id)         # >>> overlap: from here its lines say its id
         self._relabel()                 # >>> call-id: the dir learns the id
         self.manager.sessions[self.msg_id] = self
         log(f"RINGING msg {self.msg_id} chat {self.chat_id} - the phone rings up to 120 s")
@@ -2432,6 +2712,7 @@ class CallSession:
         try:
             while True:
                 await track.recv()
+                self.last_heard = time.time()   # >>> drop-line
         except Exception:
             pass
 
@@ -2441,7 +2722,7 @@ class CallSession:
         resampler = AudioResampler(format="s16", layout="mono", rate=IN_RATE)
         self.dir.mkdir(parents=True, exist_ok=True)
         self._rec_start()               # >>> recording-switch: before the first chunk
-        vad = Utterances(self.dir)
+        vad = Utterances(self.dir, tape=self._tape)
         # The caller's voice while the agent talks is kept: the phone's WebRTC echo-cancels
         # the agent, and dropping frames here broke the VAD's continuity (a loopback
         # test). Barge-in works as a side effect.
@@ -2468,6 +2749,7 @@ class CallSession:
                         earleg.feed(self, silence_b)
                         self.wav_samples += IN_SAMPLES
                     continue
+                self.last_heard = time.time()   # >>> drop-line: his last frame, wall time
                 for f in resampler.resample(frame):
                     pcm = f.to_ndarray().reshape(-1).astype(np.int16)
                     self._feed(vad, pcm)
@@ -2475,6 +2757,27 @@ class CallSession:
                     self.wav_samples += len(pcm)
         except Exception as e:
             log(f"listen ended: {e.__class__.__name__}: {e}")
+            self._note_track_end(e)     # >>> close-cause: the close line names it
+
+    # >>> close-cause
+    def _note_track_end(self, e):
+        """A listen loop ended (a remote track's MediaStreamError, most often):
+        keep its class, the ICE state at that moment and when, for the close
+        line, whichever path then closes the call. Never raises."""
+        try:
+            state = self.pc.iceConnectionState if self.pc is not None else "closed"
+        except Exception as x:  # noqa: BLE001 - a log line must never break a call
+            state = f"unknown ({type(x).__name__})"
+        self.track_end = (type(e).__name__, state, time.time())
+
+    def _close_line(self, why, pc):
+        """`closing msg N: <this>`: which path closed the call. Never raises."""
+        try:
+            return close_cause(why, consent_misses(pc), self.track_end, time.time(),
+                               bool(getattr(self, "bot_ends", False)))
+        except Exception as e:  # noqa: BLE001 - a log line must never break a call
+            return f"{why} (cause unknown: {type(e).__name__})"
+    # <<< close-cause
 
     # ---- the ears leg (DC_EARS=1): one Pipeline per call
 
@@ -2535,7 +2838,9 @@ class CallSession:
                     # must still move, or no silence ever ends his turn
                     fill(clock.timeout(time.time()))
                     continue
-                fill(clock.frame(frame, time.time()))
+                now = time.time()
+                self.last_heard = now           # >>> drop-line: the same instant as the clock's
+                fill(clock.frame(frame, now))
                 if meta is None:
                     # the recording's audio second 0 on the wall clock: a tap log
                     # (a live-mic test) lines up with caller-call.wav through it.
@@ -2548,13 +2853,14 @@ class CallSession:
                         (self.dir / CALLER_JSON).write_text(json.dumps(meta) + "\n")
                 for f in resampler.resample(frame):
                     pcm = f.to_ndarray().reshape(-1).astype(np.int16).tobytes()
-                    # >>> recording-ears-in
-                    if _recorder is not None:
-                        _recorder.write_in(pcm)
+                    # >>> recording-ears-in: this call's tape
+                    if self.recorder is not None:
+                        self.recorder.write_in(pcm)
                     # <<< recording-ears-in
                     put(pcm)
         except Exception as e:
             log(f"listen ended: {e.__class__.__name__}: {e}")
+            self._note_track_end(e)     # >>> close-cause: the close line names it
         finally:
             if self.callwav is not None:
                 self.callwav.close()
@@ -3061,7 +3367,13 @@ class CallSession:
 
     # ---- the end
 
-    async def close(self, why):
+    async def close(self, why, by_bot=False):
+        """End the call. BY_BOT: the bot ended it (dc-hangup, a decline, the bot
+        stopping); so is a call marked bot_ends before the bot asked the core
+        to end it. Anything else that closes a connected call is a drop, and
+        the chat is told (drop-line). WHY is for the log only, never read."""
+        if self.msg_id is not None:
+            call_scope(self.msg_id)     # >>> overlap: a close is logged as its own call
         # >>> ring-first: a call can end before it has a pc (while it rings)
         if not self.closed:
             self.closed = why or "closed"
@@ -3074,18 +3386,20 @@ class CallSession:
         if self.pc is None:
             return
         pc, self.pc = self.pc, None
-        log(f"closing msg {self.msg_id}: {why}")
+        log(f"closing msg {self.msg_id}: {self._close_line(why, pc)}")   # >>> close-cause
+        if self.connected and not (by_bot or self.bot_ends):
+            self._drop_line_post(time.time())   # >>> drop-line: off the loop, never awaited
+        if why in DEAD_WHYS and not (by_bot or self.bot_ends or self.remote_ended):
+            self._dead_end_call(why)    # >>> dead-call-end: off the loop, never awaited
         voice = getattr(self, "voice", None)
         if callable(getattr(voice, "drop", None)):
             voice.drop()                # no line may hold the track of a call that is gone
-        self._live_clear()              # >>> call-id: before anything can block
-        set_call_id(None)               # >>> call-id-log: stop stamping
+        owned = self._live_clear()      # >>> call-id: before anything can block
+        unset_call_id(self.msg_id)      # >>> call-id-log: stop stamping (as this call only)
+        if owned:
+            self._live_hand_on()        # >>> overlap: an older live call takes the file
         earleg.end(self, why)           # >>> ear-leg: every listener hears the call end
-        # >>> recording-close
-        if _recorder is not None:
-            _recorder.close()
-            set_recorder(None)
-        # <<< recording-close
+        self._rec_close()               # >>> recording-close: this call's tape only
         self._turn_cancel()
         self._noreply_cancel()          # >>> no-reply
         if EARS:
@@ -3116,6 +3430,67 @@ class CallSession:
                 log("transcript failed:\n" + traceback.format_exc())
         self._rec_end()                  # >>> recording-switch: after the last turn
 
+    # >>> drop-line
+    last_heard = None     # wall time of the last frame received from him; None = none yet
+    # The bot is ending this call: set BEFORE end_call, which runs off the loop.
+    # The core may report that end back as CallEnded while end_call still runs,
+    # and that close() carries no by_bot; this keeps it from reading as a drop.
+    bot_ends = False
+
+    def _drop_line_post(self, closed_at):
+        """Post the drop line in the executor and return at once: a slow or
+        failing send never holds close() or the transcript. A refusal is logged
+        by post_to_chat; a send error is logged here, never raised."""
+        account, chat_id = self.account, self.chat_id
+        text = drop_line(closed_at, self.started, self.last_heard)
+
+        def post():
+            try:
+                if post_to_chat(account, chat_id, text, "drop line"):
+                    log(f"drop line posted to chat {chat_id}: {text}")
+            except Exception as e:
+                log(f"drop line: could not post to chat {chat_id}: {e}")
+        try:
+            _keep(asyncio.get_running_loop().run_in_executor(None, post))
+        except Exception as e:
+            log(f"drop line: could not post to chat {chat_id}: {e}")
+    # <<< drop-line
+
+    # >>> dead-call-end (PHONE-299)
+    # A connection that dies (ICE consent gave up, the network went) with no
+    # CallEnded from the caller leaves the call open in the core, and the
+    # caller's app keeps it live. close() of that connection ends it there:
+    # end_call ONCE, for this call's message. It is still a drop (the drop
+    # line posts; bot_ends is not set). A CallEnded seen first means the core
+    # already knows: CallManager.ended() marks remote_ended before it queues
+    # its close. end_sent keeps it to one end_call, whatever closes after.
+    remote_ended = False
+    end_sent = False
+
+    def _dead_end_call(self, why):
+        """Run the core's end_call for this call, once, in the executor, and
+        return at once: end_call can block, and it never holds close() or the
+        transcript. A failure is logged, never raised."""
+        if self.end_sent or self.msg_id is None:
+            return
+        self.end_sent = True
+        account, msg_id = getattr(self, "account", None), self.msg_id
+        if account is None:
+            log(f"end_call ({why}) not sent for msg {msg_id}: no account")
+            return
+
+        def end():
+            try:
+                account.get_message_by_id(msg_id).end_call()
+                log(f"ENDED msg {msg_id} in the core: {why}")
+            except Exception as e:
+                log(f"end_call ({why}) failed for msg {msg_id}: {e}")
+        try:
+            _keep(asyncio.get_running_loop().run_in_executor(None, end))
+        except Exception as e:
+            log(f"end_call ({why}) failed for msg {msg_id}: {e}")
+    # <<< dead-call-end
+
     # >>> recording-switch
     # A call's own view of the switch: read at its start, and again at every
     # unit (a chunk, a turn) and at hang-up. On at the start keeps the
@@ -3124,6 +3499,7 @@ class CallSession:
     # switch turned on mid-call keeps chunks from the next one; the whole-call
     # files start at the next call.
     rec_state = None      # types.SimpleNamespace(keep=bool), set by _rec_start
+    recorder = None       # this call's Recorder (full-in/full-out.wav), while it records
     rec_drain = None      # the hang-up drain task, while it runs
     callwav = None        # the ears path's open caller-call.wav, or None
 
@@ -3137,15 +3513,28 @@ class CallSession:
         log(f"recording: {recording.line(sw)}")
         if r.on:
             log(f"recording: on: {recording.ALL_VOICES}")
-            if _recorder is None:
-                try:
-                    self.dir.mkdir(parents=True, exist_ok=True)
-                    set_recorder(Recorder(self.dir))
-                    log(f"recording_started {self.dir.name} in+out")
-                    self._rec_keep(Recorder.NAMES)
-                except Exception:
-                    log("recording: could not start")
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                self.recorder = Recorder(self.dir)      # this call's own, whatever else is up
+                voice = getattr(self, "voice", None)
+                if voice is not None:
+                    voice.tape = self._tape             # its outgoing audio, onto its own tape
+                log(f"recording_started {self.dir.name} in+out")
+                self._rec_keep(Recorder.NAMES)
+            except Exception:
+                log("recording: could not start")
         return self.rec_state
+
+    def _tape(self):
+        """This call's Recorder, or None: what its track and VAD write to."""
+        return self.recorder
+
+    def _rec_close(self):
+        """Close this call's Recorder, if it has one open. Only the call that
+        opened a Recorder closes it: another call's tape is never touched."""
+        rec, self.recorder = self.recorder, None
+        if rec is not None:
+            rec.close()
 
     # >>> recording-notice
     # Rules 10-11: the call says whether it is kept. record_notice posts ONE
@@ -3292,9 +3681,7 @@ class CallSession:
             st.keep = False
             log(f"recording: turned off mid-call ({recording.line(sw)}): "
                 f"this call's audio is deleted at hang-up")
-            if _recorder is not None:
-                _recorder.close()
-                set_recorder(None)
+            self._rec_close()           # this call's tape; another call's is its own
             recording.unkeep(self.dir, (*Recorder.NAMES, CALLER_WAV, CALLER_JSON))
             recording.mark_transient(self.dir, "recording was turned off during the call")
             if not recording.TRANSIENT_DURING_CALL and self.callwav is not None:
@@ -3381,6 +3768,37 @@ def pack_gone(what, e):
     return f"{what}: the media pack is gone from under this bot ({e}). {media.calls_refused(names)}"
 
 
+# >>> overlap (PHONE-297)
+# A connected call with no audio from the caller for this long no longer
+# counts as live: dc-say, dc-invite and `dc-say --call` pass it by, and a new
+# call or a dial in its chat is not blocked by it. A phone sends audio while
+# its caller is quiet or muted (Opus DTX still sends a packet every few
+# hundred ms), so minutes with no frame at all is a dead line: the call that
+# lived 136 min had none after its second minute. The call is NOT ended here:
+# a silent call whose connection is still up stays open until dc-hangup ends
+# it. A connection that dies is ended in the core by its close (PHONE-299,
+# dead-call-end), so the caller's app shows it over.
+LIVE_SILENT_S = 300.0
+
+
+def _silent_for(s, now):
+    """Seconds since the caller's last audio on a connected call (since the
+    open, if none came yet); None while it is still connecting."""
+    if not getattr(s, "connected", False):
+        return None
+    heard = getattr(s, "last_heard", None) or getattr(s, "started", None)
+    return None if heard is None else now - heard
+
+
+def _in_call(s, coro):
+    """Run CORO on the calls loop as call S's own work: its lines carry S's id."""
+    async def scoped():
+        call_scope(getattr(s, "msg_id", None))
+        return await coro
+    return scoped()
+# <<< overlap
+
+
 class CallManager:
     def __init__(self):
         self.loop = asyncio.new_event_loop()
@@ -3440,6 +3858,7 @@ class CallManager:
         self.sessions[msg_id] = s
 
         async def go():
+            call_scope(msg_id)          # >>> overlap: every line of this call says its id
             try:
                 await s.run()
             except ImportError as e:
@@ -3467,6 +3886,7 @@ class CallManager:
         s.greeting, s.greet_voice = greeting, voice
 
         async def go():
+            call_scope(None)            # >>> overlap: dial() stamps it once it has an id
             try:
                 await s.dial()
             except ImportError as e:
@@ -3483,7 +3903,7 @@ class CallManager:
         if not s:
             log(f"OutgoingCallAccepted for unknown msg {event.msg_id}")
             return
-        asyncio.run_coroutine_threadsafe(s.accepted(event.accept_call_info), self.loop)
+        asyncio.run_coroutine_threadsafe(_in_call(s, s.accepted(event.accept_call_info)), self.loop)
 
     def hangup(self, chat_id):
         """dc-hangup CHAT_ID: the bot ends the call(s) in a chat. The core tells
@@ -3491,28 +3911,34 @@ class CallManager:
         # >>> ring-first: a call still ringing has no pc, so it is not "live"; decline it
         ringing = [s for s in list(self.sessions.values()) if s.chat_id == int(chat_id) and s.ringing]
         for s in ringing:
+            s.bot_ends = True           # >>> drop-line: before end_call can echo
             async def decline(s=s):
+                call_scope(s.msg_id)    # >>> overlap
                 try:
                     msg = s.account.get_message_by_id(s.msg_id)
                     await self.loop.run_in_executor(None, msg.end_call)
                     log(f"DECLINED msg {s.msg_id}")
                 except Exception as e:
                     log(f"end_call (decline) failed: {e}")
-                await s.close(f"declined by {dc_env.AGENT_NAME}")
+                await s.close(f"declined by {dc_env.AGENT_NAME}", by_bot=True)
             asyncio.run_coroutine_threadsafe(decline(), self.loop)
         # <<< ring-first
-        live = self.live_for_chat(chat_id)
+        # >>> overlap: dc-hangup ends EVERY call held in the chat, a silent
+        # (no longer live) or superseded one too
+        live = self.held_for_chat(chat_id)
         if not live and not ringing:
             log(f"hangup: no live call in chat {chat_id}")
         for s in live:
+            s.bot_ends = True           # >>> drop-line: before end_call can echo
             async def go(s=s):
+                call_scope(s.msg_id)    # >>> overlap
                 try:
                     msg = s.account.get_message_by_id(s.msg_id)
                     await self.loop.run_in_executor(None, msg.end_call)
                     log(f"HUNG UP msg {s.msg_id}")
                 except Exception as e:
                     log(f"end_call failed: {e}")
-                await s.close(f"hung up by {dc_env.AGENT_NAME}")
+                await s.close(f"hung up by {dc_env.AGENT_NAME}", by_bot=True)
             asyncio.run_coroutine_threadsafe(go(), self.loop)
         return bool(live or ringing)
 
@@ -3547,6 +3973,7 @@ class CallManager:
     def ended(self, msg_id):
         s = self.sessions.get(int(msg_id))
         if s:
+            s.remote_ended = True       # >>> dead-call-end: the core knows; no end_call from a close
             asyncio.run_coroutine_threadsafe(s.close("CallEnded event"), self.loop)
 
     def forget(self, s):
@@ -3566,6 +3993,7 @@ class CallManager:
             return 0
         for s in sessions:
             s._live_clear()             # >>> call-id: first, owned-by-call-id, as close() clears it
+            s.bot_ends = True           # >>> drop-line: before end_call can echo
 
         def end(s):
             try:
@@ -3583,7 +4011,8 @@ class CallManager:
         for t in enders:
             t.join(max(0.0, deadline - time.monotonic()))
         if self.thread.is_alive():
-            futs = [asyncio.run_coroutine_threadsafe(s.close(why), self.loop) for s in sessions]
+            futs = [asyncio.run_coroutine_threadsafe(s.close(why, by_bot=True), self.loop)
+                    for s in sessions]
             done, waiting = concurrent.futures.wait(futs, timeout=max(0.0, deadline - time.monotonic()))
             for f in done:
                 if f.exception() is not None:
@@ -3593,34 +4022,64 @@ class CallManager:
         return len(sessions)
     # <<< stop
 
+    # >>> overlap (PHONE-297)
+    # A chat can hold more than one call: a call held open (its audio gone)
+    # when the caller rings again from another device. The NEWEST live call
+    # is THE live call there: live_call_id, speak_if_live, invite and
+    # call-live.json (CallSession._open) all name it, so `dc-say --call NEW`
+    # is taken and a line is spoken once, into it. Newest = the call that
+    # came in (or was dialled) last: sessions keeps that order.
+    def held_for_chat(self, chat_id):
+        """Every call in a chat with a peer connection, oldest first, live or not."""
+        return [s for s in list(self.sessions.values()) if s.chat_id == int(chat_id) and s.pc]
+
     def live_for_chat(self, chat_id):
-        return [s for s in self.sessions.values() if s.chat_id == int(chat_id) and s.pc]
+        """The calls in a chat that count as live, oldest first: a peer
+        connection, and audio from the caller inside LIVE_SILENT_S."""
+        now, live = time.time(), []
+        for s in self.held_for_chat(chat_id):
+            quiet = _silent_for(s, now)
+            if quiet is not None and quiet > LIVE_SILENT_S:
+                if not getattr(s, "silent_logged", False):
+                    s.silent_logged = True
+                    log(f"msg {s.msg_id}: no audio from the caller for {quiet:.0f} s "
+                        f"(over {LIVE_SILENT_S:g} s): not live (still open)")
+                continue
+            live.append(s)
+        return live
+
+    def live_session(self, chat_id):
+        """THE live call in a chat (the newest), or None."""
+        live = self.live_for_chat(chat_id)
+        return live[-1] if live else None
+    # <<< overlap
 
     # >>> call-id
     def live_call_id(self, chat_id):
         """The id of the live call in a chat, or None. Chat = room, msg = call."""
-        live = self.live_for_chat(chat_id)
-        return live[0].msg_id if live else None
+        s = self.live_session(chat_id)
+        return s.msg_id if s else None
     # <<< call-id
 
     def invite(self, chat_id, addr):
-        """dc-invite CHAT_ID ADDRESS, from the outbox loop."""
-        live = self.live_for_chat(chat_id)
-        for s in live:
-            asyncio.run_coroutine_threadsafe(s.invite(addr), self.loop)
-        if not live:
+        """dc-invite CHAT_ID ADDRESS, from the outbox loop: into THE live call."""
+        s = self.live_session(chat_id)
+        if s is None:
             log(f"invite: no live call in chat {chat_id} for {addr}")
-        return bool(live)
+            return False
+        asyncio.run_coroutine_threadsafe(_in_call(s, s.invite(addr)), self.loop)
+        return True
 
     def speak_if_live(self, chat_id, text, voice=None, who=None):
-        """Called from the outbox loop: a dc-say into a chat with a live call.
-        Returns one future per live call, each with speak()'s result: an
-        empty list (falsy) when no call is live."""
-        live, futs = self.live_for_chat(chat_id), []
-        for s in live:
-            reply_seen(self.loop, s, "dc-say")   # >>> turn-log: before speak, FIFO
-            futs.append(asyncio.run_coroutine_threadsafe(s.speak(text, voice, who, floor=True), self.loop))
-        return futs
+        """Called from the outbox loop: a dc-say into a chat with a live call,
+        spoken into THE live call (the newest), once. Returns a list of one
+        future with speak()'s result, or an empty list (falsy) when no call
+        is live."""
+        s = self.live_session(chat_id)
+        if s is None:
+            return []
+        reply_seen(self.loop, s, "dc-say")   # >>> turn-log: before speak, FIFO
+        return [asyncio.run_coroutine_threadsafe(_in_call(s, s.speak(text, voice, who, floor=True)), self.loop)]
 
 
 _manager = CallManager()

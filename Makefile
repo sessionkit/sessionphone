@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 BUMP ?= patch
 # every tracked *.sh, and every tracked file whose FIRST line is a sh/bash shebang
 SHELLSCRIPTS := $(shell { git ls-files -z | xargs -0 awk 'FNR==1 && /^\#!\/(usr\/bin\/env )?(ba)?sh/ {print FILENAME}'; git ls-files '*.sh'; } | sort -u)
-.PHONY: help install test test-vision bridge lint format check browser build changelog release push publish
+.PHONY: help install test test-vision bridge lint format check browser build pypi-dist changelog release push publish
 
 help:  ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -42,6 +42,32 @@ browser:  ## the web page in headless Chrome: scratch HTTPS localhost, virtual p
 build:  ## wheel + sdist into dist/
 	@uv build
 
+# PyPI shows README.md, where the repo's RELATIVE links 404. pypi-dist
+# builds from the release TAG, never the checkout: `git archive` into a scratch
+# stage, pin the stage's README links to the tag, `uv build` there into dist/,
+# then check BOTH the wheel and the sdist for any relative link left. The links
+# point at the PUBLIC repo's tag, so it refuses unless the local tag v<version>
+# and the tag on PUBLIC_REMOTE are the SAME commit: the kit's `tag-check` names
+# both shas when they differ, and refuses a tag missing on either side.
+# The rewriter is sessionkit's one scripts/pypi_readme.py, never a copy here:
+# KIT_DIR names a sessionkit checkout (default: beside this one), or PYPI_README
+# names the whole command. All three are overridable (`make pypi-dist KIT_DIR=...`).
+KIT_DIR ?= ../sessionkit
+PYPI_README ?= python3 $(KIT_DIR)/scripts/pypi_readme.py
+PUBLIC_REMOTE ?= https://github.com/sessionkit/sessionphone.git
+pypi-dist:  ## wheel + sdist from tag v<version>, README links pinned to it; refuses unless the local and PUBLIC_REMOTE tags are the same commit
+	@set -euo pipefail; \
+	if [ "$(origin PYPI_README)" = file ] && [ ! -f "$(KIT_DIR)/scripts/pypi_readme.py" ]; then \
+	  echo "pypi-dist: no scripts/pypi_readme.py in KIT_DIR=$(KIT_DIR); point KIT_DIR= at a sessionkit checkout (make pypi-dist KIT_DIR=/path/to/sessionkit), or set PYPI_README=" >&2; exit 1; fi; \
+	v="v$$(uv version --short)"; \
+	$(PYPI_README) tag-check --tag "$$v" --remote "$(PUBLIC_REMOTE)" || exit 1; \
+	stage="$$(mktemp -d)"; trap 'rm -rf "$${stage:?}"' EXIT; \
+	git archive "$$v" | tar -x -C "$$stage"; \
+	$(PYPI_README) rewrite --repo sessionkit/sessionphone --ref "$$v" --root "$$stage" "$$stage/README.md"; \
+	(cd "$$stage" && uv build --out-dir "$(CURDIR)/dist"); \
+	dist="dist/$$(echo 'sessionphone' | tr '-' '_')-$${v#v}"; \
+	$(PYPI_README) check "$$dist"-*.whl "$$dist".tar.gz
+
 changelog:  ## print [Unreleased] as the next release will write it, changelog.d/ collated in; writes nothing
 	@python3 scripts/release.py --preview
 
@@ -59,7 +85,7 @@ push:  ## push the branch and the tags to origin (release never pushes; this is 
 # `pass show` (one touch), and what `ps` shows is `uv publish dist/...`.
 # PYPI_TOKEN_PASS_PATH names the pass entry, e.g.
 # pypi/upload-token; set it in your shell profile.
-publish: build  ## upload THIS version's wheel + sdist to PyPI; token via $$PYPI_TOKEN_PASS_PATH (pass) or $$UV_PUBLISH_TOKEN, never on a command line
+publish: pypi-dist  ## upload THIS version's wheel + sdist to PyPI; token via $$PYPI_TOKEN_PASS_PATH (pass) or $$UV_PUBLISH_TOKEN, never on a command line
 	@dist="dist/$$(echo 'sessionphone' | tr '-' '_')-$$(uv version --short)"; \
 	if [ -n "$$UV_PUBLISH_TOKEN" ]; then uv publish "$$dist"*; \
 	elif [ -n "$$PYPI_TOKEN_PASS_PATH" ]; then UV_PUBLISH_TOKEN="$$(pass show "$$PYPI_TOKEN_PASS_PATH" | head -n1)" uv publish "$$dist"*; \

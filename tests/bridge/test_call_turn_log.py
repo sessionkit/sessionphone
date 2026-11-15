@@ -14,6 +14,7 @@ import pathlib
 import re
 import struct
 import tempfile
+import time
 import types
 
 import pytest
@@ -169,13 +170,39 @@ def test_a_reply_with_nothing_awaiting_logs_nothing(rig):
     assert rig.turns() == []
 
 
-def test_after_is_measured_from_the_mailed_line(rig):
+class _Clock:
+    """The clock calls.py reads, and only calls.py: its time() is `now`, which
+    the test moves by hand. Everything else is the real time module."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def time(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def test_after_is_measured_from_the_mailed_line(rig, monkeypatch):
+    """`after` is the reply's instant less the instant the turn's mail went,
+    on the clock the bridge reads. Here that clock moves only by hand, so a
+    late wake on a busy machine cannot move the number (it read 9.1s once)."""
+    clock = _Clock(1000.0)
+    monkeypatch.setattr(calls, "time", clock)
+    send = calls._hooks.mail_in
+
+    def slow_send(*a, **k):
+        clock.now += 30.0               # the send takes 30 s: the turn began at 1000, mailed at 1030
+        return send(*a, **k)
+    monkeypatch.setattr(calls._hooks, "mail_in", slow_send)
     s = _session()
     turn(s)
-    n, mid, t = s.awaiting[0]
-    s.awaiting = ((n, mid, t - 9.0),)   # as if mailed 9 s ago
+    assert [t[2] for t in s.awaiting] == [1030.0]   # stamped when the mail went, not when the turn began
+    time.sleep(0.2)                     # a late wake: real time passes, the bridge's clock does not
+    clock.now += 9.0                    # the reply, 9 s after the mail
     s.replied("mail")
-    assert rig.turns()[1] == "CALL TURN 1 taken=replied via=mail after 9.0s"
+    assert rig.turns()[1] == "CALL TURN 1 taken=replied via=mail after 9.0s"   # never 39.0s, never 9.2s
 
 
 def _closable(s, monkeypatch):
@@ -196,7 +223,8 @@ def test_a_turn_still_waiting_at_hang_up_is_unknown_not_no(rig, monkeypatch):
     turn(s)
     _closable(s, monkeypatch)
     asyncio.run(s.close("hung up"))
-    assert rig.turns()[-1] == "CALL TURN 1 taken=unknown: no reply before hang-up"
+    # PHONE-297: a close is logged as its own call, so its verdicts carry its id
+    assert rig.turns()[-1] == "CALL TURN 1 taken=unknown: no reply before hang-up [call 5531]"
     assert s.awaiting == ()
 
 
@@ -207,7 +235,7 @@ def test_the_last_words_at_hang_up_get_a_verdict_too(rig, monkeypatch):
     asyncio.run(s.close("hung up"))
     t = rig.turns()
     assert t[0].startswith(f"CALL TURN 1 mailed to {BOX}: msg ")
-    assert t[1] == "CALL TURN 1 taken=unknown: no reply before hang-up"
+    assert t[1] == "CALL TURN 1 taken=unknown: no reply before hang-up [call 5531]"
 
 
 def test_a_replied_turn_gets_no_second_verdict_at_hang_up(rig, monkeypatch):
@@ -266,9 +294,12 @@ def test_dc_say_into_a_live_call_counts_as_a_reply_before_it_is_spoken(monkeypat
     s = types.SimpleNamespace(chat_id=12, pc=object(), replied=lambda via: None,
                               speak=lambda *a, **k: order.append("speak"))
     loop = types.SimpleNamespace(call_soon_threadsafe=lambda fn, *a: order.append(("replied",) + a))
-    mgr = types.SimpleNamespace(live_for_chat=lambda c: [s], loop=loop)
+    mgr = types.SimpleNamespace(live_session=lambda c: s, loop=loop)   # PHONE-297: THE live call
     monkeypatch.setattr(calls.asyncio, "run_coroutine_threadsafe", lambda coro, lp: coro)
-    assert calls.CallManager.speak_if_live(mgr, 12, "on it")
+    futs = calls.CallManager.speak_if_live(mgr, 12, "on it")
+    assert futs
+    for c in futs:
+        c.close()                       # the fake loop never runs it
     assert order == [("replied", "dc-say"), "speak"]
 
 

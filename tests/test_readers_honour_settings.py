@@ -27,7 +27,7 @@ import pathlib
 import plistlib
 
 import pytest
-from _kit_log import kit_log
+from _kit_log import root_log
 from click.testing import CliRunner
 
 from sessionphone import paths, service, settings
@@ -206,10 +206,11 @@ def test_bot_status_reads_the_log_in_the_root_phone_json_records(remembered, lau
 
 def test_bot_status_reads_the_bots_own_log_over_the_old_one_in_the_root(remembered, launchd, monkeypatch):
     monkeypatch.setenv("DC_AGENT", "ada")
-    kit_log("ada").parent.mkdir(parents=True)
-    kit_log("ada").write_text("2030-06-09 00:00:01 the line in the bot's own log\n")
+    own = root_log(remembered, "ada")      # the kept root is not the default: its log/ (PHONE-305)
+    own.parent.mkdir(parents=True)
+    own.write_text("2030-06-09 00:00:01 the line in the bot's own log\n")
     r = CliRunner().invoke(cli, ["bot", "status"])
-    assert f"log:     {kit_log('ada')}" in r.output
+    assert f"log:     {own}" in r.output
     assert "the line in the bot's own log" in r.output
 
 

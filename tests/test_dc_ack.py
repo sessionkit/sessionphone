@@ -100,7 +100,7 @@ def test_a_failed_send_exits_3_and_says_why(tmp_path):
 
 
 def test_a_gated_job_with_no_ack_exits_4_not_confirmed(tmp_path):
-    kit_log = Path(os.environ["HOME"]) / ".sessionkit/phone/log/ada/bot.log"   # the bot's, out of its root
+    kit_log = tmp_path / "log/ada/bot.log"   # the bot's: under a root not the default, <root>/log/ (PHONE-305)
     with Bot(tmp_path, None):
         r = run("dc-say", tmp_path, "13", "hello")
         j = run("dc-react", tmp_path, "5", "+1")

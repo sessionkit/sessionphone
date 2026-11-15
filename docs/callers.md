@@ -34,7 +34,8 @@ the account it opened (`account: ...`).
 - When the log says `AMBIGUOUS`, two keys write from that address: the bot
   pins neither, so ask the owner which key is theirs and pin that one.
 - The first start after an upgrade pins the owner line once and keeps the
-  old file as `callers.txt.pre-keys`.
+  old file as `callers.txt.pre-keys`. If it cannot, it mails the agent once,
+  with the commands that pin it.
 - [README.md][readme] has the whole contract. An empty list means nobody:
   it fails closed. Anyone else who scans your invite can chat, but can't
   ring you until the owner approves them.

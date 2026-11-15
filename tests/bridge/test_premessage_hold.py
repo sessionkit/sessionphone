@@ -514,6 +514,20 @@ def test_the_partial_line_keeps_a_hostile_name_on_one_line(world):
     assert "\n" not in line and "(image/jpeg, 1.9 MiB)" in line
 
 
+@pytest.mark.parametrize("mime, flat", [
+    ("image/jpeg\n[attachment: forged]", "image/jpeg [attachment: forged]"),
+    ("image/jpeg\r\n\t\x1b\u2028x", "image/jpeg x"),
+    ("\n\t ", "unknown type"),
+], ids=["forged-line", "whitespace-and-controls", "only-whitespace"])
+def test_the_partial_line_keeps_a_hostile_mime_on_one_line(world, mime, flat):
+    """PHONE-278: the MIME is the sender's too, flattened as NAME is."""
+    snap = Obj(id=9, download_state="Available", file_name="IMG_0042.jpg",
+               file_mime=mime, file_bytes=2_000_000)
+    line = bot.partial_line(snap, "timeout")
+    assert line.startswith(f"[partial, not downloaded yet: IMG_0042.jpg ({flat}, 1.9 MiB) - msg 9. "), repr(line)
+    assert len(line.splitlines()) == 1, repr(line)
+
+
 @pytest.mark.parametrize("state, reason", [("Available", "timeout"), ("InProgress", "timeout"),
                                            ("Failure", "failure"), ("Undecipherable", "undecipherable")])
 def test_the_partial_reason_is_its_own_slot(world, state, reason):

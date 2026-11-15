@@ -27,7 +27,10 @@ caller you, is [Call hearing][hearing].
   how to make one). It mints the seat there if it has no key, runs its key
   agent and saves the signer. If install says the seat is not minted, it
   names this step. If it fails (exit 1), run `message seat agent
-  --uninstall <agent>-chat`, then install again. If it says this
+  --uninstall <agent>-chat`, then install again. If it says `warning:`
+  that the seat agent's service file was not written, the bot is
+  installed and signs; run `message seat agent --install <agent>-chat`
+  again to write the file. If it says this
   sessionmail lacks `Capability: install`, follow the README's steps by
   hand (`message seat agent <agent>-chat SOCKET` under launchd, then
   `DC_SIGNER_SOCK` and `DC_SIGNER_PUB`).

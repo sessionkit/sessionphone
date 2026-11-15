@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# dc-fetch [--profile public] MSG_ID - fetch a file this bot mailed as "not
+# downloaded". MSG_ID is the `msg N` in that mail. The bot fetches only what
+# it itself left undownloaded (size or type setting, a stranger's file, a
+# message that arrived partial); any other id is refused. The file is mailed
+# whole when it lands, once. A second dc-fetch of the same id is refused.
+# The bot refuses, exit 3, nothing fetched: an id it did not leave
+# undownloaded, a message that is gone, a contact request not yet accepted.
+# Its words say which.
+# Exit: 0 the bot's ack says the fetch was taken (its words: mailed now, or
+# started and mailed when it lands); 3 the bot refused or no bot took it,
+# nothing fetched; 4 NOT CONFIRMED - the bot took it and wrote no ack, so a
+# fetch may have started (its log: DC_LOG). 1 usage, 2 could not run.
+set -euo pipefail
+# shellcheck source=dc-env
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/dc-env"
+dc_help "${1:-}"
+PROFILE=""; if [ "${1:-}" = "--profile" ]; then PROFILE="${2:-}"; shift 2; fi
+usage() { echo "usage: dc-fetch [--profile public] MSG_ID" >&2; exit 1; }
+[ $# -eq 1 ] || usage
+m="$1"
+case "$m" in
+  ''|*[!0-9]*) echo "dc-fetch: '$m' is not a message id (a positive integer)" >&2; usage ;;
+esac
+# core's ids are uint32; ten digits at most, so bash's arithmetic never wraps
+{ [ "${#m}" -le 10 ] && [ "$((10#$m))" -gt 0 ] && [ "$((10#$m))" -le 4294967295 ]; } ||
+  { echo "dc-fetch: '$m' is not a message id (a positive integer)" >&2; usage; }
+OUT="$(dc_outbox "$PROFILE")" || exit 2
+dc_precheck msg "$m" "" "$PROFILE" || exit $?
+dc_job "$OUT" "$(python3 -c 'import json,sys;print(json.dumps({"fetch":int(sys.argv[1])}))' "$m")"
+echo "dc-fetch: $DC_DONE${PROFILE:+ on profile $PROFILE}"

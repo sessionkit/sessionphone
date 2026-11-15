@@ -31,6 +31,22 @@ rules; this page has the rest.
   only)`. `--text-only` with `--call` is a usage error (exit 1, nothing
   sent).
 - `dc-hangup CHAT_ID` ends it.
+- **A call that drops says so in its chat.** When a connected call ends and
+  the bot did not end it (the connection failed, or the phone ended it), the
+  bot posts one line to the call's chat, never spoken:
+  `call dropped 14:05:30 after 600 s; last audio heard 20 s before the close`.
+  A call that heard nothing from the caller ends the line
+  `no audio was heard from the caller`. A call ended by `dc-hangup`, a
+  decline, or the bot stopping posts nothing. The line goes through
+  `channels.txt` like every in-call post; a refusal or a failed send is
+  logged in `bot.log`, and the transcript still goes.
+- **A call whose connection dies is ended on the phone too.** When the
+  connection fails or closes and the phone never said it hung up, the bot
+  ends the call in the core once, so the caller's app shows it over instead
+  of leaving them talking into a dead call. The drop line still posts.
+  `bot.log` says `ENDED msg <id> in the core: connection failed` (or
+  `closed`); a failure to end it is logged there and never stops the
+  transcript.
 - Hearing them is the bot's job. It sends what they say to the
   speech-to-text server at `DC_STT_URL` ([Voice notes][voice-notes]) and
   mails you each finished turn. It also hands the call's audio to ears on
@@ -51,6 +67,11 @@ rules; this page has the rest.
 - By default (`DC_ANSWER=auto`) the bot answers at once and greets in your
   voice. It's cheap: what they say lands in your box as mail, and no turn
   of yours is spent on the pick-up.
+- **One greeting on a call: the bot's.** The `CALL CONNECTED` mail says
+  they have already been greeted and quotes the line said: your
+  `DC_GREETING`, the voicemail greeting, the hello on a call the bot made,
+  or a line chosen for the call. Do not greet them again; reply to what
+  they say. A greeting of yours would play straight after the bot's.
 - With `DC_ANSWER=ring` in the bot's environment it rings you first. You
   get a `RINGING` mail naming the chat.
   - `dc-answer CHAT_ID` picks up, and says whether it did (exit 3: it had
@@ -61,6 +82,42 @@ rules; this page has the rest.
   - No pick-up within `DC_RING_WAIT` seconds (default 25) and it answers as
     voicemail (`DC_GREETING_VOICEMAIL`). What they say still reaches you as
     mail.
+
+## Where a program finds the call sockets
+
+The mouth and the ears reach a call through the bot's two sockets,
+`call-mouth.sock` and `call-ears.sock`. They are in the bot's home: its root,
+or `<root>/<profile>/` for a named profile, unless `DC_MOUTH_SOCK` or
+`DC_EARS_SOCK` names another path. A bot's root can be set in its job, in
+`phone.json` or by default, so a program on the same Mac cannot always work
+it out. The bot therefore also says where its sockets are, in one fixed
+folder. This is a stable contract: a reader may rely on it.
+
+```text
+~/.sessionkit/phone/run/<agent>/call-mouth.sock            -> the bot's mouth socket
+~/.sessionkit/phone/run/<agent>/call-ears.sock             -> the bot's ears socket
+~/.sessionkit/phone/run/<agent>.<profile>/call-mouth.sock  (a named profile)
+~/.sessionkit/phone/run/<agent>.<profile>/call-ears.sock
+```
+
+- Each entry is a symlink to the socket the bot actually bound, made once
+  the socket is listening. An override (`DC_MOUTH_SOCK`, `DC_EARS_SOCK`) is
+  linked as it was bound.
+- `<agent>` is the bot's agent name. The `.<profile>` suffix is added only
+  for a named profile; the default profile's entry is the bare name.
+- `run/` and each entry folder are mode 0700, as the sockets are 0600: only
+  the user the bot runs as can read them.
+- To find every bot's mouth, glob `~/.sessionkit/phone/run/*/call-mouth.sock`
+  and connect to each. The probe (`{"probe": true}`) answers with the bot's
+  agent, profile and live calls.
+- A link left by a bot that crashed points at a socket nobody serves:
+  `connect()` fails, as it does on a stale socket. Skip it. A restarted
+  bot replaces its own link, and at a normal exit removes it if it still
+  points at its socket.
+- Only the bot publishes here. The web demo's sockets (`sessionphone web
+  --legs`) are not listed.
+- If the folder cannot be written, the bot logs it and serves its sockets
+  anyway.
 
 [skill]: ../skills/sessionphone/SKILL.md
 [voice-notes]: call-hearing.md#voice-notes

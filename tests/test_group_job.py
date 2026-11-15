@@ -29,6 +29,7 @@ import time
 import _keyfakes
 import pytest
 
+from sessionphone import dctools
 from sessionphone.bridge import bot, calls
 
 OWNER = "alice@relay.example"
@@ -41,9 +42,10 @@ AGENT_BOX = "agent@host.example"    # DC_MAILTO: where the list alert goes (PHON
 
 
 def made(k, whos):
-    """The exact ok:true ack detail for a group made as chat NEW."""
+    """The exact ok:true ack detail for a group made as chat NEW. Its dc-say is
+    the footer's (dc_env.say_cmd, PHONE-307): this install's, never the bare word."""
     return (f"made group {NAME!r}, chat {NEW}, members {k}: {whos}; nothing was sent. "
-            f"List it: sessionphone channels add NAME chat:{NEW}, then dc-say NAME TEXT")
+            f"List it: sessionphone channels add NAME chat:{NEW}, then {bot.dc_env.say_cmd(bot.PROFILE)} NAME TEXT")
 
 
 class Done(Exception):
@@ -411,3 +413,62 @@ def test_no_rig_patches_the_time_module_sleep() -> None:
                     hits += [f"{os.path.relpath(path, tests)}:{n}" for n, line in enumerate(fh, 1)
                              if shapes.search(line)]
     assert not hits, hits
+
+
+# ---- PHONE-307: the ack's dc-say is this install's, as the footer's is ----
+
+FOREIGN_SAY = """#!/bin/sh
+echo "$0 $*" > "$FOREIGN_MARK"
+echo "ValueError: invalid literal for int() with base 10: '$1'" >&2
+exit 1
+"""
+OURS = "/opt/kit/.venv/bin/dc-say"      # a stand-in for own_say()'s absolute path
+
+
+def _made_say(ack) -> str:
+    """The command the ack tells the agent to run its first words with."""
+    m = re.search(r", then (.+) NAME TEXT$", ack["detail"])
+    assert m, ack
+    return m.group(1)
+
+
+def test_the_made_group_ack_names_the_footer_dc_say_not_the_bare_word(rig, monkeypatch) -> None:
+    monkeypatch.setattr(bot.dc_env, "SAY", OURS)
+    rig.write()
+    (ack,) = rig.run(group())
+    assert ack["ok"] is True, ack
+    assert _made_say(ack) == OURS, ack
+    assert "then dc-say " not in ack["detail"], ack
+
+
+def test_a_second_profile_s_ack_names_its_outbox_as_the_footer_does(rig, monkeypatch) -> None:
+    monkeypatch.setattr(bot.dc_env, "SAY", OURS)
+    monkeypatch.setattr(bot, "PROFILE", "public")
+    monkeypatch.setenv("DC_OUTBOX", str(rig.out))
+    rig.write()
+    (ack,) = rig.run(group())
+    assert ack["ok"] is True, ack
+    assert _made_say(ack) == f"DC_OUTBOX={rig.out} {OURS}" == bot.dc_env.say_cmd("public"), ack
+
+
+def test_the_made_group_ack_runs_this_install_dc_say_not_the_first_on_path(rig, tmp_path) -> None:
+    """End to end, as test_say_footer does for the footer: the ack's line, pasted
+    with a foreign dc-say first on PATH, never runs the foreign one."""
+    rig.write()
+    (ack,) = rig.run(group())
+    say = _made_say(ack)
+    if not dctools._ours("dc-say", dctools.homes())[0] and not bot.dc_env.env("SAY"):
+        pytest.skip("this install has no dc-say of its own to name (own_say's bare fallback)")
+    kin, mark, root = tmp_path / "kin" / "bin", tmp_path / "foreign-ran", tmp_path / "root"
+    kin.mkdir(parents=True)
+    root.mkdir()
+    (kin / "dc-say").write_text(FOREIGN_SAY)
+    (kin / "dc-say").chmod(0o755)
+    env = {"HOME": str(tmp_path / "home"), "FOREIGN_MARK": str(mark),
+           "PATH": f"{kin}{os.pathsep}/usr/bin{os.pathsep}/bin",
+           "DC_ROOT": str(root), "DC_AGENT": "ada", "DC_HOST": "host.example"}
+    r = subprocess.run(["bash", "-c", f"{say} club 'hi'"], env=env, capture_output=True,
+                       text=True, timeout=60, check=False)
+    assert not mark.exists(), f"the foreign dc-say ran: {mark.read_text()}"
+    assert "ValueError" not in r.stderr, r.stderr
+    assert r.returncode == 3 and r.stderr.startswith("dc-say: "), (r.returncode, r.stderr)

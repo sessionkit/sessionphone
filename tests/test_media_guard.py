@@ -491,8 +491,9 @@ def test_every_verb_that_reaches_the_pack_requires_it_and_no_other_does():
 
 
 def test_require_runs_first_in_each_media_verb():
-    """Before anything else runs: only the docstring, and web's own
-    `if ctx.invoked_subcommand is not None: return`, may come first."""
+    """Before anything else runs: only the docstring, web's own
+    `if ctx.invoked_subcommand is not None: return`, and a launchd verb's
+    `_need_launchd(<its own name>)`, which also writes nothing, may come first."""
     for verb, fn in _commands():
         if verb not in MEDIA_VERBS:
             continue
@@ -500,6 +501,8 @@ def test_require_runs_first_in_each_media_verb():
         if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             body.pop(0)
         if isinstance(body[0], ast.If) and "invoked_subcommand" in ast.unparse(body[0].test):
+            body.pop(0)
+        if ast.unparse(body[0]) == f"_need_launchd({verb!r})":
             body.pop(0)
         first = body[0]
         assert isinstance(first, ast.Try) and _require_calls(first), f"{verb}: {ast.unparse(first)[:120]}"

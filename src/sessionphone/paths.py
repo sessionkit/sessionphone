@@ -8,8 +8,9 @@ still lives in the old default, `~/.sessionphone`, keeps it there until it is
 moved (default_root). The bot (the resident bridge), the setup verbs and the
 dc-* tools read the same paths from here: this is the one place that rule is
 kept.
-The bot's logs are the one thing out of the root: they are in its own folder
-of the kit, ~/.sessionkit/phone/log/<bot>[/<profile>]/ (log_dir).
+The bot's logs are the one thing out of the default root: they are in its own
+folder of the kit, ~/.sessionkit/phone/log/<bot>[/<profile>]/. A bot under any
+other root keeps them in that root, <root>/log/<bot>[/<profile>]/ (log_dir).
 """
 from __future__ import annotations
 
@@ -131,36 +132,71 @@ def old_root_notice() -> str:
 
 
 # ---- the bot's logs: ~/.sessionkit/phone/log/<bot>[/<profile>]/ --------------
-# Both of a bot's logs live here, out of its root: bot.log, the bot's own, and
-# bot.launchd.log, launchd's capture of its output (the job's StandardOutPath
-# and StandardErrorPath). The folder is per bot, because roots are per bot,
-# and a named profile has its own folder inside it: two bots, or two profiles
-# of one bot, never write one file. This is the one rule: the bot's log
-# (dc_env.log_file), the job's plist (service.job), the readers
-# (dc_env.log_for_reader: `bot status`, bin/dc-env, bin/dc-log) all ask it.
+# Both of a bot's logs live here: bot.log, the bot's own, and bot.launchd.log,
+# launchd's capture of its output (the job's StandardOutPath and
+# StandardErrorPath). The folder is per bot, because roots are per bot, and a
+# named profile has its own folder inside it: two bots, or two profiles of one
+# bot, never write one file.
+# That is the kit's folder for a bot under the DEFAULT root (DEFAULT_ROOT or
+# OLD_ROOT, judged by path, symlinks resolved: a root named explicitly that is
+# the default is the default). A bot under any other root (a test bot, a second
+# bot) keeps the same layout in its root, <root>/log/<bot>[/<profile>]/, so it
+# never writes into the default bot's log tree; the root is 0700, and a log names
+# chats and callers. No root to judge (None) is the kit's folder.
+# This is the one rule: the bot's log (dc_env.log_file), the job's plist
+# (service.job), the readers (dc_env.log_for_reader: `bot status`, bin/dc-env,
+# bin/dc-log) all ask it, each with the root its bot runs under.
 # DC_LOG still wins for bot.log. A log the bot wrote before, in its root, is
 # never moved or deleted; a reader finds it while it is the only one there.
 BOT_LOG = "bot.log"
 LAUNCHD_LOG = "bot.launchd.log"
+LOG = "log"         # the logs' folder under a root that is not the default
 
 
-def log_dir(bot: str, profile: str = "") -> pathlib.Path:
-    """The folder bot BOT's logs are written in, expanded:
-    ~/.sessionkit/phone/log/<bot>/, or <that>/<profile>/ for a named PROFILE
-    ("" is the default profile). Creates nothing (make_log_dir does)."""
-    d = pathlib.Path(kit_dir("phone", "log")).expanduser() / bot
+def _resolved(path: str | os.PathLike) -> pathlib.Path:
+    """PATH expanded and absolute, symlinks resolved as far as they are there."""
+    p = pathlib.Path(path).expanduser()
+    try:
+        return p.resolve()
+    except (OSError, RuntimeError):     # a symlink loop, an unreadable parent
+        return pathlib.Path(os.path.abspath(p))
+
+
+def is_default_root(root: str | os.PathLike) -> bool:
+    """Is ROOT the default root, DEFAULT_ROOT or OLD_ROOT, by path (expanded,
+    symlinks resolved)? Where it was named (the shell, phone.json, the
+    plist) does not matter."""
+    r = _resolved(root)
+    return r in (_resolved(DEFAULT_ROOT), _resolved(OLD_ROOT))
+
+
+def log_base(root: str | os.PathLike | None = None) -> pathlib.Path:
+    """The folder every bot's log folder is in, expanded: the kit's,
+    ~/.sessionkit/phone/log/, for the default root or none (None); else
+    <root>/log/."""
+    if root is None or is_default_root(root):
+        return pathlib.Path(kit_dir("phone", "log")).expanduser()
+    return pathlib.Path(root).expanduser() / LOG
+
+
+def log_dir(bot: str, profile: str = "", root: str | os.PathLike | None = None) -> pathlib.Path:
+    """The folder bot BOT's logs are written in, expanded: <log_base(ROOT)>/<bot>/,
+    or <that>/<profile>/ for a named PROFILE ("" is the default profile). ROOT
+    is the root the bot runs under; None is the kit's folder (log_base).
+    Creates nothing (make_log_dir does)."""
+    d = log_base(root) / bot
     return d / profile if profile else d
 
 
-def bot_log(bot: str, profile: str = "") -> pathlib.Path:
-    """Where bot BOT (its PROFILE) writes its own log, with no DC_LOG."""
-    return log_dir(bot, profile) / BOT_LOG
+def bot_log(bot: str, profile: str = "", root: str | os.PathLike | None = None) -> pathlib.Path:
+    """Where bot BOT (its PROFILE, under ROOT) writes its own log, with no DC_LOG."""
+    return log_dir(bot, profile, root) / BOT_LOG
 
 
-def launchd_log(bot: str, profile: str = "") -> pathlib.Path:
-    """Where launchd writes bot BOT's (its PROFILE's) output: the plist's
-    StandardOutPath and StandardErrorPath."""
-    return log_dir(bot, profile) / LAUNCHD_LOG
+def launchd_log(bot: str, profile: str = "", root: str | os.PathLike | None = None) -> pathlib.Path:
+    """Where launchd writes bot BOT's (its PROFILE's, under ROOT) output: the
+    plist's StandardOutPath and StandardErrorPath."""
+    return log_dir(bot, profile, root) / LAUNCHD_LOG
 
 
 def make_log_dir(path: pathlib.Path) -> None:
@@ -179,6 +215,31 @@ def make_log_dir(path: pathlib.Path) -> None:
             pass
         else:
             d.chmod(0o700)
+
+
+# ---- the call sockets' index: ~/.sessionkit/phone/run/<bot>[.<profile>]/ ----
+# A bot's call sockets are under its root, and a bot's root can be set in many
+# places (DC_ROOT in its job, SESSIONPHONE_ROOT, phone.json, the default), so a
+# reader on the same Mac cannot work it out. While its call legs serve, the bot
+# keeps a symlink to each socket it bound in ONE fixed folder of the kit, one
+# entry folder per bot and profile: <bot> for the default profile, <bot>.<profile>
+# for a named one. A reader globs run/*/call-mouth.sock (or call-ears.sock) and
+# connects; a link left by a bot that died fails connect() as its socket would.
+# This is a stable contract for readers (docs/calls.md). The bot writes it
+# (bridge/sockindex.py); nothing else does.
+RUN_DIR = kit_dir("phone", "run")
+
+
+def run_dir() -> pathlib.Path:
+    """The call sockets' index, expanded: ~/.sessionkit/phone/run/."""
+    return pathlib.Path(RUN_DIR).expanduser()
+
+
+def run_entry(bot: str, profile: str = "") -> pathlib.Path:
+    """Bot BOT's entry folder in the index, expanded: run/<bot>/, or
+    run/<bot>.<profile>/ for a named PROFILE ("" is the default profile).
+    Creates nothing."""
+    return run_dir() / (f"{bot}.{profile}" if profile else bot)
 
 
 def legacy_or(new: pathlib.Path, old: pathlib.Path) -> pathlib.Path:

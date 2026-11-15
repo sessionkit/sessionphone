@@ -45,7 +45,6 @@ def not_the_role(line: str) -> list[str]:
 @pytest.fixture
 def quiet(monkeypatch):
     monkeypatch.setattr(calls, "_hooks", calls.Hooks(lambda m: None, lambda p: "", lambda *a, **k: None))
-    monkeypatch.setattr(calls, "_recorder", None)
 
 
 def test_the_names_are_the_callers():

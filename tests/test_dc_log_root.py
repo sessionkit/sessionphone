@@ -193,7 +193,8 @@ def test_dc_log_old_default_follows_a_named_root(home, tmp_path):
     r = run("dc-log", home, "--raw", DC_ROOT=str(root), **ADA)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "OLD UNDER DC_ROOT"
-    assert str(kit(home)) in r.stderr
+    assert str(root / "log/ada/bot.log") in r.stderr        # the named root's own log folder (PHONE-305)
+    assert str(kit(home)) not in r.stderr
 
 
 def test_dc_log_prefers_the_new_log_when_both_exist(home):

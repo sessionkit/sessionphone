@@ -619,6 +619,6 @@ def test_script_bad_input_exits_1_and_queues_nothing(tmp_path, args, why):
     assert not (tmp_path / "outbox").exists() or not list((tmp_path / "outbox").iterdir())
 
 
-def test_wheel_bin_links_the_tool():
-    p = ROOT / "wheel-bin" / "dc-xdc-realtime"
-    assert p.is_symlink() and os.readlink(p) == "../bin/dc-xdc-realtime"
+def test_dcbin_links_the_tool():
+    p = ROOT / "src" / "sessionphone" / "dcbin" / "dc-xdc-realtime"
+    assert p.is_symlink() and os.readlink(p) == "../../../bin/dc-xdc-realtime"

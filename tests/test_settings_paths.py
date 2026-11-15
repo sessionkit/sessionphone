@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 from sessionphone import paths, settings
-from sessionphone.bridge import calls, recording
+from sessionphone.bridge import calls, recording, sockindex
 
 # what `bot install` remembers: settings.FILE as shipped (conftest moves it per test)
 PHONE_CONF = paths.kit_settings("phone", "phone.json")
@@ -32,6 +32,13 @@ PHONE_CONF = paths.kit_settings("phone", "phone.json")
 LOG_DIR = f"{paths.kit_dir('phone', 'log')}/<agent>/"
 LOG_PATHS = {LOG_DIR, LOG_DIR + paths.BOT_LOG, LOG_DIR + paths.LAUNCHD_LOG,
              LOG_DIR + "<profile>/", LOG_DIR + "<profile>/" + paths.BOT_LOG}
+# the call sockets' index as the docs name it: paths.run_entry's layout, one
+# entry per bot (<agent>) or per named profile (<agent>.<profile>), and the glob
+# a reader runs over it
+RUN_DIR = f"{paths.RUN_DIR}/"
+RUN_PATHS = {RUN_DIR, RUN_DIR + "<agent>/", RUN_DIR + "*/" + sockindex.MOUTH,
+             *(RUN_DIR + e + s for e in ("<agent>/", "<agent>.<profile>/")
+               for s in (sockindex.MOUTH, sockindex.EARS))}
 
 
 def test_ears_conf_wins_when_set(monkeypatch, tmp_path):
@@ -70,7 +77,7 @@ SUPERSEDED = re.compile(r"\.settings|sessionkit/settings/")
 ALLOWED = {
     "src/sessionphone/bridge/recording.py:145",  # LEGACY_EARS_CONF: stat-ed for the warning only
     "tests/test_stranded_ears_conf.py:23",       # OLD: the HOME=tmp test of the warning
-    "tests/test_settings_paths.py:66",           # SUPERSEDED: this gate's own pattern
+    "tests/test_settings_paths.py:73",           # SUPERSEDED: this gate's own pattern
     "docs/configuration.md:258",                 # the "Upgrading from 0.1.0" note
 }
 
@@ -154,7 +161,8 @@ def test_every_kit_path_in_the_docs_is_one_the_code_builds():
     """Docs cannot import, so each names a kit path in exactly the form the
     code builds: a layout change in the code fails here until the docs follow."""
     state = paths.DEFAULT_ROOT   # the bot's root (PHONE-270); a file in it is named under it
-    built = {recording.EARS_CONF_DEFAULT, calls.MAIL_CONF, PHONE_CONF, settings.MAIL_TEMPLATE, *LOG_PATHS, state}
+    built = {recording.EARS_CONF_DEFAULT, calls.MAIL_CONF, PHONE_CONF, settings.MAIL_TEMPLATE, *LOG_PATHS, *RUN_PATHS,
+             state}
     docs = [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
     seen, odd = set(), []
     for p in docs:

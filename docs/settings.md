@@ -12,7 +12,9 @@ Every key sessionphone reads: its name, type, default and what it does.
   `bots.<agent>`, so a later install from an empty shell installs the same
   job. See [What bot install remembers][what-bot-install-remembers].
 - **There is no seat or agent override.** One bot has one set of `DC_*`, the
-  set its job was installed with. The kit's guide to the cascade is
+  set its job was installed with. The three download keys go further: they
+  are read from the host settings file alone, never from any shell. See
+  [Host-only keys][host-only-keys]. The kit's guide to the cascade is
   [the kit's settings guide][kit-settings], `docs/settings.md` in the
   sessionkit repo.
 - **sessionmail's mail-route settings ride along.** `bot install` also
@@ -31,6 +33,7 @@ Where each piece lives, and what it is for, is on the
 The keys, by what they set:
 
 - [Identity and mail][identity-and-mail]
+- [Host-only keys][host-only-keys]
 - [Mail route][mail-route]
 - [Paths][paths]
 - [Chat][chat]
@@ -69,7 +72,7 @@ moves it.
 | `DC_SIGNER_SOCK` | path | `SEAT_SOCKET` from `message seat agent --install` | the socket of the seat's key agent. Unset on the mail drop, the bot does not sign. When it signs (an MTA, or `--registry`) with neither `DC_SIGNER_*` set, `bot install` runs that command and uses what it prints (saved only with `--registry`); a sessionmail without `Capability: install` refuses instead |
 | `DC_SIGNER_PUB` | path | `SEAT_PUB` from `message seat agent --install` | the seat's `.pub`, or a copy kept apart from the key. Set both `DC_SIGNER_*` to use a seat agent you run yourself |
 | `DC_BOT_BOX` | path | the box `message path <agent>-chat` names | the bot's own mailbox, which it reads for mail into a call. Unset, sessionmail says where it is; with no such box the bot reads no mail into calls and makes none |
-| `DC_SAY` | command | `dc-say` | the reply command a bridged mail suggests |
+| `DC_SAY` | command | this install's `dc-say`, by its absolute path (the bare `dc-say` when it has none) | the reply command a bridged mail suggests. Set, it is used exactly as given |
 
 ## What bot install remembers
 
@@ -154,6 +157,68 @@ shell, then the file, then the default) and says which it took:
   records a bot, since with none the name changes nothing. A lock is not enforced
   here: only install, which writes, refuses a value your shell gives.
 
+## Host-only keys
+
+The bot's download policy: the largest file it downloads and passes on by
+itself, the kinds it passes on, and the folder it saves them to. These
+three keys are read from `phone.json` and its `phone.d/*.json` drop-ins
+alone, under `bots.<agent>`, and never from the environment.
+
+| Key | Value (a JSON string) | Default (key absent) | What it does |
+| --- | --- | --- | --- |
+| `download_limit` | bytes, decimal digits; `"0"` for no limit | `"16000000"` (16 MB) | the largest file passed on without being asked. Delta Chat is told it too, so a big encrypted file sent in two parts stays on the server |
+| `download_types` | kinds, comma-separated: `image`, `sticker`, `voice`, `audio`, `video`, `file`, `webxdc`, `vcard`; or `"none"` | every kind | the kinds passed on without being asked. `image` covers GIFs; `file` is any other file. A kind is judged by what Delta Chat says the message is, never by the MIME type the sender gave |
+| `save_dir` | an absolute path, `~` allowed | `<home>/attachments` | where a passed-on file is copied, as `chat-<chat id>/<msg id>-<NAME>`; a stranger's under `untrusted/chat-<chat id>/` |
+
+```json
+{"bots": {"ada": {"DC_HOST": "mac.example.net",
+                  "download_limit": "16000000",
+                  "download_types": "image,voice,file",
+                  "save_dir": "~/ada-files"}},
+ "_locked": ["bots.ada.download_limit"]}
+```
+
+- **Host-only: an agent may not change them.** No shell sets them, an
+  agent's included: a `DC_DOWNLOAD_LIMIT`, or a `download_limit` in the
+  environment, does nothing. No agent, seat or session settings layer is
+  read for them. Whoever can write `phone.json` can change them, as for
+  every key in that file. This holds until the kit's settings let a host
+  mark a key that an agent may change.
+- **The names are plain snake_case, never `DC_*`.** A `DC_*` name is an
+  environment setting that `bot install` carries from the shell into the
+  job. These keys are never carried, and install no longer prints them as
+  `ignored`.
+- **Every value is a JSON string**, as for every key in the file:
+  `"16000000"`, not `16000000`. A number or a list makes the whole file a
+  shape error, which install refuses (exit 2). The bot itself logs it and
+  runs on the three defaults.
+- **`bot install --set KEY=VALUE`** writes one of the three into
+  `phone.json` under this bot's map, keeping its other keys. It is
+  repeatable, and checked before anything is written: a bad value, or a key
+  a file's `_locked` holds at another value, is refused (exit 2, writing
+  nothing), naming the file. A hand-written value is kept across installs.
+- **`_locked`** holds them as it holds any key: a drop-in read after the
+  lock cannot change a locked key, and `--set` cannot either. A lock cannot
+  stop an edit to `phone.json` itself.
+- **A value the bot cannot use takes its default, alone**: a limit that is
+  not decimal digits, an empty `download_types` or one that names no known
+  kind, or a `save_dir` that is not absolute. An unknown kind among known
+  ones is dropped and the rest are kept. Each is logged at start, naming the
+  file and the key. A setting never stops the bot.
+- **Read once, at start.** The bot logs one line, `download policy: limit
+  16000000 (16 MB) (the default), types all (the default), save_dir ...`,
+  and `sessionphone bot status` prints one line for each key, with the file
+  that set it or `the default`. Restart the bot after a change (`bot
+  install` does).
+- **The schema.** `bot install` installs the package's JSON Schema for the
+  file beside it, as `.phone.schema.json`. The package owns that copy:
+  never edit it.
+- **A kind that is off is not saved or passed on.** Delta Chat cannot tell a
+  file's kind before it downloads it, so the account may already hold its
+  bytes. The agent is mailed a `[partial, not downloaded yet ...]` line
+  with the reason and `dc-fetch N`. See the README's
+  [agent contract](../README.md#the-agent-contract-what-reaches-your-agent-and-how).
+
 ## Mail route
 
 These are sessionmail's own settings. sessionphone does not read most of
@@ -211,8 +276,8 @@ root itself, `DC_VOICES`, which every profile shares under `<root>`, and
 | `DC_CALLS_DIR` | `<home>/calls` | one directory per call |
 | `DC_LIVE` | `<home>/call-live.json` | the live call's state |
 | `DC_PID_FILE` | `<home>/bot.pid` | the running bot's pid, start time, command line and root, written once it holds the account and removed at its clean exit. `dc-live` reads it to know the bot is running |
-| `DC_EARS_SOCK` | `<home>/call-ears.sock` | the socket the ears open a call on. The bot serves the call's audio there at every setting, not only with `DC_EARS=1` |
-| `DC_MOUTH_SOCK` | `<home>/call-mouth.sock` | the socket the mouth speaks into a call on |
+| `DC_EARS_SOCK` | `<home>/call-ears.sock` | the socket the ears open a call on. The bot serves the call's audio there at every setting, not only with `DC_EARS=1`. Linked under `~/.sessionkit/phone/run/` (see Calls) |
+| `DC_MOUTH_SOCK` | `<home>/call-mouth.sock` | the socket the mouth speaks into a call on. Linked under `~/.sessionkit/phone/run/` (see Calls) |
 | `DC_INVITE` | unset | a file the bot writes its live invite link to at start |
 | `DC_PROFILE` | unset | a second profile's name, such as `public`. Everything per-account then goes under `<root>/<profile>/`, its home |
 | `DC_OUTBOX_PUBLIC` | `<root>/public/outbox` | the public profile's outbox, read by `sessionphone channels`. Its list sits beside it |
@@ -362,7 +427,7 @@ never the default profile's.
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `DC_VOICE` | voice | `af_sky` | the bot's voice: a Kokoro id, or a clone directory under `DC_VOICES_ROOT` |
+| `DC_VOICE` | voice | `af_sky` | the bot's voice: a Kokoro id, or a clone directory under `DC_VOICES_ROOT`. Unset, `bot install` and `bot status` say on their `speaking:` line that the bot speaks in the default, which on a shared Mac may be another agent's voice |
 | `DC_VOICES_ROOT` | path | `~/.voicemode/voices` | where clone voices live |
 | `DC_TTS` | `auto`/`server`/`apple` | `auto` | `auto` uses the speech server when it answers, else macOS `say` |
 | `DC_KOKORO_URL` | URL | `http://127.0.0.1:8890/v1/audio/speech` | the server for a Kokoro voice |
@@ -419,6 +484,7 @@ read one name and one root. If that question fails, they use `claude` and
 | `DC_XDC_SUMMARY` | text | unset | `dc-xdc-update`: the short text shown beside the app's icon in the chat |
 | `DC_WEB_OUT` | path | `<root>/calllog.html` | `dc-log-web`: the page it writes |
 | `DC_WEB_LINES` | number | `120` | `dc-log-web`: how many log lines the page shows |
+| `DC_PYTHON` | path | set by the console script | the Python a tool runs its package code on. Each `dc-*` command an install puts on the PATH is a console script that sets it to its own interpreter, the one that holds sessionphone, then runs the tool. A checkout's `.venv` comes first, so a tool run from a checkout's `bin/` ignores it. You do not set it |
 | `DC_BOT` | text | unset | deprecated and ignored. `dc-live` once searched every process's command line for it; it now reads the bot's pid file (`DC_PID_FILE`). When it is set, `dc-live` says on stderr that it is ignored |
 
 ## Read from the environment only
@@ -445,6 +511,7 @@ carry them.
 [the-web-call]: #the-web-call
 [mail-route]: #mail-route
 [what-bot-install-remembers]: #what-bot-install-remembers
+[host-only-keys]: #host-only-keys
 [the-dc-tools]: #the-dc--tools
 [read-from-the-environment-only]: #read-from-the-environment-only
 [bot-mail-signing]: bot-mail-signing.md

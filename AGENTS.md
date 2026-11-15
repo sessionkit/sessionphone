@@ -45,6 +45,8 @@ the file `SESSIONKIT_SCRUB_RULES` names. Without it they skip, and the
   delivery or speech server.
 - `bin/dc-env` mirrors `src/sessionphone/bridge/dc_env.py`: change both or
   neither.
-- Every setting is `DC_<NAME>`. `PIP_CHAT_<NAME>` is a deprecated alias that
-  is still read.
+- Every environment setting is `DC_<NAME>`. `PIP_CHAT_<NAME>` is a
+  deprecated alias that is still read. A host-only key, read from
+  `phone.json` and never from the environment, is plain snake_case
+  (`download_limit`, `download_types`, `save_dir`): no shell can change it.
 - Keep private paths, host names and personal addresses out of the tree.

@@ -15,6 +15,7 @@ import os
 import pathlib
 import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -221,8 +222,11 @@ def job(name: str | None = None, python: str | None = None, given=None) -> dict:
         src = ears_src()
         if src:
             env["DC_EARS_SRC"] = src
-    # launchd's capture of the bot's output: ~/.sessionkit/phone/log/<bot>[/<profile>]/
-    log = str(paths.launchd_log(name, dc_env.profile(env)))
+    # launchd's capture of the bot's output, in the bot's log folder (paths.log_dir):
+    # ~/.sessionkit/phone/log/<bot>[/<profile>]/ under the default root, else
+    # <root>/log/<bot>[/<profile>]/, the root being the one the bot runs under
+    # (DC_ROOT, which wins, else SESSIONPHONE_ROOT: dc_env.root_of)
+    log = str(paths.launchd_log(name, dc_env.profile(env), dc_env.root_of(env)))
     return {
         "Label": label(name),
         # the agent in argv, so `ps` tells two bots apart (dc-live reads the bot's bot.pid)
@@ -247,6 +251,29 @@ def job(name: str | None = None, python: str | None = None, given=None) -> dict:
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["launchctl", *args], capture_output=True, text=True, check=False)
+
+
+class NoLaunchd(Exception):
+    """A launchd verb on a host without launchd: exit 2, one plain line."""
+
+
+def launchd() -> bool:
+    """Can this host run the bot's launchd job? macOS, with `launchctl` on
+    PATH, where _launchctl runs it from."""
+    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+
+
+def need_launchd(verb: str) -> None:
+    """Refuse `verb` (bot install, uninstall, status) on a host without
+    launchd, before it reads or writes anything. Its words name the verb and
+    the way that works there: the bot in the foreground, `bot run`."""
+    if launchd():
+        return
+    if sys.platform != "darwin":
+        raise NoLaunchd(f"sessionphone {verb}: macOS only (launchd). "
+                        "On Linux, run the bot with `sessionphone bot run`.")
+    raise NoLaunchd(f"sessionphone {verb}: launchctl is not on PATH (macOS keeps it in /bin). "
+                    "Put /bin on PATH, or run the bot with `sessionphone bot run`.")
 
 
 def domain() -> str:
@@ -625,7 +652,7 @@ def _record_replaced(res, say) -> None:
 def install(name: str | None = None, owner: str | None = None,
             seeded=None, owner_key: str | None = None, say=None, seated=None, shell=None, forget=(),
             settled=None, registry: str | None = None, replace=(),
-            force: bool = False) -> pathlib.Path:
+            force: bool = False, sets=None) -> pathlib.Path:
     """Write the plist (0600) and (re)load it, and check that launchd has it
     loaded. Refuses an unconfigured or unsafe root, a junk mail host, an STT
     URL with no model, and a bot nobody may ring, before it touches the old
@@ -706,15 +733,23 @@ def install(name: str | None = None, owner: str | None = None,
     signer path that is gone refuses (settings.Bad, exit 2), writing nothing;
     when this sessionmail can run the seat's agent (seat.runs_agent), that
     refusal also names the --forget that lets install run it.
-    FORGET names keys to drop from the file. The file is written only once
+    FORGET names keys to drop from the file. SETS ({key: value}, `--set`)
+    names host-only keys (settings.HOST_ONLY) to write into it: judged in
+    resolve, never carried by the job. The file is written only once
     the job is loaded (settings.save), so a refused or failed install leaves
     the last settings that worked; SETTLED, if given, is then called with the
     settings.Resolved, its env the job's. A save that fails still calls
     SEATED and SETTLED (the job is loaded), then raises settings.NotSaved,
-    its `plist` the job's plist."""
+    its `plist` the job's plist. With the settings, the package's schema for
+    phone.json is installed beside it (settings.install_schema); a schema
+    that cannot be written is said to SAY as a warning, and changes nothing else.
+    So is the Seat's own warning (seat.run_agent: `message seat agent
+    --install` answered 3, its service file not written), as soon as the
+    agent is run: the install goes on with the signer it printed."""
     shell = os.environ if shell is None else shell
     res = settings.resolve(shell, name=name, forget=forget,
-                           runs_agent=lambda given: seat.runs_agent(given, shell), replace=replace)
+                           runs_agent=lambda given: seat.runs_agent(given, shell), replace=replace,
+                           sets=sets)
     name = res.name
     paths.ensure_private(at=res.root)
     j = job(name, python=named_python(), given=res.given)
@@ -764,6 +799,8 @@ def install(name: str | None = None, owner: str | None = None,
         res.keyed = {k: env[k] for k in seat.SIGNER_VARS}   # saved: later installs and starts sign
     else:
         made = seat.run_agent(env, me, shell)   # sessionmail's write: the seat's agent
+    if made.warning and say is not None:     # run_agent's exit 3: the agent runs, said once
+        say(made.warning)
     why = seatmail.check(env, seat=me)           # the bot's own start check, on the job's env
     if why:
         raise NoSigner(why)
@@ -804,6 +841,12 @@ def install(name: str | None = None, owner: str | None = None,
         settings.save(res)             # only once the job is loaded
     except settings.NotSaved as exc:   # the job runs: say all of it, then this
         unsaved = exc
+    try:
+        settings.install_schema()      # beside phone.json, where the kit's reader looks
+    except OSError as exc:
+        if say is not None:
+            say(f"warning: the settings schema was not installed at "
+                f"{settings.shown(settings.schema_path())} ({exc.strerror or exc})")
     if seated is not None:
         seated(made, box)
     if settled is not None:
@@ -963,14 +1006,16 @@ def _plist(p: pathlib.Path) -> dict:
 
 def log_paths(name: str | None = None) -> tuple[pathlib.Path, pathlib.Path]:
     """(the bot's own log, launchd's log for its job), as the installed plist
-    names them. The bot's: DC_LOG, else ~/.sessionkit/phone/log/<bot>[/<DC_PROFILE>]/bot.log
-    (dc_env.log_for_reader), unless only the bot's old log is there (a bot
-    not started on this version yet): <home>/bot.log, the home being <DC_ROOT, else
-    SESSIONPHONE_ROOT, else the root>[/<DC_PROFILE>]. launchd's: the job's
-    StandardErrorPath, which an older plist names in the root
-    (<root>/bot.launchd.log), else paths.launchd_log, unless only
-    <root>/bot.launchd.log is there. Read from the plist, never this shell,
-    so a job not yet installed again is still found where it writes."""
+    names them. The bot's: DC_LOG, else <log folder>/bot.log (dc_env.log_for_reader;
+    the folder is ~/.sessionkit/phone/log/<bot>[/<DC_PROFILE>]/ under the default
+    root, else <root>/log/<bot>[/<DC_PROFILE>]/, paths.log_dir), unless only the
+    bot's old log is there (a bot not started on this version yet):
+    <home>/bot.log, the home being <root>[/<DC_PROFILE>], the root being DC_ROOT,
+    else SESSIONPHONE_ROOT, else paths.root(). launchd's: the job's
+    StandardErrorPath, which an older plist names where it was then
+    (<root>/bot.launchd.log, or the kit's folder), else paths.launchd_log,
+    unless only <root>/bot.launchd.log is there. Read from the plist, never this
+    shell, so a job not yet installed again is still found where it writes."""
     name = name or agent()
     j = _plist(plist_path(name))
     env = j.get("EnvironmentVariables") or {}
@@ -982,8 +1027,8 @@ def log_paths(name: str | None = None) -> tuple[pathlib.Path, pathlib.Path]:
     if isinstance(err, str) and err:
         launchd_log = pathlib.Path(err)
     else:
-        launchd_log = paths.legacy_or(paths.launchd_log(name, dc_env.profile(env)),
-                                      paths.root() / paths.LAUNCHD_LOG)
+        launchd_log = paths.legacy_or(paths.launchd_log(name, dc_env.profile(env), root),
+                                      root / paths.LAUNCHD_LOG)
     return bot_log, launchd_log
 
 

@@ -261,7 +261,6 @@ def test_voicemail_greets_as_voicemail(monkeypatch, tmp_path):
         s.guest_list = lambda: []
         s.manager = types.SimpleNamespace(loop=types.SimpleNamespace(
             run_in_executor=lambda _ex, f: f()))
-        monkeypatch.setattr(calls, "_recorder", object())
         monkeypatch.setattr(calls, "set_call_id", lambda _id: None)
 
         async def speak(text, voice=None, who=None, r=r, **_kw):

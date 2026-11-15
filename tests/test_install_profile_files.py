@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 import pytest
-from _kit_log import kit_log
+from _kit_log import root_log
 from click.testing import CliRunner
 
 from sessionphone import service
@@ -210,7 +210,7 @@ def test_a_named_profile_on_its_own_files_installs(rig, monkeypatch, tmp_path, l
     env = plistlib.loads((tmp_path / "job.plist").read_bytes())["EnvironmentVariables"]
     assert env["DC_PROFILE"] == "x"
     assert any(c[0] == "bootstrap" for c in launchd.calls)
-    assert f"log:       {kit_log('ada', 'x')}" in r.output          # the profile's own log
+    assert f"log:       {root_log(rig, 'ada', 'x')}" in r.output          # the profile's own log
 
 
 def test_a_named_profile_on_a_file_of_its_own_named_by_setting_installs(rig, monkeypatch, tmp_path):
@@ -226,7 +226,7 @@ def test_a_named_profile_on_a_file_of_its_own_named_by_setting_installs(rig, mon
 def _job(tmp_path, root, **env):
     j = {"Label": service.label("ada"),
          "EnvironmentVariables": {"SESSIONPHONE_ROOT": str(root), "DC_AGENT": "ada", **env},
-         "StandardErrorPath": str(kit_log("ada", env.get("DC_PROFILE", ""), "bot.launchd.log"))}
+         "StandardErrorPath": str(root_log(root, "ada", env.get("DC_PROFILE", ""), "bot.launchd.log"))}
     (tmp_path / "job.plist").write_bytes(plistlib.dumps(j))
 
 
@@ -242,9 +242,9 @@ def _refusing(launchd, monkeypatch):
 
 def test_log_paths_is_the_profiles_own_home(rig, tmp_path):
     _job(tmp_path, rig, DC_PROFILE="x")
-    assert service.log_paths("ada")[0] == kit_log("ada", "x")
+    assert service.log_paths("ada")[0] == root_log(rig, "ada", "x")
     _job(tmp_path, rig)
-    assert service.log_paths("ada")[0] == kit_log("ada")           # the default profile's own
+    assert service.log_paths("ada")[0] == root_log(rig, "ada")           # the default profile's own
     _job(tmp_path, rig, DC_PROFILE="x", DC_LOG=str(tmp_path / "given.log"))
     assert service.log_paths("ada")[0] == tmp_path / "given.log"    # DC_LOG still wins
 
@@ -255,23 +255,23 @@ def test_bot_status_names_a_refusing_profile_jobs_refusal_and_its_fix(rig, monke
     _job(tmp_path, rig, DC_PROFILE="x", DC_CALLERS_FILE=str(rig / "callers.txt"))
     why = dc_env.profile_files_problem({"SESSIONPHONE_ROOT": str(rig), "DC_PROFILE": "x",
                                         "DC_CALLERS_FILE": str(rig / "callers.txt")})
-    kit_log("ada").parent.mkdir(parents=True)
-    kit_log("ada").write_text("2030-06-09 09:00:00 default bot: online\n")
-    kit_log("ada", "x").parent.mkdir()
-    kit_log("ada", "x").write_text(f"2030-06-09 09:00:10 REFUSED to start: {why}\n")
+    root_log(rig, "ada").parent.mkdir(parents=True)
+    root_log(rig, "ada").write_text("2030-06-09 09:00:00 default bot: online\n")
+    root_log(rig, "ada", "x").parent.mkdir()
+    root_log(rig, "ada", "x").write_text(f"2030-06-09 09:00:10 REFUSED to start: {why}\n")
     _refusing(launchd, monkeypatch)
     s = CliRunner().invoke(cli, ["bot", "status"])
     assert "running: no (last exit 2)" in s.output, s.output
-    assert f"log:     {kit_log('ada', 'x')}" in s.output
+    assert f"log:     {root_log(rig, 'ada', 'x')}" in s.output
     assert f"last:    2030-06-09 09:00:10 REFUSED to start: {why}" in s.output
     assert "Unset DC_CALLERS_FILE" in s.output
 
 
 def test_bot_status_of_the_default_profile_is_unchanged(rig, monkeypatch, tmp_path, launchd):
     _job(tmp_path, rig)
-    kit_log("ada").parent.mkdir(parents=True)
-    kit_log("ada").write_text("2030-06-09 09:00:00 default bot: online\n")
+    root_log(rig, "ada").parent.mkdir(parents=True)
+    root_log(rig, "ada").write_text("2030-06-09 09:00:00 default bot: online\n")
     _refusing(launchd, monkeypatch)
     s = CliRunner().invoke(cli, ["bot", "status"])
-    assert f"log:     {kit_log('ada')}" in s.output, s.output
+    assert f"log:     {root_log(rig, 'ada')}" in s.output, s.output
     assert "last:    2030-06-09 09:00:00 default bot: online" in s.output

@@ -161,10 +161,16 @@ def test_readme_configuration_links_both_pages_relatively():
     assert "](docs/settings.md)" in sec
 
 
-def test_readme_logs_name_the_files_the_code_writes(monkeypatch, tmp_path):
+def test_readme_logs_name_the_files_the_code_writes(monkeypatch, tmp_path, home_is_tmp):
     sec = _section((ROOT / "README.md").read_text(encoding="utf-8"), "Logs")
-    monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path))
     monkeypatch.setattr(service, "ears_src", lambda: None)
+    # a root that is not the default keeps both logs in it (PHONE-305), as the README says
+    monkeypatch.setenv("SESSIONPHONE_ROOT", str(tmp_path))
+    j = service.job("tester", python="/bin/true")
+    assert Path(j["StandardOutPath"]) == tmp_path / "log" / "tester" / "bot.launchd.log"
+    assert "`<root>/log/<agent>/`" in sec and "`<root>/log/<agent>/<profile>/`" in sec
+    # the default root: the kit's folder
+    monkeypatch.setenv("SESSIONPHONE_ROOT", str(home_is_tmp / ".sessionkit" / "phone" / "state"))
     j = service.job("tester", python="/bin/true")
     assert Path(j["StandardOutPath"]).name in sec          # bot.launchd.log
     assert Path(j["StandardErrorPath"]) == Path(j["StandardOutPath"])

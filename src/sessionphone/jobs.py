@@ -38,6 +38,8 @@ KEYS = frozenset({
     "greeting", "group", "hangup", "html", "info", "invite", "members", "msg_id", "no_speak",
     "payload", "reaction", "summary", "text", "voice", "voice_message", "webxdc_update", "who",
     "avatar",       # sessionphone avatar
+    "fetch",        # dc-fetch (PHONE-283)
+    "quote_msg_id",     # dc-say --quote: never msg_id, which means "react to this"
     "webxdc_realtime", "webxdc_realtime_advertise",    # dc-xdc-realtime
     "webxdc_realtime_feed", "feed", "stop",            # a heard feed into an app
 })

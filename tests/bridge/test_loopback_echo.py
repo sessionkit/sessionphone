@@ -93,6 +93,64 @@ def test_echo_only_mic_is_the_echo_alone():
     assert m.caller_rms == []
 
 
+def _frames(path, n, level, at=0.0):
+    for _ in range(n):
+        path.heard(np.full(rig.FRAME, level, dtype=np.int16), at=at)
+
+
+def test_onset_is_the_first_sound_after_a_quiet_spell():
+    p = rig.EchoPath(-20.0, 0.1)
+    _frames(p, 5, 3000)                         # the greeting, before arm(): not looked at
+    p.arm()
+    _frames(p, 3, 3000)                         # its tail landing late: no quiet before it
+    assert p.since_onset() is None
+    _frames(p, 10, 0)                           # 200 ms of silence: not enough
+    _frames(p, 1, 3000)
+    assert p.since_onset() is None
+    _frames(p, 25, 0)                           # 500 ms: now a sound is the next line
+    _frames(p, 1, 3000, at=42.0)
+    assert p.since_onset() == rig.FRAME and p.onset_at == 42.0
+    _frames(p, 49, 0)                           # silence inside the line counts too
+    assert p.since_onset() == 50 * rig.FRAME
+
+
+def test_onset_ignores_a_whisper():
+    p = rig.EchoPath(0.0, 0.0)
+    p.arm()
+    _frames(p, 30, 0)
+    _frames(p, 3, int(rig.ONSET_RMS) - 1)
+    assert p.since_onset() is None
+
+
+def test_the_caller_is_cued_on_heard_audio_not_the_wall_clock():
+    """The caller starts once the phone has HEARD caller_at seconds of the line,
+    however late (by the wall clock) those frames landed."""
+    p = rig.EchoPath(-20.0, 0.0)
+    clip = np.full(rig.FRAME * 3, 5000, dtype=np.int16)
+    m = rig.Mic(clip, p)
+    m.cue(0.1)                                  # 5 frames into the line
+    p.arm()
+    _frames(p, 30, 0)
+    assert not m.frame(now=100.0).any() and m.start is None   # no line heard yet
+    _frames(p, 4, 3000)                         # 80 ms of the line
+    m.frame(now=500.0)                          # a whole wall-clock age later: still not
+    assert m.start is None
+    _frames(p, 1, 3000)                         # 100 ms
+    out = m.frame(now=500.02)
+    assert m.start == 500.02 and out.max() >= 5000
+    assert m.caller_window() == (500.02, 500.02 + 3 * rig.FRAME / rig.RATE)
+
+
+def test_an_uncued_mic_never_starts_its_caller():
+    p = rig.EchoPath(0.0, 0.0)
+    m = rig.Mic(np.full(rig.FRAME, 5000, dtype=np.int16), p)
+    p.arm()
+    _frames(p, 30, 0)
+    _frames(p, 100, 3000)
+    m.frame(now=1.0)
+    assert m.start is None and m.caller_rms == []
+
+
 def test_dbfs():
     assert rig.dbfs([]) is None
     assert rig.dbfs([32768.0]) == 0.0
@@ -255,6 +313,17 @@ def test_the_fake_phone_asks_no_ice_server():
     assert "RTCPeerConnection()" not in src
 
 
+def test_ice_gathers_on_loopback_only(monkeypatch):
+    """Both peers' host candidates are 127.0.0.1: no other address of this
+    machine, whatever its firewall or interfaces, carries the call."""
+    import aioice.ice
+    monkeypatch.setattr(aioice.ice, "get_host_addresses", aioice.ice.get_host_addresses)
+    rig.loopback_ice()
+    assert aioice.ice.get_host_addresses(True, True) == ["127.0.0.1"]
+    assert aioice.ice.get_host_addresses(False, True) == []
+    assert "loopback_ice()" in RIG.read_text().split("def one_call", 1)[1]
+
+
 def test_changed_names_every_difference():
     before = {"a": (1, 1, 1), "b": (1, 1, 1)}
     after = {"a": (2, 1, 1), "c": (1, 1, 1)}
@@ -299,14 +368,28 @@ def test_stub_voice_gives_each_line_its_own_band():
 
 # ---- two stub calls: the regression tests
 
+# what a failed stub call prints: every count it saw, and the BARGE-INs behind them
+SEEN = ("ok", "connect_s", "sentences", "barge_in", "self_cuts", "caller_cuts",
+        "text_disagrees", "held", "held_on_caller", "echo_drops", "chunks",
+        "echo_leaked_as_heard", "caller_cut_latency_s", "verdicts", "holds", "echo_lines")
+
+
+def seen(r):
+    """The counts a stub call saw, as text for an assertion message. A
+    failure that says only "assert False" cannot be read after the run's
+    scratch dir is gone."""
+    return json.dumps({k: r.get(k) for k in SEEN}, indent=1, default=str)
+
+
 def _stub_call(tmp_path, *args):
     out = tmp_path / "r.json"
     env = {k: v for k, v in os.environ.items() if k not in ("DC_BARGE_IN", "DC_EARS")}
     p = subprocess.run([sys.executable, str(RIG), *args, "--json", str(out)],
                        capture_output=True, text=True, timeout=300, env=env, cwd=ROOT, check=False)
-    assert p.returncode == 0, p.stdout[-3000:] + p.stderr[-2000:]
-    r = json.loads(out.read_text())
-    assert r["voice"].startswith("stub") and r["ok"]
+    got = json.loads(out.read_text()) if out.exists() else {}
+    assert p.returncode == 0, seen(got) + "\n" + p.stdout[-3000:] + p.stderr[-2000:]
+    r = got
+    assert r["voice"].startswith("stub") and r["ok"], seen(r)
     assert r["real_home_changed"] == [] and r["net_connects"] == [] and r["subprocesses"] == []
     assert r["net_off_host"] == []                # no send or lookup left this machine
     return r
@@ -317,13 +400,45 @@ def test_stub_call_a_loud_leak_alone_never_cuts(tmp_path):
     loud enough to become chunks, and every one is the echo guard's to drop.
     Any BARGE-IN here is a self-cut, and there is none."""
     r = _stub_call(tmp_path, "--gain", "0", "--delay", "120", "--echo-only")
-    assert r["barge_in"] == 0 and r["held"] == 0, r["echo_lines"]
-    assert r["echo_drops"] >= 5, r["echo_lines"]               # the guard was exercised
+    assert r["barge_in"] == 0 and r["held"] == 0, seen(r)
+    assert r["echo_drops"] >= 5, seen(r)                       # the guard was exercised
+
+
+def only_the_caller_cut(r):
+    """His words, and only they, cut the reply: no self-cut, one cut on his
+    chunk, and his chunk never held as our own voice."""
+    assert r["self_cuts"] == 0 and r["caller_cuts"] == 1, seen(r)
+    assert r["held_on_caller"] == 0, seen(r)
+
+
+CLEAN = {"self_cuts": 0, "caller_cuts": 1, "held": 0, "held_on_caller": 0}
+
+
+@pytest.mark.parametrize("bad", [
+    {"self_cuts": 1},                                   # the echo cut the reply too
+    {"self_cuts": 1, "caller_cuts": 0},                 # the echo cut it, not him
+    {"caller_cuts": 0},                                 # his cut was missed
+    {"caller_cuts": 0, "held": 1, "held_on_caller": 1},  # his chunk held as our voice
+    {"caller_cuts": 2},                                 # cut twice: one was not his
+])
+def test_the_caller_cut_verdict_refuses_every_other_outcome(bad):
+    only_the_caller_cut(CLEAN)
+    with pytest.raises(AssertionError) as e:
+        only_the_caller_cut({**CLEAN, **bad})
+    assert '"self_cuts"' in str(e.value) and '"held_on_caller"' in str(e.value)  # counts printed
 
 
 def test_stub_call_the_caller_cuts_the_reply(tmp_path):
     """The caller talks over the reply on a -20 dB leak: his words, and only
     they, cut it."""
-    r = _stub_call(tmp_path, "--gain", "-20", "--delay", "120")
-    assert r["self_cuts"] == 0 and r["caller_cuts"] == 1, r["echo_lines"]
-    assert r["held_on_caller"] == 0, r["echo_lines"]
+    only_the_caller_cut(_stub_call(tmp_path, "--gain", "-20", "--delay", "120"))
+
+
+def test_stub_call_a_late_phone_still_cuts_on_the_caller(tmp_path):
+    """The same call with the phone hearing the bot 250 ms late, as on a busy
+    machine. A caller started by the wall clock then lands earlier in the
+    bot's words, and an extra echo word in his chunk got it held as our own
+    voice. Cued on the heard audio, he lands where he always does."""
+    r = _stub_call(tmp_path, "--gain", "-20", "--delay", "120", "--phone-lag", "250")
+    assert r["phone_lag_ms"] == 250, seen(r)
+    only_the_caller_cut(r)

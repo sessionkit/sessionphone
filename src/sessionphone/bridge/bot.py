@@ -19,7 +19,7 @@ What it does:
 """
 # subprocess: no call here (every mail goes by seatmail's `message send`), but the test
 # rigs stub bot.subprocess.run, which is the shared module's run: keep the name.
-import atexit, concurrent.futures, json, os, pathlib, shlex, signal, subprocess, sys, threading, time, traceback, typing  # noqa: F401
+import atexit, concurrent.futures, dataclasses, json, os, pathlib, shlex, signal, subprocess, sys, threading, time, traceback, typing  # noqa: F401
 import html.parser, re   # a long text the core cut: its html, read back as text
 # when this process started, as near as it can know: a call of this bot can
 # be no older, so a call-live.json older than this was left by an earlier bot
@@ -27,6 +27,7 @@ STARTED = time.time()
 from deltachat_rpc_client import Rpc, DeltaChat, EventType
 from deltachat_rpc_client.const import ViewType   # Voice for a voice-message file job
 from deltachat_rpc_client.const import MessageState, SpecialContactId   # the startup sweep's listing
+from deltachat_rpc_client.rpc import JsonRpcError    # core's refusal of a fetch
 # The agent may be NAMED IN ARGV - the launchd job passes it:
 #   python -m sessionphone.bridge.bot AGENT
 # so `ps` tells two bots on one machine apart. dc-live never reads argv: it
@@ -49,6 +50,7 @@ from sessionphone.account import address, read_owner, server_choice   # the venv
 # address: the account's own address, read the way setup reads it
 from sessionphone.procname import named_python   # runs as libexec/session-phone
 from sessionphone import paths          # the log's folder (paths.log_dir), made 0700
+from sessionphone import settings       # the host-only download policy (phone.json), read once at start
 from sessionphone import channels       # where the bot may send
 from sessionphone import keygate        # approved callers bound to a key; the one-time pin
 from sessionphone import seat           # the agent's box, made before the first send
@@ -59,7 +61,9 @@ from sessionphone import voicemsg       # may a file go out as a voice message
 from sessionphone import imgtext        # the text on a posted image, fenced UNTRUSTED
 from sessionphone import media          # is the media pack here; calls refuse plainly without it
 from sessionphone.bridge import ack     # every job's yes or no; light, unlike calls
+from sessionphone.bridge import attach  # a landed file: judged, saved, or recorded as not downloaded
 from sessionphone.bridge import listalert   # a list that refuses every send mails the owner
+from sessionphone.bridge import ownerkey    # an owner the key migration left unpinned mails the agent
 from sessionphone.bridge import pidfile     # bot.pid: how dc-live knows this bot runs
 from sessionphone.bridge import retract     # dc-delete: delete for everyone
 from sessionphone.bridge import seatmail   # agent-bound mail, signed by the bot's own seat
@@ -434,8 +438,9 @@ def xdc_is_echo(mid: int, payload) -> bool:
         return True
     return False
 OUTBOX = dc_env.path("OUTBOX", "outbox")
-# bot.log: DC_LOG, else ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log (dc_env.log_file)
-LOG = dc_env.log_file(agent=dc_env.AGENT, profile_name=dc_env.PROFILE)
+# bot.log: DC_LOG, else <log base>/<bot>[/<profile>]/bot.log, the base being the kit's
+# ~/.sessionkit/phone/log/ under the default root, else <root>/log/ (dc_env.log_file)
+LOG = dc_env.log_file(agent=dc_env.AGENT, profile_name=dc_env.PROFILE, root=dc_env.ROOT)
 SEEN = dc_env.path("SEEN", "bridged-ids.txt")
 PID_FILE = dc_env.PID_FILE   # bot.pid: dc-live's answer to "is the bot running?"
 LIVE_FILE = dc_env.LIVE_FILE   # the live call: calls.py writes it there, and removes it
@@ -618,6 +623,77 @@ def log(msg):
         fh.write(line + "\n")
 
 
+# >>> download-policy: the host's download policy, read ONCE at start
+# (read_policy) from the host layer alone (settings.policy over
+# settings.host_values(dc_env.AGENT)), never from the environment. POLICY is
+# the one parsed copy every point uses: A (core's download_limit, core_limit
+# below), B (a pending message over the limit) and C (a landed file, kind and
+# size). A key that cannot be used takes its default; a file that is not the
+# host layer's shape gives all three defaults. A setting never stops the bot.
+POLICY = None           # settings.Policy, set by read_policy() at start
+POLICY_HOME = None      # the home read_policy() was given: the registry's (attach.registry_path)
+CORE_LIMIT_KEY = "download_limit"       # core's config key (Config::DownloadLimit)
+BOT_ACCOUNT_LIMIT = ("download limit kept by the bridge, not core: a bot account (bot=1) "
+                     "is not told of a message core leaves unfetched")
+
+
+def read_policy(name=None, home=None):
+    """Read the download policy once: bot NAME's host-only keys (default
+    dc_env.AGENT, the job's DC_AGENT), save_dir's default under HOME (default
+    this bot's home). Each problem is logged as a WARNING naming its file and
+    key, then the one `download policy: …` line. Sets POLICY and returns it.
+    Anything settings.policy did not catch is logged too, and the bot runs on
+    the three defaults: it never raises."""
+    global POLICY, POLICY_HOME
+    name = name or dc_env.AGENT
+    home = dc_env.home_dir() if home is None else home
+    try:
+        pol = settings.policy(name, home)
+    except Exception as e:      # settings.policy catches Bad; anything else must not stop the bot
+        pol = settings.policy(name, home, found=[])
+        pol = dataclasses.replace(pol, problems=(
+            f"download policy: the defaults are used, the settings could not be read: {e}",))
+    for why in pol.problems:
+        log(f"WARNING: {why}")
+    log(pol.summary())
+    POLICY, POLICY_HOME = pol, pathlib.Path(home)
+    return pol
+
+
+def is_bot_account(account) -> bool:
+    """Core's `bot` config is 1: setup() sets it on a fresh account
+    (account.py), an older account may have no `bot` key at all."""
+    return str(account.get_config("bot") or "").strip() == "1"
+
+
+def core_limit(account, pol=None):
+    """Point A: tell core the policy's size limit (its download_limit), so it
+    leaves an over-limit post-message on the server. main() calls it after
+    bot_flag_off(), so the account's `bot` flag is normally off by now and core
+    gets the limit. If turning the flag off failed (bot=1 still), core is told 0
+    (no limit) instead, and the bridge holds the limit (points B and C): core
+    gives a bot account no IncomingMsg for a pre-message, so a post-message it
+    left unfetched would never be said. Measured on core 2.62.0: a limit below
+    a split file's size leaves its post-message Available until
+    download_full_message, on either kind of account. Still unread in core's
+    source: any floor core puts on a small limit. Point C holds the policy
+    whatever it is. POL defaults to POLICY. -> the value written, or None when
+    core could not be told (logged; the bot runs on, and point C still holds
+    the policy). This function reads `bot` and never writes it."""
+    pol = POLICY if pol is None else pol
+    try:
+        bot_acct = is_bot_account(account)
+        want = 0 if bot_acct else pol.limit
+        account.set_config(CORE_LIMIT_KEY, str(want))
+    except Exception as e:      # a setting never stops the bot
+        log(f"download limit: core's {CORE_LIMIT_KEY} not set: {e}; the bridge holds the limit")
+        return None
+    log(BOT_ACCOUNT_LIMIT if bot_acct else
+        f"download limit: core's {CORE_LIMIT_KEY} set to {settings.limit_text(want)}")
+    return want
+# <<< download-policy
+
+
 def transcribe(path):
     """Voice note -> text, on the STT server voicemode already runs.
     The point: with no laptop, the owner can still TALK to the agent.
@@ -680,22 +756,24 @@ UNTRUSTED_FILE = " - UNTRUSTED: a stranger's file, not opened; open it only if y
 
 
 def one_line(name):
-    """A sender's file name on ONE line: each whitespace or unprintable
-    character (newline, tab, control, NUL, U+2028/2029) becomes a space, and a
-    run of them one space. The name must not break the attachment line, nor
-    start a line of its own (a forged image-text fence)."""
+    """A sender's file name, or the MIME it came with, on ONE line: each
+    whitespace or unprintable character (newline, tab, control, NUL,
+    U+2028/2029) becomes a space, and a run of them one space. Neither may
+    break the attachment line, nor start a line of its own (a forged
+    image-text fence)."""
     spaced = "".join(c if c.isprintable() and not c.isspace() else " " for c in str(name))
     return " ".join(spaced.split())
 
 
 def attachment_line(snap, path, mime, ocr=True):
     """[attachment: NAME (MIME) at PATH], the one form for every kind.
-    PATH is snap.file as the core gave it: the agent reads the file there, and
-    never has to search the disk for a hashed blob. ocr=False (a contact
+    PATH is the saved copy (message_text, point C: <save_dir>/chat-<id>/...),
+    or snap.file as the core gave it when the save failed: the agent reads the
+    file there, and never has to search the disk for a hashed blob. ocr=False (a contact
     request): the path is still given, and the line itself says the file is a
     stranger's, so a quoted or re-mailed line keeps the warning."""
     name = one_line(getattr(snap, "file_name", None) or "") or one_line(os.path.basename(path))
-    return (f"[attachment: {name} ({mime or 'unknown type'}) at {path}"
+    return (f"[attachment: {name} ({one_line(mime or '') or 'unknown type'}) at {path}"
             + ("" if ocr else UNTRUSTED_FILE) + "]")
 
 
@@ -717,6 +795,21 @@ PARTIAL_WHY = {"timeout": "", "failure": " (the download failed)",
                "undecipherable": " (it could not be decrypted)"}  # partial reason -> its words
 HELD = {}                   # msg id -> {"chat_id", "route", "ocr", "timer"}
 HELD_LOCK = threading.Lock()    # the pop under it is the exactly-once point
+CLAIMS = tuple(threading.RLock() for _ in range(64))     # claim(): one per msg id, striped
+
+
+def claim(mid):
+    """The one claim on msg MID that a release, a dc-fetch and the live path
+    all take: a release holds it from its HELD pop until its mail is built,
+    fetch_job holds it for the whole job, and handle_events for its whole
+    IncomingMsg decision (the SEEN skip included). So, on one message, none
+    ever runs inside another: a fetch sees a release not begun or finished,
+    never half done, and every read it decides on is current for the time it
+    holds the claim.
+    Taken before HELD_LOCK and the registry's lock, never under them. Striped:
+    two ids that share a stripe only wait for each other. Reentrant, so a fetch
+    may call release() under its own claim."""
+    return CLAIMS[int(mid) % len(CLAIMS)]
 
 
 def download_state(snap):
@@ -753,23 +846,183 @@ def partial_reason(snap):
     return GAVE_UP.get(download_state(snap), "timeout")
 
 
+NOT_ON_DISK = "The file is not on disk yet; do not look for it."      # a pending file, or one core gave up on
+NOT_PASSED_ON = "It was not saved or passed on; do not look for it."  # point C: on disk, held back by the policy
+
+
+def policy_why(reason):
+    """A policy Reason (attach.Reason) in the line's reason slot: over the
+    size limit, or a kind that is off. The limit is said by size_text(), the
+    one unit the line gives the file's own size in: a 16 MB limit said in
+    decimal MB beside a 15.5 MiB file read as a file under its limit. Rounded
+    the same way, a file under the limit can never read as over it."""
+    if reason.why == attach.SIZE:
+        limit = size_text(reason.limit) or f"{reason.limit} B"
+        return f" (over this bot's download limit, {limit})"
+    return f" ({reason.kind or attach.OTHER_KIND} is not passed on automatically here)"
+
+
+def fetch_tail(mid, ocr):
+    """What the agent may do about a partial: `Fetch it: dc-fetch N`, or, for a
+    stranger's file, ask the owner (no verb is offered for it)."""
+    if not ocr:
+        return " To have it, ask your owner."
+    return f" Fetch it: dc-fetch {'--profile ' + PROFILE + ' ' if PROFILE else ''}{mid}."
+
+
+def pending_refusal(snap):
+    """Point B (design §2 B): a message whose file is still to come
+    (is_pending) and whose size, fileBytes, is over the download limit ->
+    the size Reason, else None. Its kind is not dependable before the file
+    lands (the view type is Text), so the size rule alone is applied
+    (attach.decide with no kind); the kind is judged at C, once it lands.
+    Such a message is mailed now, as not downloaded, and never held: core
+    leaves it on the server, so a hold would only wait out its bound.
+    None for a message dc-fetch asked for (its entry marked `fetching`): the
+    agent wants it whatever its size, and its hold, timeout and partial are
+    PHONE-284's, as for any held message."""
+    if POLICY is None or not is_pending(snap):
+        return None
+    try:
+        size = int(getattr(snap, "file_bytes", None))
+    except (TypeError, ValueError):
+        return None
+    refused = attach.decide(None, size, POLICY)
+    if refused is None or asked_for(snap):
+        return None
+    return refused
+
+
+def asked_for(snap):
+    """Is this message's registry entry marked `fetching` (dc-fetch asked for
+    it)? Read, never taken: fetched() takes it once the file lands. An
+    unreadable registry counts as not asked for."""
+    mid = getattr(snap, "id", None)
+    if POLICY_HOME is None or mid is None:
+        return False
+    try:
+        got = attach.entry(POLICY_HOME, mid)
+    except (OSError, ValueError):
+        return False
+    return bool(got and got.get(attach.FETCHING))
+
+
+def mail_now(snap):
+    """The guard before a hold(), on the live path and in the sweep: True if
+    this pending message is over the limit (pending_refusal), so it is mailed
+    now as not downloaded, by message_text's partial branch, and never held."""
+    refused = pending_refusal(snap)
+    if refused is None:
+        return False
+    log(f"NOT HELD msg {getattr(snap, 'id', '?')}: over the download limit "
+        f"({size_text(refused.size)} > {size_text(refused.limit)}); mailed now as not downloaded")
+    return True
+
+
+def record_partial(snap, reason, ocr):
+    """Record a partial in the registry (attach.record), keyed by its msg id, so
+    dc-fetch can fetch it: the policy's reasons (size, type) and a held message's
+    (timeout, failure), a stranger's included (ocr False). Undecipherable is
+    never recorded: no fetch can decrypt it. -> True if it was recorded. Only
+    once the policy is read (read_policy, at start: POLICY_HOME); a record that
+    fails is logged, and the line then offers no verb that would be refused."""
+    mid, chat_id = getattr(snap, "id", None), getattr(snap, "chat_id", None)
+    if POLICY_HOME is None or mid is None or chat_id is None:
+        return False
+    if isinstance(reason, attach.Reason):
+        rec = attach.reason_for(reason)
+    else:
+        try:
+            size = int(getattr(snap, "file_bytes", None))
+        except (TypeError, ValueError):
+            size = None
+        rec = {"reason": str(reason), "kind": attach.kind_of(getattr(snap, "view_type", None)),
+               "size": size}
+    try:
+        done = attach.record(POLICY_HOME, mid, chat_id, ocr, **rec)
+    except (OSError, ValueError) as e:
+        log(f"NOT DOWNLOADED msg {mid} ({rec['reason']}): not recorded for dc-fetch: {e}")
+        return False
+    if done:
+        whose = "" if ocr else ", a stranger's"
+        log(f"NOT DOWNLOADED msg {mid} chat {chat_id} ({rec['reason']}{whose}): recorded for dc-fetch")
+    return done
+
+
+def fetched(snap):
+    """dc-fetch asked for this message (its registry entry is marked
+    `fetching`, design §7 cases 4 and 5): the entry is taken out, under the
+    registry's lock, and the text built now bypasses the policy, once. -> True
+    if this call took it. An entry no fetch marked is left as it is."""
+    mid = getattr(snap, "id", None)
+    if POLICY_HOME is None or mid is None:
+        return False
+    try:
+        got = attach.take_fetching(POLICY_HOME, mid)
+    except (OSError, ValueError) as e:
+        log(f"FETCH msg {mid}: the registry could not be read: {e}; the policy applies")
+        return False
+    if got is None:
+        return False
+    log(f"FETCHED msg {mid}: mailed whole, the download policy bypassed (dc-fetch); "
+        "its registry entry dropped")
+    return True
+
+
 def partial_line(snap, reason, ocr=True):
-    """The line a message whose file is NOT on disk carries instead of
-    attachment_line(): the name, type and size the pre-message knows, and the
+    """The line a message whose file is NOT passed on carries instead of
+    attachment_line(): the name, type and size the message knows, and the
     msg id. No path: there is no file to open. The lead, "partial, not
     downloaded yet", is fixed, so an agent can grep it.
-    reason: "timeout", "failure" or "undecipherable" (partial_reason()), its
-    own slot so a later tail or record can key on it. The ONE place the line
-    is built."""
-    why = PARTIAL_WHY.get(reason, "")
+    reason, its own slot: "timeout", "failure" or "undecipherable"
+    (partial_reason(): the file is not on disk), or a policy attach.Reason:
+    size at point B (pending_refusal: the file is still on the server) or
+    size or type at point C (the file is on disk, held back). The sentence
+    after the msg id follows the reason and the file's state, so the line
+    never says "not on disk" of a file that is, nor "not saved" of one that
+    never came. Every partial but an undecipherable one is recorded
+    (record_partial) and tailed: `Fetch it: dc-fetch N`, or "ask your owner"
+    for a stranger's. The ONE place the line is built."""
+    ours = isinstance(reason, attach.Reason)
+    why = policy_why(reason) if ours else PARTIAL_WHY.get(reason, "")
     name = (one_line(getattr(snap, "file_name", None) or "")
             or one_line(str(getattr(snap, "view_type", "") or "")) or "file")
-    mime = getattr(snap, "file_mime", "") or "unknown type"
+    mime = one_line(getattr(snap, "file_mime", "") or "") or "unknown type"
     size = size_text(getattr(snap, "file_bytes", None))
+    mid = getattr(snap, "id", "?")
+    tail = fetch_tail(mid, ocr) if record_partial(snap, reason, ocr) else ""
     return (f"[partial, not downloaded yet{why}: {name} "
-            f"({mime}{', ' + size if size else ''}) - msg {getattr(snap, 'id', '?')}"
+            f"({mime}{', ' + size if size else ''}) - msg {mid}"
             + ("" if ocr else " - a stranger's file")
-            + ". The file is not on disk yet; do not look for it.]")
+            + ". " + (NOT_PASSED_ON if ours and download_state(snap) == "Done" else NOT_ON_DISK)
+            + tail + "]")
+
+
+def landed_size(snap, path):
+    """A landed file's size: file_bytes, else the file's own on disk (None if
+    neither can be read: the size rule then passes it)."""
+    try:
+        return int(getattr(snap, "file_bytes", None))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def saved_copy(snap, path, ocr):
+    """Point C's save: the landed file copied under the policy's save_dir
+    (attach.save: chat-<id>/, or untrusted/chat-<id>/ for a stranger's, ocr
+    False), and the copy's path. A save that fails is logged and the blob's
+    path is kept, as before there was a save; a stranger's line keeps its suffix."""
+    mid, chat_id = getattr(snap, "id", None), getattr(snap, "chat_id", None)
+    if mid is None or chat_id is None:
+        log(f"SAVE SKIPPED: no msg or chat id on the message; the line names core's blob {path}")
+        return path
+    name = getattr(snap, "file_name", None) or os.path.basename(path)
+    got = attach.try_save(path, POLICY.save_dir, chat_id, mid, name, trusted=bool(ocr), log=log)
+    return str(got) if got is not None else path
 # <<< premessage-hold
 
 
@@ -862,14 +1115,35 @@ def message_text(snap, ocr=True):
     ocr=False: an image is not read (a contact request's: a stranger's image
     never goes through OCR), and the line is marked UNTRUSTED.
     A message whose file has not landed (download_state not Done) gets
-    partial_line() instead: no path, no OCR, no transcription."""
+    partial_line() instead: no path, no OCR, no transcription. Its reason is
+    the policy's size Reason when its fileBytes is over the limit (point B,
+    pending_refusal), else PHONE-284's (partial_reason).
+    Point C (the download policy, POLICY, read once at start): a landed file
+    the policy turns away (attach.decide: its kind is off, or it is over the
+    limit) gets partial_line() with that reason, and is not saved, OCR'd or
+    transcribed. One it passes on is saved (saved_copy) and the line, OCR and
+    transcription all use the saved copy. Both are idempotent per msg id: the
+    same text built twice is one file and one registry entry.
+    A message dc-fetch asked for (fetched(): its entry marked `fetching`) is
+    passed on whatever the policy says, saved like any other, and its entry is
+    taken out, so the bypass happens once."""
     text = (getattr(snap, "text", "") or "").strip()
     text = whole_text(snap, text)       # a long text the core cut, read whole
     path = getattr(snap, "file", None)
     mime = (getattr(snap, "file_mime", "") or "")
     head = text + "\n\n" if text else ""
     if download_state(snap) != "Done":
-        return quote_block(snap) + head + partial_line(snap, partial_reason(snap), ocr)
+        reason = pending_refusal(snap) or partial_reason(snap)
+        return quote_block(snap) + head + partial_line(snap, reason, ocr)
+    asked = fetched(snap)       # dc-fetch asked for it: whole, the policy bypassed
+    if path and POLICY is not None:
+        refused = None if asked else attach.decide(attach.kind_of(getattr(snap, "view_type", None)),
+                                                   landed_size(snap, path), POLICY)
+        if refused:
+            log(f"NOT PASSED ON msg {getattr(snap, 'id', '?')}: {refused.why} "
+                f"({refused.kind or 'file'}, {size_text(refused.size) or 'size unknown'})")
+            return quote_block(snap) + head + partial_line(snap, refused, ocr)
+        path = saved_copy(snap, path, ocr)
     if path and (mime.startswith("audio/") or
                  str(getattr(snap, "view_type", "")).lower() in ("voice", "audio")):
         why = ""
@@ -880,7 +1154,8 @@ def message_text(snap, ocr=True):
         if said:
             log(f"TRANSCRIBED {len(said)} chars from {mime or 'audio'}")
             return quote_block(snap) + head + said
-        return head + f"[voice note - transcription failed{why}]\n" + attachment_line(snap, path, mime, ocr)
+        return (quote_block(snap) + head + f"[voice note - transcription failed{why}]\n"
+                + attachment_line(snap, path, mime, ocr))
     if path and imgtext.is_image(mime, getattr(snap, "view_type", "")):
         # the image line even beside typed text, then its text
         said = attachment_line(snap, path, mime, ocr)
@@ -939,10 +1214,14 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
     # cleaned BEFORE the cut: `$ (` is one longer, and `message send
     # --no-shorten` refuses a subject over 69 or one that "could execute"
     subject = seatmail.clean_subject(f"[{room} {chat_id}] {tail}")[:69]
+    m5 = bool(msgid or in_reply_to or supersedes)       # a call mail, on ids we minted
+    # the line's own msg id, exactly when the mail carries X-Delta-Chat-Msg-Id:
+    # the footer answers THAT line as a quote-reply (dc-say --quote)
+    quote = None if m5 else contract_headers(kind, dc_msg_id).get("X-Delta-Chat-Msg-Id")
     if call or channel is None:
-        hint = dc_env.reply_hint(chat_id, call, PROFILE)
+        hint = dc_env.reply_hint(chat_id, call, PROFILE, quote=quote)
     else:
-        hint = channel_hint(chat_id, channel)
+        hint = channel_hint(chat_id, channel, quote=quote)
     body = (
         f"{text}\n\n---\n"
         f"chat: {chat_name} (id {chat_id})\nfrom: {sender}\n\n"
@@ -951,7 +1230,6 @@ def mail_in(chat_name, chat_id, sender, text, msgid=None, in_reply_to=None,
     )
     # >>> seat-mail: every mail, as the bot's seat, signed as seatmail.signing()
     # rules, and the exit code is read: a refusal is logged, never "bridged".
-    m5 = bool(msgid or in_reply_to or supersedes)       # a call mail, on ids we minted
     hdrs = {"X-Delta-Chat-Bridge": "1", "X-Delta-Chat-Id": str(chat_id)}
     if PROFILE:
         hdrs["X-Delta-Chat-Profile"] = PROFILE
@@ -1044,11 +1322,12 @@ def chat_channel(account, chat_id) -> Channel:
     return Channel(v.name, "", listing.path) if v and v.name else Channel(None, v.reason, listing.path)
 
 
-def channel_hint(chat_id, channel: Channel) -> str:
+def channel_hint(chat_id, channel: Channel, quote=None) -> str:
     """The footer's reply hint for a chat mail: dc-say by the channel's NAME, or,
-    for a chat that is not listed, that it is not, why, and how to list it."""
+    for a chat that is not listed, that it is not, why, and how to list it.
+    quote: the mail's msg id, so the dc-say is a quote-reply to that line."""
     if channel.name:
-        return dc_env.reply_hint(chat_id, None, PROFILE, channel=channel.name)
+        return dc_env.reply_hint(chat_id, None, PROFILE, channel=channel.name, quote=quote)
     where = f"DC_CHANNELS_FILE={shlex.quote(str(channel.path))} " if PROFILE and channel.path else ""
     return (f"Not by dc-say yet: this chat is not on the channels list, so dc-say to it\n"
             f"is refused ({channel.why or 'not listed'}).\n"
@@ -1082,11 +1361,36 @@ def contract_headers(kind=None, dc_msg_id=None, dc_sender=None, channel=None) ->
 SPOOL = spool.Spool(lambda m: log(m))
 
 
-def send_alert(subject, body, headers):
-    """The channels alert to the owner's agent: by mail, never by
-    Delta, so the channels gate cannot block it. Signed, by seatmail, like
-    every non-call mail. -> (accepted, error, Message-ID)."""
-    sent = seatmail.send(dc_env.MAILTO, subject, body, headers=headers)
+# >>> alert-header (PHONE-334 PB): every bot MACHINE ALERT carries this header,
+# so a pager rule can let it RIDE instead of waking a cold seat (sessionmail
+# SM-1047). The rule keys on its PRESENCE; the value names the alert
+# (listalert "channels-<kind>", ownerkey "owner-unpinned", else ALERT_DEFAULT).
+# An alert carries no X-Delta-Chat-Kind, and no chat or call mail carries this.
+ALERT_HEADER = "X-Delta-Chat-Alert"
+ALERT_DEFAULT = "bot"
+
+
+def alert_headers(headers=None) -> dict:
+    """HEADERS (not changed) plus ALERT_HEADER, under its exact name: a
+    caller's own value is kept, whatever case it gave the name; a missing or
+    blank one is ALERT_DEFAULT."""
+    out, value = {}, ""
+    for k, v in (headers or {}).items():
+        if k.lower() == ALERT_HEADER.lower():
+            value = value or " ".join(str(v).split())
+        else:
+            out[k] = v
+    out[ALERT_HEADER] = value or ALERT_DEFAULT
+    return out
+# <<< alert-header
+
+
+def send_alert(subject, body, headers=None):
+    """A bot alert to the owner's agent (the channels alert, the
+    owner-unpinned alert): by mail, never by Delta, so the channels gate
+    cannot block it. Signed, by seatmail, like every non-call mail. It always
+    carries ALERT_HEADER (alert_headers). -> (accepted, error, Message-ID)."""
+    sent = seatmail.send(dc_env.MAILTO, subject, body, headers=alert_headers(headers))
     return sent.ok, sent.error, sent.id
 
 
@@ -1604,16 +1908,20 @@ def release(account, mid, why):
     """Mail a held message once, from a fresh snapshot: whole if its file
     landed, else with partial_line(). The pop under HELD_LOCK is the
     exactly-once point: a MsgsChanged and the timer may both get here, and
-    only the first finds it. -> True if this call mailed it."""
-    with HELD_LOCK:
-        held = HELD.pop(mid, None)
-    if held is None:
-        return False
-    if held["timer"] is not None:
-        held["timer"].cancel()
-    snap = account.get_message_by_id(mid).get_snapshot()
-    state = download_state(snap)
-    bridge_one(account, mid, held["chat_id"], snap, held["route"], held["ocr"])
+    only the first finds it. -> True if this call mailed it.
+    The message's claim() is held from the pop until the mail is built, so a
+    dc-fetch of it waits, and then finds the release done (its entry taken,
+    or built again as a partial), never half done."""
+    with claim(mid):
+        with HELD_LOCK:
+            held = HELD.pop(mid, None)
+        if held is None:
+            return False
+        if held["timer"] is not None:
+            held["timer"].cancel()
+        snap = account.get_message_by_id(mid).get_snapshot()
+        state = download_state(snap)
+        bridge_one(account, mid, held["chat_id"], snap, held["route"], held["ocr"])
     if why == "timeout" and state in PENDING:
         log(f"HELD msg {mid}: not downloaded after {PREMESSAGE_WAIT_S:g} s; mailed as partial")
     log(f"RELEASED msg {mid} ({why}, {state})")
@@ -1656,6 +1964,133 @@ def recheck_held(account, event):
 # <<< premessage-hold
 
 
+# >>> dc-fetch: the {"fetch": N} job (design §7). The bot fetches only what it
+# itself mailed as not downloaded: the registry (attach, <home>/not-downloaded.json)
+# says what that is, and with what route (`ocr`: False is a stranger's file, and
+# stays one). Each refusal raises channels.Refused: the loop acks it ok:false
+# and dc-fetch exits 3, nothing fetched.
+#   1. no entry (an Undecipherable partial is never recorded): refused;
+#   2. the message is gone (deleted, or expired): refused, its entry dropped;
+#   3. its chat is still a contact request: refused, the entry kept;
+#   4. the file is there (the policy turned it away at C): marked `fetching`,
+#      then mailed whole now; message_text sees the mark, bypasses the policy
+#      and takes the entry out (the registry pop under its lock: once);
+#   5. the file is pending (Available or Failure): download_full_message, once,
+#      marked `fetching`, then PHONE-284's hold with the registry's route. Its
+#      release mails it whole on Done (the HELD pop: once), and message_text
+#      takes the entry as in 4; on its timeout or a Failure the partial line
+#      says so, and the entry, built again, stays for a second dc-fetch.
+#      A second dc-fetch while it is held downloads nothing more; if the file
+#      has landed by then, it goes out through the same HELD pop (never case
+#      4, which would mail it a second time when its MsgsChanged is heard).
+# Once, whatever the threads do: the job runs under the message's claim(), and
+# so does a release from its pop to its mail. A fetch therefore never meets a
+# release half done, and nothing it read can change under it. The registry's
+# own lock and the HELD pop still make each step once; the claim makes the
+# fetch's decision and a release's mail one at a time. Cases 4 and 5 also
+# refuse if mark_fetching finds no entry, which the claim leaves unreachable.
+FETCH_SETTLE_TRIES = 20     # after download_full_message, a Failure is re-read up to this many times
+FETCH_SETTLE_STEP_S = 0.1   # apart (2 s at most), for core to move it on to InProgress
+FETCH_SLEEP = time.sleep    # a module name, so tests never wait
+FETCHABLE = ("Available", "Failure")    # what download_full_message takes (2.62.0 --openrpc)
+
+
+def fetch_refuse(mid, why, detail):
+    """Refuse a fetch of msg MID: logged, then raised for the loop to ack."""
+    refuse(f"REFUSED fetch of msg {mid}: {why}", f"REFUSED: {detail}; nothing was fetched.")
+
+
+def fetch_id(raw) -> int:
+    """The job's "fetch": a positive integer (bool is not one). An outbox job may
+    be written by hand, so the bot is the authority, not the tool."""
+    if type(raw) is not int or raw <= 0:
+        refuse(f"REFUSED fetch job: \"fetch\" is {raw!r}",
+               f'REFUSED: a fetch job needs "fetch", a message id (a positive integer), '
+               f"not {raw!r}; nothing was fetched.")
+    return raw
+
+
+def fetch_state_settled(account, mid):
+    """The state of msg MID after download_full_message returned. A message that
+    was Failure may still read Failure until core moves it on to InProgress, and
+    a held Failure is released at once as a failure partial: so a Failure is
+    re-read, FETCH_SETTLE_TRIES times at most, FETCH_SETTLE_STEP_S apart."""
+    state = download_state(account.get_message_by_id(mid).get_snapshot())
+    for _ in range(FETCH_SETTLE_TRIES):
+        if state != "Failure":
+            break
+        FETCH_SLEEP(FETCH_SETTLE_STEP_S)
+        state = download_state(account.get_message_by_id(mid).get_snapshot())
+    return state
+
+
+def fetch_job(account, raw) -> str:
+    """dc-fetch MSG_ID: fetch a message this bot mailed as not downloaded, and
+    mail it whole, once (cases 1-5 above). -> the ack's words, or
+    channels.Refused."""
+    mid = fetch_id(raw)
+    with claim(mid):
+        return fetch_claimed(account, mid)
+
+
+def fetch_claimed(account, mid) -> str:
+    """fetch_job's cases, under the message's claim()."""
+    got = None if POLICY_HOME is None else attach.entry(POLICY_HOME, mid)
+    if got is None:     # 1
+        fetch_refuse(mid, "not in the registry",
+                     f"msg {mid} was not left undownloaded by this bot: nothing to fetch")
+    rpc = account._rpc
+    if mid not in set(rpc.get_existing_msg_ids(account.id, [mid])):     # 2
+        attach.drop(POLICY_HOME, mid)
+        fetch_refuse(mid, "the message is gone; its registry entry dropped",
+                     f"msg {mid} is gone (deleted, or expired): nothing to fetch")
+    snap = account.get_message_by_id(mid).get_snapshot()
+    chat_id = snap.chat_id
+    if getattr(account.get_chat_by_id(chat_id).get_basic_snapshot(), "is_contact_request", False):  # 3
+        fetch_refuse(mid, f"chat {chat_id} is a contact request",
+                     f"msg {mid} is a contact request: the owner accepts the chat first")
+    ocr = bool(got.get("ocr"))      # the route, from the registry: never the chat's now
+    state = download_state(snap)
+    with HELD_LOCK:
+        started = mid in HELD
+    if started and state != "Undecipherable":   # a fetch holds it (5): the HELD pop is the one way out
+        if state == "Done" and release(account, mid, "landed"):
+            return f"msg {mid} mailed"      # it landed before its MsgsChanged was heard
+        return f"fetch already started for msg {mid}; it is mailed when it lands"
+    if state == "Done":     # 4
+        if attach.mark_fetching(POLICY_HOME, mid) is None:  # taken since it was read (unreachable under the claim)
+            fetch_refuse(mid, "not in the registry",
+                         f"msg {mid} was not left undownloaded by this bot: nothing to fetch")
+        bridge_one(account, mid, chat_id, snap, "message", ocr)     # message_text takes the entry
+        log(f"FETCH msg {mid}: its file was here; mailed whole")
+        return f"msg {mid} mailed"
+    if state == "Undecipherable":
+        attach.drop(POLICY_HOME, mid)
+        fetch_refuse(mid, "undecipherable; its registry entry dropped",
+                     f"msg {mid} could not be decrypted, and a second fetch cannot decrypt it")
+    if state in FETCHABLE:      # 5
+        try:
+            rpc.download_full_message(account.id, mid)
+        except JsonRpcError as e:
+            text = retract.core_text(e)
+            fetch_refuse(mid, f"core: {text}", f"msg {mid}: Delta Chat core refused the fetch: {text}")
+    if attach.mark_fetching(POLICY_HOME, mid) is None:  # as in 4
+        fetch_refuse(mid, "not in the registry",
+                     f"msg {mid} was not left undownloaded by this bot: nothing to fetch")
+    whose = "" if ocr else ", a stranger's"
+    log(f"FETCH msg {mid} chat {chat_id}: download started ({state}{whose})")
+    settled = fetch_state_settled(account, mid)
+    hold(account, mid, chat_id, "message", ocr, snap)
+    if download_state(account.get_message_by_id(mid).get_snapshot()) == "Done":
+        # landed before the hold could hear its MsgsChanged: mailed now (the HELD pop)
+        if release(account, mid, "landed"):
+            return f"msg {mid} mailed"
+    elif settled == "Failure":
+        log(f"FETCH msg {mid}: still Failure after the fetch; held, its next change or timeout mails it")
+    return f"fetch started for msg {mid}; it is mailed when it lands"
+# <<< dc-fetch
+
+
 def handle_events(account):
     """Blocking event loop. wait_for_event() takes NO timeout - passing one
     raises TypeError, which in the first version was swallowed by a bare
@@ -1675,58 +2110,76 @@ def handle_events(account):
             log(call_event_line(event))
         if kind == EventType.INCOMING_MSG:
             try:
-                if seen(event.msg_id):
-                    # Already mailed, or recorded, by the startup sweep: it
-                    # runs before this thread, and start_io() before it, so a
-                    # message fetched at start is both swept and queued here.
-                    # A repeated IncomingMsg for a mailed id lands here too.
-                    # Nothing else: no mail, no mark-seen, no accept, no hold.
-                    # A held id is never in SEEN (hold() does not remember()),
-                    # so the release below still runs for it.
-                    log(f"RECV msg {event.msg_id}: already bridged (SEEN), skipped")
-                    continue
-                msg = account.get_message_by_id(event.msg_id).get_snapshot()
-                chat = account.get_chat_by_id(event.chat_id)
-                info = chat.get_basic_snapshot()
-                if getattr(info, "is_device_chat", False) or getattr(info, "is_self_talk", False):
-                    # The core's own notices and the account's notes to
-                    # itself: never the agent's mail, as the sweep leaves
-                    # them out (unseen_incoming). With the bot flag off the
-                    # core makes both chats. Nothing else: no mail, no
-                    # mark-seen, no remember, no accept, no hold.
-                    where = "Device messages" if getattr(info, "is_device_chat", False) else "Saved messages"
-                    log(f"RECV msg {event.msg_id}: {where} chat, not mailed")
-                    continue
-                who = msg.sender.get_snapshot()
-                sender = who.display_name
-                request = getattr(info, "is_contact_request", False)
-                if not inbound_ok(account, event.chat_id, "contact-request" if request else "message",
-                                  getattr(who, "address", None), sender):
-                    # public profile, unlisted chat: recorded, never mailed,
-                    # accepted or held. remember() it and mark it seen, as a
-                    # bridged message is (bridge_one), remember() first.
-                    remember(event.msg_id)
-                    account.mark_seen_messages([account.get_message_by_id(event.msg_id)])
-                else:
-                    if request and ACCEPT_REQUESTS:
-                        chat.accept()
-                        log(f"ACCEPTED contact request, chat {event.chat_id}")
-                    # BOTH routes, held request or bridged message, are
-                    # remember()ed and marked seen in bridge_one(), or the
-                    # next restart's sweep mails a held request again.
-                    route = "request" if request and not ACCEPT_REQUESTS else "message"
-                    if is_pending(msg):
-                        hold(account, event.msg_id, event.chat_id, route, not request, msg)
-                    elif event.msg_id in HELD:
-                        # The sweep held it: start_io() runs before the
-                        # sweep, so a message fetched at start is both fresh
-                        # and queued as IncomingMsg. Its file has landed
-                        # since. release() pops HELD, so it is mailed once,
-                        # by whichever of this, MsgsChanged or the timer
-                        # gets there first.
-                        release(account, event.msg_id, "landed")
+                # The whole decision under the message's claim(), as a
+                # release and a dc-fetch take it: on one id, this never runs
+                # inside either. A dc-fetch's download may be announced as
+                # IncomingMsg (a bot=1 account hears of a split message only
+                # when it is complete, design §8); without the claim, and
+                # the SEEN skip under it, that IncomingMsg mailed a message
+                # the fetch was also mailing. The skip is checked under the
+                # claim, so a release or fetch that remember()ed the id is
+                # seen here, never half done.
+                with claim(event.msg_id):
+                    if seen(event.msg_id):
+                        # Already mailed, or recorded, by the startup sweep: it
+                        # runs before this thread, and start_io() before it, so a
+                        # message fetched at start is both swept and queued here.
+                        # A repeated IncomingMsg for a mailed id lands here too.
+                        # Nothing else: no mail, no mark-seen, no accept, no hold.
+                        # A held id is in SEEN only when dc-fetch held it: it was
+                        # mailed as a partial first. On a bot=1 account core says
+                        # its download is done with this IncomingMsg alone, and no
+                        # MsgsChanged follows (design §8), so it is rechecked here
+                        # as a MsgsChanged would be; else it waits out its bound.
+                        if event.msg_id in HELD:
+                            recheck_held(account, event)
+                            continue
+                        log(f"RECV msg {event.msg_id}: already bridged (SEEN), skipped")
+                        continue
+                    msg = account.get_message_by_id(event.msg_id).get_snapshot()
+                    chat = account.get_chat_by_id(event.chat_id)
+                    info = chat.get_basic_snapshot()
+                    if getattr(info, "is_device_chat", False) or getattr(info, "is_self_talk", False):
+                        # The core's own notices and the account's notes to
+                        # itself: never the agent's mail, as the sweep leaves
+                        # them out (unseen_incoming). With the bot flag off the
+                        # core makes both chats. Nothing else: no mail, no
+                        # mark-seen, no remember, no accept, no hold.
+                        where = "Device messages" if getattr(info, "is_device_chat", False) else "Saved messages"
+                        log(f"RECV msg {event.msg_id}: {where} chat, not mailed")
+                        continue
+                    who = msg.sender.get_snapshot()
+                    sender = who.display_name
+                    request = getattr(info, "is_contact_request", False)
+                    if not inbound_ok(account, event.chat_id, "contact-request" if request else "message",
+                                      getattr(who, "address", None), sender):
+                        # public profile, unlisted chat: recorded, never mailed,
+                        # accepted or held. remember() it and mark it seen, as a
+                        # bridged message is (bridge_one), remember() first.
+                        remember(event.msg_id)
+                        account.mark_seen_messages([account.get_message_by_id(event.msg_id)])
                     else:
-                        bridge_one(account, event.msg_id, event.chat_id, msg, route, not request)
+                        if request and ACCEPT_REQUESTS:
+                            chat.accept()
+                            log(f"ACCEPTED contact request, chat {event.chat_id}")
+                        # BOTH routes, held request or bridged message, are
+                        # remember()ed and marked seen in bridge_one(), or the
+                        # next restart's sweep mails a held request again.
+                        route = "request" if request and not ACCEPT_REQUESTS else "message"
+                        if is_pending(msg) and not mail_now(msg):
+                            # held, unless over the limit (point B): then bridge_one below
+                            # mails it now, as not downloaded
+                            hold(account, event.msg_id, event.chat_id, route, not request, msg)
+                        elif event.msg_id in HELD:
+                            # The sweep held it: start_io() runs before the
+                            # sweep, so a message fetched at start is both fresh
+                            # and queued as IncomingMsg. Its file has landed
+                            # since. release() pops HELD, so it is mailed once,
+                            # by whichever of this, MsgsChanged or the timer
+                            # gets there first.
+                            release(account, event.msg_id, "landed")
+                        else:
+                            bridge_one(account, event.msg_id, event.chat_id, msg, route, not request)
             except Exception:
                 log("RECV handler failed:\n" + traceback.format_exc())
         elif kind == EventType.MSGS_CHANGED and HELD:
@@ -1879,7 +2332,9 @@ def sweep(account):
                     continue
                 if request and ACCEPT_REQUESTS:
                     chat.accept()
-                if is_pending(snap):
+                if is_pending(snap) and not mail_now(snap):
+                    # held, unless over the limit (point B): then mailed below, now,
+                    # as not downloaded
                     held = True
                     hold(account, m.id, snap.chat_id,
                          "request" if request and not ACCEPT_REQUESTS else "message", not request, snap)
@@ -2097,6 +2552,22 @@ def gate(account, chat_id, listing, what):
     if not v:
         refuse(f"REFUSED send to chat {chat_id}: {v.reason} ({what})", v.detail)
     return chat_id
+
+
+def quote_refusal(account, msg_id, chat_id) -> str | None:
+    """dc-say --quote MSG_ID: why MSG_ID cannot be quoted in CHAT_ID, or None.
+    The bot is the authority: it holds the account, so it alone can see whether
+    the message exists and which chat it is in. Never raises."""
+    if isinstance(msg_id, bool) or not str(msg_id).isdigit() or int(msg_id) <= 0:
+        return f"--quote takes a message id, a positive number, got {msg_id!r}; nothing was sent"
+    try:
+        in_chat = int(account.get_message_by_id(int(msg_id)).get_snapshot().chat_id)
+    except Exception as e:  # noqa: BLE001 - no such message: a refusal, never a crash
+        return f"msg {msg_id} is not a message this account has ({type(e).__name__}: {e}); nothing was sent"
+    if in_chat != int(chat_id):
+        return (f"msg {msg_id} is in chat {in_chat}, not chat {chat_id}: a reply quotes "
+                f"a message in its own chat; nothing was sent")
+    return None
 
 
 class ContactMatch(Exception):
@@ -2361,6 +2832,7 @@ def main():
     if ignored:
         log(f"WARNING: {ignored}")
     # <<< no-callers
+    read_policy()       # download-policy: once, before the account; points A, B and C use POLICY
     with Rpc(accounts_dir=str(ACCOUNTS), rpc_server_path=path) as rpc:
         dc = DeltaChat(rpc)
         found = dc.get_all_accounts()
@@ -2382,11 +2854,19 @@ def main():
         stop_on_sigterm()
         # <<< stale-live
         bot_flag_off(account)       # bot-flag: before start_io, so no stranger is auto-accepted
+        core_limit(account)     # download-policy point A: before IO, so core fetches by it from the first message
         account.start_io()
         # >>> caller-keys: a callers file from an older version is pinned to
         # keys once, here (keygate.migrate: owner line only, backup kept).
-        keygate.migrate(account, dc_env.callers_file(), log)
-        channels.migrate(account, channels.channels_path(), log)   # the same, for channels.txt
+        # An owner line either migration left unpinned mails the owner's agent
+        # once (ownerkey: recorded, so a refused send is tried at the next start).
+        callers_keys = keygate.migrate(account, dc_env.callers_file(), log)
+        channels_keys = channels.migrate(account, channels.channels_path(), log)   # the same, for channels.txt
+        pending = ownerkey.note(OUTBOX, dc_env.callers_file(), callers_keys,
+                                channels.channels_path(), channels_keys, log)
+        ownerkey.flush(OUTBOX, send_alert, log, profile=PROFILE, account=address(account) or "",
+                       accounts=str(ACCOUNTS), callers=str(dc_env.callers_file()),
+                       chans=str(channels.channels_path()), pending=pending)
         # <<< caller-keys
         # the address as setup reads it: the first transport, else the legacy
         # "addr" key, which core 2.62 sets only through the deprecated
@@ -2564,7 +3044,8 @@ def main():
                         whos = ", ".join(label for _, label in members)
                         log(f"GROUP {name!r} made, chat {chat.id}, members {k}: {whos}; nothing sent")
                         done = (f"made group {name!r}, chat {chat.id}, members {k}: {whos}; nothing was sent. "
-                                f"List it: sessionphone channels add NAME chat:{chat.id}, then dc-say NAME TEXT")
+                                f"List it: sessionphone channels add NAME chat:{chat.id}, "
+                                f"then {dc_env.say_cmd(PROFILE)} NAME TEXT")     # the footer's dc-say (PHONE-307)
                     elif "hangup" in job:
                         # not gated: ending a call sends no words
                         cid = resolve_chat(account, chat_ref(job, "hangup"), listing)
@@ -2665,6 +3146,10 @@ def main():
                     elif "delete" in job:
                         # dc-delete MSG_ID...: delete for everyone, all-or-nothing
                         done = retract.delete_for_all(account, job["delete"], listing, gate, log=log)
+                    elif "fetch" in job:
+                        # dc-fetch MSG_ID: a message this bot mailed as not downloaded,
+                        # mailed whole once it is here (fetch_job, the cases above it)
+                        done = fetch_job(account, job["fetch"])
                     else:
                         # >>> call-id-gate
                         # dc-say --call N names the CALL, not just the room.
@@ -2689,17 +3174,34 @@ def main():
                                 ack.write(job.get("ack"), False, why, log=log)
                                 continue        # finally: still unlinks the job
                         # <<< call-id-gate
+                        # >>> quote-gate
+                        # dc-say --quote N: a quote-reply to msg N, which must
+                        # be a message in THIS chat. Anything else refuses the
+                        # whole job: nothing sent, nothing spoken, never a
+                        # plain send in its place.
+                        quote = job.get("quote_msg_id")
+                        if quote is not None:
+                            why = quote_refusal(account, quote, cid)
+                            if why:
+                                log(f"REFUSED dc-say --quote {quote}: {why}")
+                                ack.write(job.get("ack"), False, why, log=log)
+                                continue        # finally: still unlinks the job
+                            quote = int(quote)
+                        # <<< quote-gate
                         chat = account.get_chat_by_id(cid)
                         # a proxied voice (dc-say --who NAME --voice af_sky):
                         # the chat text carries the name, the call the voice
                         who = job.get("who") or dc_env.AGENT_NAME
                         text = job["text"] if who == dc_env.AGENT_NAME else f"{who}: {job['text']}"
-                        if job.get("html"):
-                            # dc-say --html FILE: text is the preview, html the full message
-                            sent = chat.send_message(text=text, html=job["html"])
+                        if job.get("html") or quote is not None:
+                            # dc-say --html FILE: text is the preview, html the full message;
+                            # dc-say --quote N: the message quotes msg N (speech is unchanged)
+                            sent = chat.send_message(text=text, html=job.get("html") or None,
+                                                     quoted_msg=quote)
                         else:
                             sent = chat.send_text(text)
-                        log(f"SENT to chat {cid}{' +html' if job.get('html') else ''}: {text[:60]}")
+                        log(f"SENT to chat {cid}{' +html' if job.get('html') else ''}"
+                            f"{f' quoting msg {quote}' if quote is not None else ''}: {text[:60]}")
                         done = f"sent to chat {cid}, msg {sent.id}"   # set before speaking: it went
                         # a live call in that chat hears it too - unless the
                         # job is no_speak: a TTS-failure fallback, which must

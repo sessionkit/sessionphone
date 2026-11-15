@@ -14,9 +14,10 @@ that each relative link resolves in the export, and that no shipped file links
 this repo by a full URL. PyPI's renderer keeps in-page anchors working: it
 gives each heading a `user-content-` id and rewrites `#x` links to match.
 
-Known gap: PyPI renders the README away from the repository, so a relative
-link does not work on the PyPI page. That gap is carried by the release
-(SK-88), not worked around here.
+PyPI renders the README away from the repository, so a relative link does not
+work on the PyPI page. The release closes that gap, not the README: `make
+publish` uploads what `make pypi-dist` built, from the tag, with the staged
+README's links pinned to it (test_pypi_dist.py).
 
 The artifacts are built once per module with uv; nothing is uploaded.
 """
@@ -76,8 +77,8 @@ def test_pyproject_names_the_readme():
     assert README.is_file()
 
 
-# A relative README link does not work on the PyPI page: the module docstring's
-# known gap (SK-88).
+# A relative README link does not work on the PyPI page as it stands: `make
+# pypi-dist` pins it to the release tag (the module docstring).
 def test_readme_links_are_anchors_absolute_or_into_this_repo():
     targets = link_targets(README.read_text(encoding="utf-8"))
     assert targets, "no links found: the link scan is broken"

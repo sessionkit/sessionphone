@@ -29,6 +29,43 @@ if _early:   # the isolation below would be too late to matter: say so, loudly
 for _k in [k for k in os.environ if k in _SEAT_ENV_NAMES or k.startswith(_SEAT_ENV_PREFIXES)]:
     del os.environ[_k]
 
+# ---- DC_AGENT never leaks from one test to the next (PHONE-332) -------------
+# bridge/bot.py copies sys.argv[1] into an unset DC_AGENT at import (the launchd
+# job names the bot there: `bot AGENT`). Under pytest argv[1] is pytest's own
+# argument, and os.environ is the whole process's. So a test module that imports
+# the bot at its top set DC_AGENT during collection, and a test that imports it
+# first set it mid-run, for every test after it: a test of the default agent saw
+# that word, not the environment its own test set up (PHONE-273:
+# tests/test_dc_ack.py failed alone and passed in the suite). So DC_AGENT is put
+# back to its value at the session's start (unset: the isolation above dropped
+# it) once collection is done, and to its value before each test after every
+# test (dc_agent_kept). tests/test_dc_agent_kept.py pins both.
+DC_AGENT_AT_START = os.environ.get("DC_AGENT")
+
+
+def _put_dc_agent(value: str | None) -> None:
+    """DC_AGENT set to value, or unset when value is None."""
+    if value is None:
+        os.environ.pop("DC_AGENT", None)
+    else:
+        os.environ["DC_AGENT"] = value
+
+
+def pytest_collection_finish(session):
+    """Collecting imported every test module, and the bot with many of them:
+    DC_AGENT is put back to its value at the session's start before any test runs."""
+    _put_dc_agent(DC_AGENT_AT_START)
+
+
+@pytest.fixture(autouse=True)
+def dc_agent_kept():
+    """DC_AGENT after a test is what it was before it: set to that value, or unset.
+    A bot imported in the test (bot.py fills DC_AGENT from argv), or any other
+    write to os.environ outside monkeypatch, ends with the test."""
+    was = os.environ.get("DC_AGENT")
+    yield
+    _put_dc_agent(was)
+
 # ---- the real home never reaches the suite (PHONE-264) ----------------------
 # Run alone, tests/test_callers_on_install.py and tests/test_avatar.py wrote the
 # REAL ~/.sessionphone/.bot.lock: their first test imports the bot itself and runs
@@ -601,6 +638,15 @@ def recording_switch_isolated(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def has_launchd(monkeypatch):
+    """The suite's world is a Mac with launchd: the launchd verbs never run the
+    real launchctl (FakeLaunchd stands in), so their host check passes on any
+    host and under any PATH a test sets. tests/test_no_launchd.py puts the real
+    check back to fake a host without launchd."""
+    monkeypatch.setattr(service, "launchd", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def undelivered_in_tmp(tmp_path_factory, monkeypatch):
     """A failed seat send is spooled (bridge/spool.py, PHONE-106 do-003). No test
     may spool into the real <DC_ROOT>/undelivered: spool.DIR is a fresh tmp dir.
@@ -701,6 +747,24 @@ def live_file_in_tmp(monkeypatch, tmp_path_factory):
         if mod is not None and hasattr(mod, "LIVE_FILE"):
             monkeypatch.setattr(mod, "LIVE_FILE", f)
     yield f
+
+
+@pytest.fixture(autouse=True)
+def no_policy_carried():
+    """bot.main() reads the download policy (bot.read_policy) and keeps it in
+    bot.POLICY and bot.POLICY_HOME, which point C reads: a policy read, a
+    landed file is saved under its save_dir and a partial is recorded under its
+    home. A test that ran main() would leave them set, and every later test's
+    message_text would save and record. So each test starts and ends with
+    neither (no policy: a file's line names core's blob, as before PHONE-283).
+    A test of point C reads its own policy (read_policy with a tmp home)."""
+    def clear():
+        bot = sys.modules.get("sessionphone.bridge.bot")
+        if bot is not None:
+            bot.POLICY = bot.POLICY_HOME = None
+    clear()
+    yield
+    clear()
 
 
 @pytest.fixture(autouse=True)

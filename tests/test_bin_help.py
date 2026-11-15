@@ -138,11 +138,11 @@ def test_a_non_executable_file_fails_the_walk(tmp_path):
 #
 # dc_help used to print from line 2 to the first BLANK line, so a tool whose
 # header comment ran straight into code printed the whole script. The walk is
-# a glob over bin/ and wheel-bin/ (never a list), and wheel-bin/ runs through
-# its own path, a symlink, so $0 is the link as it is on a user's PATH.
+# a glob over bin/ and src/sessionphone/dcbin/ (never a list), and dcbin/ runs
+# through its own path, a symlink, as the console script's target (PHONE-314).
 
-WHEEL_BIN = BIN.parent / "wheel-bin"
-DC_TOOLS = sorted(BIN.glob("dc-*")) + sorted(WHEEL_BIN.glob("dc-*"))
+DCBIN = BIN.parent / "src" / "sessionphone" / "dcbin"
+DC_TOOLS = sorted(BIN.glob("dc-*")) + sorted(DCBIN.glob("dc-*"))
 
 
 def code_lines(tool):
@@ -176,12 +176,12 @@ def code_in_help(tool, flag, dirs):
     return out
 
 
-def test_dc_walk_finds_bin_and_wheel_bin():
-    """The glob must reach both dirs, and wheel-bin/ through its symlinks."""
+def test_dc_walk_finds_bin_and_dcbin():
+    """The glob must reach both dirs, and dcbin/ through its symlinks."""
     names = {(t.parent.name, t.name) for t in DC_TOOLS}
     assert {("bin", "dc-call"), ("bin", "dc-log"), ("bin", "dc-log-web"),
-            ("wheel-bin", "dc-hangup"), ("wheel-bin", "dc-env")} <= names
-    assert any(t.is_symlink() for t in DC_TOOLS if t.parent == WHEEL_BIN)
+            ("dcbin", "dc-hangup"), ("dcbin", "dc-env")} <= names
+    assert any(t.is_symlink() for t in DC_TOOLS if t.parent == DCBIN)
 
 
 @pytest.mark.parametrize("flag", ["-h", "--help"])

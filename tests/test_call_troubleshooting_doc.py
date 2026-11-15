@@ -240,6 +240,25 @@ def _drive_ice(mp, out):
     calls.watch_ice(i.FakePC(broken)).ice("completed")
 
 
+def _drive_ice_checks(mp, out):
+    """PHONE-329: the ice checks lines, every way checking ends, with and
+    without a USE-CANDIDATE and an IN_PROGRESS hit. Written through calls.log."""
+    import logging
+
+    from sessionphone.bridge import ice_checks
+    k = rig("test_ice_checks")
+    mp.setattr(calls, "_hooks", calls.Hooks(out.append, None, None))
+    w = ice_checks.ChecksWatch(logging.getLogger("doc.ice_checks"), logging.NOTSET)
+    k.stall(w)                                          # completed, the 158170 shape
+    for end in (ice_checks.FAILED, ice_checks.CONNECTION_LOST):
+        h, a = k.Proto(k.Cand("host", k.LOCAL_IP)), k.Cand("host", k.REMOTE_IP)
+        p = k.Pair(h, a)
+        conn = k.Conn([p], [a])
+        k.feed(w, k.state(conn, p, k.S.WAITING, 0.0), k.state(conn, p, k.S.IN_PROGRESS, 0.0),
+               k.rec(end, conn, h, None, at=1.0) if end == ice_checks.CONNECTION_LOST
+               else k.rec(end, conn, at=1.0))
+
+
 def _drive_redact(mp, out):
     """do-005: the ice servers line, trickled candidates, connection state."""
     x = rig("test_ice_redact")
@@ -329,7 +348,7 @@ def emitted(_message_tripwire_script, tmp_path_factory):
         mp.setattr(seatmail, "MESSAGE", None)
         mp.setattr(dc_env, "MAILTO", BOX)
         mp.setattr(calls, "_call_id", None)
-        for drive in (_drive_turns, _drive_noreply, _drive_ice, _drive_redact, _drive_heard,
+        for drive in (_drive_turns, _drive_noreply, _drive_ice, _drive_ice_checks, _drive_redact, _drive_heard,
                       _drive_first_wait, _drive_ring):
             drive(mp, out)
     assert not trips.exists() or not trips.read_text(), f"a drive ran message:\n{trips.read_text()}"

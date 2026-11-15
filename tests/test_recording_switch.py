@@ -159,7 +159,6 @@ def rig(tmp_path, monkeypatch):
     ns.root.mkdir()
     monkeypatch.setattr(calls, "CALLS_DIR", ns.root)
     monkeypatch.setattr(recording, "RECORD_DRAIN", 0.0)
-    monkeypatch.setattr(calls, "_recorder", None)
     monkeypatch.setattr(calls, "_last_prune", None)
     monkeypatch.setattr(calls.earleg, "end", lambda *a: None)
 

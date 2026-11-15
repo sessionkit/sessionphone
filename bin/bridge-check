@@ -9,7 +9,9 @@
 # for a retry and how many are dead, in DC_UNDELIVERED as dc-env names it. That
 # line is information about the running bot, not the code: it never fails the gate.
 # Its scratch root is short, under /tmp, whatever TMPDIR says, and
-# is removed on exit, pass or fail.
+# is removed on exit, pass or fail. A RED run first copies it (every test's
+# log and what the tests left) to $XDG_CACHE_HOME/sessionphone/bridge-check/
+# (~/.cache/... by default) and prints that path; the newest 10 are kept.
 
 case "${1:-}" in -h|--help) sed -n "2,/^$/p" "$0" | sed "s/^# \{0,1\}//"; exit 0;; esac
 set -uo pipefail
@@ -52,4 +54,17 @@ for t in tests/bridge/test_*.py; do [ -e "$t" ] || continue; step "$t"
 [ $long -eq 1 ] && echo "bridge-check: a test bound a unix socket on a path over macOS's 104-byte
   limit (sun_path). That is a path too long for this machine, not a code regression:
   its scratch root was $S. Find the test's socket path and shorten it."
-[ $rc -eq 0 ] && echo "bridge-check: ALL GREEN" || echo "bridge-check: RED - do not commit"; exit $rc
+# A RED run keeps its evidence: the scratch root goes on exit, and a failure
+# whose log went with it cannot be read. Copied out first (sockets and the
+# like are skipped), the newest KEEP runs kept.
+keep_failure(){
+  local base="${XDG_CACHE_HOME:-$HOME/.cache}/sessionphone/bridge-check" k
+  k="$base/$(date +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$k" && (cd "$S" && tar -cf - . 2>/dev/null) | (cd "$k" && tar -xf - 2>/dev/null)
+  if [ -d "$k" ]; then echo "bridge-check: this run's logs and scratch files are kept in $k"
+  else echo "bridge-check: could not keep this run's files under $base"; fi
+  # shellcheck disable=SC2012 # names are our own date stamps: no odd characters
+  ls -1t "$base" 2>/dev/null | tail -n +11 | while read -r old; do rm -rf "${base:?}/${old:?}"; done
+}
+if [ $rc -eq 0 ]; then echo "bridge-check: ALL GREEN"
+else keep_failure; echo "bridge-check: RED - do not commit"; fi; exit $rc

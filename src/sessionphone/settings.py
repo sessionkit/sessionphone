@@ -26,7 +26,12 @@ and DC_CALLERS (install refuses while it is set), and the names in SAVED.
 One derived value is kept too: the signer `bot install --registry` got from
 `message seat agent --install` (Resolved.keyed), so the bot keeps its key.
 sessionmail's mail-route keys are NOT kept here: sessionmail reads them from
-its own ``mail.json``, and a second copy would be a second source. A key the
+its own ``mail.json``, and a second copy would be a second source. The
+host-only keys (HOST_ONLY: ``download_limit``, ``download_types``,
+``save_dir``) are kept too, but differently: they are plain snake_case, read
+from these files alone (host_values, policy) and never from the environment,
+never carried by the job, and written only by ``bot install --set KEY=VALUE``,
+which a lock refuses as it refuses a shell's value. A key the
 shell sets is still carried into the job for that run. mail_file() asks the
 installed sessionmail whether it reads ``mail.json``, so install can say,
 for each one, whether it is kept and how to keep it.
@@ -267,6 +272,8 @@ class Resolved:
     keyed: dict[str, str] = field(default_factory=dict)    # the signer `--registry` gave: saved
     not_saved: bool = False         # the write was tried and failed (NotSaved)
     replace: dict[str, str] = field(default_factory=dict)  # bot -> its root: retired, then forgotten
+    host: dict[str, tuple[str, pathlib.Path]] = field(default_factory=dict)  # host-only key -> (value, file)
+    sets: dict[str, str] = field(default_factory=dict)     # `--set KEY=VALUE`: host-only, saved
 
     @property
     def root(self) -> pathlib.Path:
@@ -530,13 +537,16 @@ def _agent_instead(values: dict[str, str], origin: dict[str, pathlib.Path],
 def resolve(shell: Mapping[str, str], name: str | None = None,
             forget: tuple[str, ...] | list[str] = (),
             runs_agent: Callable[[Mapping[str, str]], bool] | None = None,
-            replace: tuple[str, ...] | list[str] = ()) -> Resolved:
+            replace: tuple[str, ...] | list[str] = (),
+            sets: Mapping[str, str] | None = None) -> Resolved:
     """This shell over the file, for one bot. Writes nothing. Raises Bad,
     naming the file, for a file that cannot be used, two bots and no name, a
     locked key this shell changes, a --forget that cannot be done, a
     saved signer path that is gone, or a --replace that cannot be done; and
     Rival for another bot recorded on this bot's root that REPLACE does not
-    name (_replacing). RUNS_AGENT, asked only for that last
+    name (_replacing); and a --set it cannot do (_judge_sets). SETS is
+    `--set KEY=VALUE` (parse_sets): host-only keys, written into phone.json
+    by save() and never carried by the job. RUNS_AGENT, asked only for that last
     refusal, with the values the job would carry: True when the installed
     sessionmail can run the seat's agent itself, so the refusal also names
     the --forget that lets install do so."""
@@ -546,10 +556,15 @@ def resolve(shell: Mapping[str, str], name: str | None = None,
     else:
         name, name_from = pick_name(shell, names(found), ask=True)
     values, origin, locked = merged(found, name)
-    ignored = {k: origin[k] for k in sorted(values) if not savable(k)}
-    for k in ignored:
+    # the host-only keys are read from the file alone, and the job never carries
+    # them: taken out of the job's values, but not listed as ignored
+    host = {k: (values[k], origin[k]) for k in HOST_ONLY if k in values}
+    ignored = {k: origin[k] for k in sorted(values) if not savable(k) and not host_only(k)}
+    for k in [k for k in values if not savable(k)]:
         values.pop(k)
         origin.pop(k)
+    sets = dict(sets or {})
+    _judge_sets(sets, host, locked)
     forget = tuple(dict.fromkeys(k.strip() for k in forget if k.strip()))
     main = file_path()
     forgot = {}
@@ -592,7 +607,7 @@ def resolve(shell: Mapping[str, str], name: str | None = None,
     where.update({k: "shell" for k in shell_gives})
     return Resolved(name=name, name_from=name_from, given=given, origin=where, file=values,
                     file_origin=origin, locked=locked, forget=forget, forgot=forgot,
-                    ignored=ignored, replace=replacing)
+                    ignored=ignored, replace=replacing, host=host, sets=sets)
 
 
 def to_save(r: Resolved) -> dict[str, str]:
@@ -605,6 +620,7 @@ def to_save(r: Resolved) -> dict[str, str]:
            if r.origin.get(k) == "shell" and savable(k)
            and r.file_origin.get(k, main) == main}
     out.update({k: v for k, v in r.keyed.items() if r.file_origin.get(k, main) == main})
+    out.update({k: v for k, v in r.sets.items() if r.host.get(k, (v, main))[1] == main})
     return out
 
 
@@ -655,6 +671,236 @@ def _mkdirs(d: pathlib.Path) -> None:
     for m in reversed(missing):
         m.mkdir(mode=0o700)
         m.chmod(0o700)
+
+
+# ---- host-only keys: the download policy, read from phone.json alone ----------
+#
+# Three keys under bots.<agent>, plain snake_case and never DC_*: they are read
+# from the host layer (phone.json, then phone.d/*.json, under _locked) and NEVER
+# from the environment, so no shell, an agent's included, can change them. They
+# are not savable (no shell gives them, and the job never carries them): install
+# writes one only when `--set KEY=VALUE` names it. Each value is a JSON string,
+# as every value in the file must be (_shape); the bridge parses the string.
+
+HOST_ONLY = ("download_limit", "download_types", "save_dir")
+LIMIT_KEY, TYPES_KEY, SAVE_DIR_KEY = HOST_ONLY
+# The attachment kinds download_types names, in the order they are shown.
+KINDS = ("image", "sticker", "voice", "audio", "video", "file", "webxdc", "vcard")
+NO_KINDS = "none"
+DEFAULT_LIMIT = 16_000_000          # 16 MB: a full-resolution phone photo is fetched whole
+SAVE_DIR_NAME = "attachments"       # the default save_dir, under the bot's home
+DEFAULT_SOURCE = "the default"
+_DIGITS = re.compile(r"[0-9]+")
+# The schema the package ships for phone.json, and the dot name it is
+# installed under beside phone.json: the kit's settings reader looks there first.
+SCHEMA = "schemas/phone.schema.json"
+SCHEMA_INSTALLED = f".{TOOL}.schema.json"
+
+
+def host_only(key: str) -> bool:
+    return key in HOST_ONLY
+
+
+def host_values(name: str, found: list[tuple[pathlib.Path, dict]] | None = None,
+                verb: str | None = None) -> dict[str, tuple[str, pathlib.Path]]:
+    """Bot NAME's host-only keys as the host layer gives them, merged as every
+    key is (merged: a later file wins, a locked key holds): {key: (value, the
+    file that set it)}. A key no file sets is absent. Never reads the
+    environment. FOUND is layers() already read; else they are read now,
+    raising Bad for a file that cannot be used (one that is not the shape
+    _shape allows, such as a value that is not a string)."""
+    found = layers(verb) if found is None else found
+    values, origin, _locked = merged(found, name)
+    return {k: (values[k], origin[k]) for k in HOST_ONLY if k in values}
+
+
+def parse_host(key: str, value: str) -> tuple[object, str | None]:
+    """One host-only VALUE read for KEY. -> (what it means, a note), or
+    (None, why) when it cannot be used, so the key takes its default:
+    download_limit: decimal digits, an int (0: no limit); download_types:
+    kinds from KINDS, comma-separated, or `none`, a frozenset (an unknown kind
+    is dropped, and the note names it; none known at all cannot be used);
+    save_dir: an absolute path, `~` allowed, expanded."""
+    v = value.strip()
+    if key == LIMIT_KEY:
+        if not _DIGITS.fullmatch(v):
+            return None, "not a number of bytes (decimal digits, 0 for no limit)"
+        return int(v), None
+    if key == TYPES_KEY:
+        if not v:
+            return None, f"empty (name kinds from {', '.join(KINDS)}, or `{NO_KINDS}`)"
+        if v == NO_KINDS:
+            return frozenset(), None
+        parts = [p.strip() for p in v.split(",")]
+        known = [p for p in parts if p in KINDS]
+        unknown = [p or "(empty)" for p in parts if p not in KINDS]
+        if not known:
+            return None, (f"names no kind this bot knows ({', '.join(unknown)}; the kinds are "
+                          f"{', '.join(KINDS)}, or `{NO_KINDS}`)")
+        note = (f"unknown kind {', '.join(unknown)} dropped (the kinds are {', '.join(KINDS)})"
+                if unknown else None)
+        return frozenset(known), note
+    if key == SAVE_DIR_KEY:
+        if not v:
+            return None, "empty (an absolute path, `~` allowed)"
+        p = pathlib.Path(os.path.expanduser(v))
+        if not p.is_absolute():
+            return None, "not an absolute path (`~` is allowed)"
+        return p, None
+    raise KeyError(key)
+
+
+def limit_text(limit: int) -> str:
+    """A download limit in words: `16000000 (16 MB)`, or `0 (no limit)`."""
+    if not limit:
+        return "0 (no limit)"
+    mb = limit / 1_000_000
+    return f"{limit} ({mb:g} MB)" if mb >= 1 else f"{limit} ({limit / 1000:g} KB)"
+
+
+def types_text(kinds: frozenset[str]) -> str:
+    """Kinds in words: `all`, `none`, or the kinds in KINDS order."""
+    if kinds == frozenset(KINDS):
+        return "all"
+    return ",".join(k for k in KINDS if k in kinds) or NO_KINDS
+
+
+@dataclass(frozen=True)
+class Policy:
+    """Bot NAME's download policy as the host layer sets it, each key parsed
+    (parse_host), with where it came from. A key that is absent, or cannot be
+    used, takes its default; PROBLEMS says why, one line each, naming the
+    file and the key."""
+    limit: int
+    types: frozenset[str]
+    save_dir: pathlib.Path
+    origin: dict[str, str]          # key -> the file that set it (shown), or DEFAULT_SOURCE
+    problems: tuple[str, ...] = ()
+
+    def value_text(self, key: str) -> str:
+        return {LIMIT_KEY: limit_text(self.limit), TYPES_KEY: types_text(self.types),
+                SAVE_DIR_KEY: shown(self.save_dir)}[key]
+
+    def lines(self) -> list[str]:
+        """One line per key: `download_limit: 16000000 (16 MB)  (the default)`."""
+        w = max(len(k) for k in HOST_ONLY) + 1
+        return [f"{k + ':':<{w}} {self.value_text(k)}  ({self.origin[k]})" for k in HOST_ONLY]
+
+    def summary(self) -> str:
+        """The one line the bot logs at its start."""
+        word = {LIMIT_KEY: "limit", TYPES_KEY: "types", SAVE_DIR_KEY: "save_dir"}
+        return "download policy: " + ", ".join(
+            f"{word[k]} {self.value_text(k)} ({self.origin[k]})" for k in HOST_ONLY)
+
+
+def default_save_dir(home: str | os.PathLike) -> pathlib.Path:
+    """save_dir when no file sets it: <home>/attachments, the bot's own home
+    (its state root, or the profile's folder under it)."""
+    return pathlib.Path(home) / SAVE_DIR_NAME
+
+
+def policy(name: str, home: str | os.PathLike,
+           found: list[tuple[pathlib.Path, dict]] | None = None) -> Policy:
+    """Bot NAME's download policy, read from the host layer alone (host_values),
+    never from the environment. HOME is the bot's home, for save_dir's default.
+    A value that cannot be used (parse_host) is a problem naming its file and
+    key, and that key alone takes its default. A file that cannot be read as
+    the host layer at all (Bad: not JSON, a value that is not a string) is one
+    problem, and all three keys take their defaults: a setting never stops the
+    bot. Never raises Bad."""
+    defaults = {LIMIT_KEY: DEFAULT_LIMIT, TYPES_KEY: frozenset(KINDS),
+                SAVE_DIR_KEY: default_save_dir(home)}
+    got: dict[str, object] = dict(defaults)
+    origin = {k: DEFAULT_SOURCE for k in HOST_ONLY}
+    problems: list[str] = []
+    try:
+        filed = host_values(name, found)
+    except Bad as exc:
+        filed = {}
+        problems.append(f"download policy: the defaults are used, the settings file cannot be "
+                        f"read: {exc}")
+    for k, (v, f) in filed.items():
+        val, note = parse_host(k, v)
+        where = f"{shown(f)} `{BOTS}.{name}.{k}`"
+        if val is None:
+            problems.append(f"{where} is {json.dumps(v)}: {note}; the default is used")
+            continue
+        got[k], origin[k] = val, shown(f)
+        if note:
+            problems.append(f"{where} is {json.dumps(v)}: {note}")
+    return Policy(limit=got[LIMIT_KEY], types=got[TYPES_KEY], save_dir=got[SAVE_DIR_KEY],
+                  origin=origin, problems=tuple(problems))
+
+
+def parse_sets(pairs: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """`--set KEY=VALUE` pairs -> {key: value}, the last for a key winning.
+    Raises Bad for a pair with no `=`. The keys are judged by resolve()."""
+    out: dict[str, str] = {}
+    for pair in pairs:
+        key, eq, value = pair.partition("=")
+        if not eq or not key.strip():
+            raise Bad(f"--set {pair}: give KEY=VALUE ({', '.join(HOST_ONLY)}): nothing was written.")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _judge_sets(sets: Mapping[str, str], host: Mapping[str, tuple[str, pathlib.Path]],
+                locked: Mapping[str, pathlib.Path]) -> None:
+    """Refuse (Bad, nothing written) a --set install cannot do: a key that is
+    not host-only, a value parse_host cannot use or would trim (an unknown
+    kind), a key a file locks at another value, or one a drop-in sets (it is
+    read after phone.json, so the written value would never be read)."""
+    main = file_path()
+    for k, v in sets.items():
+        if not host_only(k):
+            how = (" A DC_* setting is given in this shell (`DC_NAME=VALUE sessionphone bot install`)."
+                   if k.startswith("DC_") else "")
+            raise Bad(f"--set {k}: install sets only {', '.join(HOST_ONLY)} that way: nothing was "
+                      f"written.{how}")
+        val, note = parse_host(k, v)
+        if val is None or note:
+            raise Bad(f"--set {k}={v}: {note}: nothing was written.")
+        have = host.get(k)
+        if k in locked and (have is None or have[0] != v):
+            at = "gives it no value (the bot takes its default)" if have is None else f"at {have[0]}"
+            raise Bad(f"{k} is locked by {shown(locked[k])} {at}, and --set gives {v}: nothing "
+                      f"was written. Change it in {shown(locked[k])}, or drop the lock there.")
+        if have is not None and have[1] != main and have[0] != v:
+            raise Bad(f"--set {k}: it is set in {shown(have[1])} ({have[0]}), which is read after "
+                      f"{shown(main)} and install does not write. Change it there: nothing was "
+                      "written.")
+
+
+def schema_source() -> str:
+    """The schema the package ships for phone.json, as text."""
+    from importlib import resources
+    return resources.files("sessionphone").joinpath(SCHEMA).read_text(encoding="utf-8")
+
+
+def schema_path() -> pathlib.Path:
+    """Where install puts the schema: beside phone.json, under the dot name."""
+    return file_path().with_name(SCHEMA_INSTALLED)
+
+
+def install_schema() -> bool:
+    """Write the package's schema beside phone.json (schema_path), whole (a
+    temp file, then a rename), 0600, in a folder made 0700. The package owns
+    it: a copy that differs is replaced. -> whether the file changed.
+    Raises OSError."""
+    text = schema_source()
+    p = schema_path()
+    try:
+        if p.read_text(encoding="utf-8") == text:
+            return False
+    except (OSError, ValueError):
+        pass
+    _mkdirs(p.parent)
+    tmp = p.with_name(p.name + ".part")
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
+              encoding="utf-8") as fh:
+        fh.write(text)
+    tmp.replace(p)
+    return True
 
 
 # ---- sessionmail's own file, asked of the installed sessionmail --------------
@@ -893,6 +1139,16 @@ def block(r: Resolved, probe: dict | None) -> list[str]:
              {True: "saved", False: "unchanged", None: "not written"}[r.saved])
     out = [f"settings:  {shown(main)} ({state}), bot {r.name}"]
     out += [f"  {k:<{width_k}}  {v:<{width_v}}  {h}" for k, v, h in rows]
+    for k in HOST_ONLY:         # read from the file alone, never carried by the job
+        if k in r.sets:
+            was = r.host.get(k, (None,))[0]
+            how = ("--set (saved)" if was is None else "--set (as saved)" if was == r.sets[k]
+                   else f"--set (saved; was {was})")
+            out.append(f"  {k}  {r.sets[k]}  {how}, host-only: the job does not carry it")
+        elif k in r.host:
+            v, p = r.host[k]
+            lock = " (locked)" if k in r.locked else ""
+            out.append(f"  {k}  {v}  {shown(p)}{lock}, host-only: the job does not carry it")
     for k, was in r.forgot.items():
         out.append(f"  forgot {k} (was {shown(was)}): removed from {shown(main)}")
     for k in r.forget:

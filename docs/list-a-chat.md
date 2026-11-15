@@ -25,7 +25,8 @@ process, in order. [Channels][channels] has the list's rules.
    `--key`, the command only writes the file, so the bot keeps running.
    It re-reads the list on every job: no restart.
 4. **Answer by name:** `dc-say NAME 'your reply'`. From now on their mail
-   carries `X-Delta-Chat-Channel: NAME`, and its footer gives that line.
+   carries `X-Delta-Chat-Channel: NAME`, and its footer gives that line, as
+   a quote-reply to the message: `dc-say --quote N NAME 'your reply'`.
 5. **To take it back**, the owner deletes the line from `channels.txt`.
    The next send to that chat is refused.
 

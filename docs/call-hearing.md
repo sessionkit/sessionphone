@@ -54,6 +54,14 @@ Setup's exit code does not depend on it.
   line shows (`brew install ffmpeg`, then `sessionphone bot install`
   again). Installing it is theirs to run. `sessionphone bot status` prints
   the same line.
+- **Whose voice will they hear?** When the job sets no `DC_VOICE`, the
+  `speaking:` line also says the bot will speak in the default voice
+  (`af_sky`). On a Mac shared with other agents, that may already be
+  another agent's voice, and the caller would hear the wrong person. Ask
+  the user which voice is this agent's, set `DC_VOICE` (a Kokoro id, or a
+  clone directory under `DC_VOICES_ROOT`), then run `sessionphone bot
+  install` again. With `DC_VOICE` set, or `DC_TTS=apple`, the line says
+  nothing of the voice.
 - **Later, `sessionphone bot status`** asks the job's speech-to-text too,
   in one `hearing:` line, capped at a few seconds. `NO` names the URL that
   did not answer: run `sessionphone bot install` to see why and how to fix

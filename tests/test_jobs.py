@@ -76,10 +76,13 @@ def test_legacy_keys_are_the_pre_102_bot():
     # PHONE-102, PHONE-118, PHONE-94 (d6529e2 reads no group key: measured, 0 hits),
     # PHONE-122 (dc-delete: an older bot would take {"delete": ...} for a dc-say),
     # PHONE-126 (sessionphone avatar), PHONE-165 (dc-xdc-realtime: an older bot would
-    # take {"webxdc_realtime": ...} for a dc-say with no chat; part 2's feed job too)
+    # take {"webxdc_realtime": ...} for a dc-say with no chat; part 2's feed job too),
+    # PHONE-283 (dc-fetch: an older bot would take {"fetch": N} for a dc-say with no chat),
+    # PHONE-310 (dc-say --quote: an older bot would drop the quote and send plain)
     assert jobs.KEYS - jobs.LEGACY_KEYS == {"chat", "voice_message", "group", "members", "delete", "avatar",
                                             "webxdc_realtime", "webxdc_realtime_advertise",
-                                            "webxdc_realtime_feed", "feed", "stop"}
+                                            "webxdc_realtime_feed", "feed", "stop", "fetch",
+                                            "quote_msg_id"}
 
 
 # ---- the stamp ----

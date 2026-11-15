@@ -127,6 +127,13 @@ class SeatFailed(RuntimeError):
     Exit code 1, with its reason and the recovery."""
 
 
+# `message seat agent --install`'s exit 3 (sessionmail SM-1006): the job is
+# installed and its agent answered, but the seat agent's service file, below,
+# was not written. The signer stands; a re-run of --install writes the file.
+UNDECLARED = 3
+SERVICE_FILE = "~/.sessionkit/mail/services/seat-agents/{seat}.json"
+
+
 class NoBox(Exception):
     """The box Delta text goes to is not on this host, and `message setup
     --box` did not make it; or its address is off this host and the carrier is
@@ -144,6 +151,7 @@ class Seat:
     mode: str = seatmail.SIGNED     # seatmail.signing()'s mode for the job ...
     reason: str = ""                # ... and why
     minted: str = ""                # the registry key() minted the seat into, this run
+    warning: str = ""               # run_agent's one warning line (its exit 3), else ""
 
     def line(self) -> str:
         how = f"{self.mode} ({self.reason})" if self.reason else self.mode
@@ -324,10 +332,15 @@ def run_agent(env: MutableMapping[str, str], seat: str, shell: Mapping[str, str]
     """Run the seat's key agent under launchd with sessionmail: `message seat
     agent --install SEAT`, no SOCKET (sessionmail's default). Sets the job's
     DC_SIGNER_SOCK and DC_SIGNER_PUB in ENV to its SEAT_SOCKET and SEAT_PUB,
-    and to nothing else. -> the Seat. Raises NoSigner (its exit 2: refused,
-    nothing written; a seat not minted names the step that mints it) or
-    SeatFailed (its exit 1, or no answer: the recovery is named), and then
-    ENV carries no signer."""
+    and to nothing else. -> the Seat. Its exit 3 (the job is installed and its
+    agent answered, but its service file, SERVICE_FILE, was not written) is
+    taken as 0: the signer is set the same way, and the Seat's `warning` is
+    one line naming that file, quoting sessionmail's FAILED line, and giving
+    the fix (run --install again); else `warning` is "". Raises NoSigner (its
+    exit 2: refused, nothing written; a seat not minted names the step that
+    mints it) or SeatFailed (its exit 1 or any other non-zero, no answer, or
+    a 0 or 3 that printed no SEAT_SOCKET and SEAT_PUB: the recovery is
+    named), and then ENV carries no signer."""
     exe = pin_message(env, shell)
     argv = [exe, "seat", "agent", "--install", seat]
     said = f"`message seat agent --install {seat}`"
@@ -350,16 +363,23 @@ def run_agent(env: MutableMapping[str, str], seat: str, shell: Mapping[str, str]
                             "make one): it mints the seat there, then runs its agent.")
         raise NoSigner(f"{said} refused (exit 2):\n  {refused}\nThe bot was not installed; "
                        "fix that, then run `sessionphone bot install` again.")
-    if r.returncode != 0:
+    if r.returncode not in (0, UNDECLARED):
         failed = _lines(r, "FAILED - ").replace("\n", "\n  ")
         raise SeatFailed(f"{said} failed (exit {r.returncode}), so the bot has no signer and "
                          f"nothing of the bot was installed:\n  {failed}\n{again}")
     got = parse_install(r.stdout)
     if not (got.get("SEAT_SOCKET") and got.get("SEAT_PUB")):
-        raise SeatFailed(f"{said} answered 0 but printed no SEAT_SOCKET and SEAT_PUB, so the bot "
-                         f"has no signer and nothing of the bot was installed. {again}")
+        raise SeatFailed(f"{said} answered {r.returncode} but printed no SEAT_SOCKET and SEAT_PUB, "
+                         f"so the bot has no signer and nothing of the bot was installed. {again}")
     env["DC_SIGNER_SOCK"], env["DC_SIGNER_PUB"] = got["SEAT_SOCKET"], got["SEAT_PUB"]
-    return _signed(Seat(seat, got["SEAT_PUB"], got["SEAT_SOCKET"], got.get("SEAT_LABEL", "")), env)
+    made = Seat(seat, got["SEAT_PUB"], got["SEAT_SOCKET"], got.get("SEAT_LABEL", ""))
+    if r.returncode == UNDECLARED:
+        failed = _lines(r, "FAILED - ").splitlines()[0].strip()   # the FAILED line itself
+        made.warning = (f"warning: {said} answered {UNDECLARED}: its agent runs and the bot "
+                        f"signs with it, but the seat agent's service file "
+                        f"{SERVICE_FILE.format(seat=seat)} was not written ({failed}). Run "
+                        f"`message seat agent --install {seat}` again to write it.")
+    return _signed(made, env)
 
 
 def mint(seat: str, registry: str, env: Mapping[str, str], shell: Mapping[str, str]) -> None:

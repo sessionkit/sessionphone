@@ -391,6 +391,7 @@ class Decision:
     key: str | None
     line: str               # the one log line
     name: str | None = None  # the channels.txt NAME it is for (None in callers.txt)
+    owner: bool = False     # the owner line (its note starts `owner`): the start alert reads it
 
 
 def _ids(found) -> str:
@@ -404,24 +405,25 @@ def decide(account, entry: CallerEntry, unattended: bool, pin_how: str = PIN_HOW
     from a securejoin; any other line is left for an attended pin."""
     addr = entry.addr
     how = pin_how.format(addr=addr)
+    owner = entry.note.lower().startswith("owner")
     found = candidates(account, addr)
     if len(found) == 1:
         c, fpr = found[0]
-        if not unattended or entry.note.lower().startswith("owner"):
+        if not unattended or owner:
             return Decision(addr, "pinned", fpr,
                             f"PINNED {addr} to key {fpr} (contact {getattr(c, 'id', '?')}): compare it "
-                            f"with the Encryption screen on that person's phone")
+                            f"with the Encryption screen on that person's phone", owner=owner)
         return Decision(addr, "unpinned", None,
                         f"UNPINNED {addr}: one key contact has this address ({_ids(found)}), not "
                         f"pinned unattended (only the owner line is); refused until pinned: compare "
-                        f"it with that person's phone, then {how.replace('FPR', fpr)}")
+                        f"it with that person's phone, then {how.replace('FPR', fpr)}", owner=owner)
     if not found:
         return Decision(addr, "unpinned", None,
                         f"UNPINNED {addr}: no key contact with this address yet; refused until "
-                        f"pinned: {how}")
+                        f"pinned: {how}", owner=owner)
     return Decision(addr, "ambiguous", None,
                     f"AMBIGUOUS {addr}: {len(found)} key contacts share this address "
-                    f"({_ids(found)}); none pinned; choose one: {how}")
+                    f"({_ids(found)}); none pinned; choose one: {how}", owner=owner)
 
 
 def migrate(account, path: pathlib.Path, log: Callable[[str], None]) -> list[Decision] | None:

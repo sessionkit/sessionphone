@@ -241,3 +241,15 @@ def test_a_missing_voice_file_is_answered_not_sent(outbox, tmp_path):
     assert str(gone) in ack["detail"]
     assert outbox.sent == []
 # <<< voice-message
+
+
+# >>> dc-fetch (PHONE-283 design §7): the loop hands {"fetch": N} to fetch_job;
+# a refusal is acked ok:false (dc-fetch's exit 3), with the bot's words.
+def test_a_fetch_of_an_id_this_bot_never_left_undownloaded_is_refused(outbox):
+    unknown, bad = outbox({"fetch": 5531}, {"fetch": "5531"})
+    assert unknown == {"ok": False, "detail": "REFUSED: msg 5531 was not left undownloaded by this bot: "
+                                              "nothing to fetch; nothing was fetched."}
+    assert bad["ok"] is False and 'a fetch job needs "fetch"' in bad["detail"]
+    assert any(line.startswith("REFUSED fetch of msg 5531") for line in outbox.logged)
+    assert not any(line.startswith("SEND FAILED") for line in outbox.logged)
+# <<< dc-fetch

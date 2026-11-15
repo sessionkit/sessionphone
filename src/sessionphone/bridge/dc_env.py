@@ -31,9 +31,11 @@ name a host in it only for a box on another host.
 """
 import os
 import pathlib
+import shlex
 import socket
 import sys
 
+from sessionphone import dctools  # this install's own dc-* copies (PHONE-302)
 from sessionphone import paths  # the one root, shared with the setup verbs
 from sessionphone import settings  # sessionmail's own answer for its mail.json
 
@@ -394,8 +396,9 @@ def take_mail_host():
 # undelivered spool, the calls, the live call, the sockets and the accounts
 # folder. An explicit DC_<NAME> still wins. ROOT_WIDE names the few settings
 # that are not about an account and stay at the root for every profile: the
-# wait music and the voice map. The logs are not in the root at all: they are
-# under ~/.sessionkit/phone/log/<bot>[/<profile>]/ (log_file, paths.log_dir).
+# wait music and the voice map. The logs are not in a home at all: under the
+# default root they are in the kit's folder, ~/.sessionkit/phone/log/<bot>[/<profile>]/,
+# and under any other root in <root>/log/<bot>[/<profile>]/ (log_file, paths.log_dir).
 ROOT_WIDE = ("WAIT_MUSIC", "VOICES")
 
 
@@ -423,26 +426,39 @@ def home(environ=None, root=None):
     return r / p if p else r
 
 
-def log_file(environ=None, agent=None, profile_name=None):
+def log_root(environ=None):
+    """The root whose logs a bot run with `environ` writes (paths.log_dir):
+    root_of(environ), or None, the kit's folder, when no root can be worked
+    out (settings.Bad)."""
+    try:
+        return root_of(environ)
+    except settings.Bad:
+        return None
+
+
+def log_file(environ=None, agent=None, profile_name=None, root=None):
     """The log a bot run with ENVIRON writes: DC_LOG (or its deprecated
-    alias), else paths.bot_log, ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log.
-    AGENT and PROFILE_NAME, when given, are the ones already worked out (the
-    bot's, bound at import); else agent_from(environ) and profile(environ)."""
+    alias), else paths.bot_log: ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log
+    under the default root, <root>/log/<bot>[/<profile>]/bot.log under any
+    other. AGENT, PROFILE_NAME and ROOT, when given, are the ones already
+    worked out (the bot's, bound at import; install's); else agent_from(environ),
+    profile(environ) and log_root(environ)."""
     e = os.environ if environ is None else environ
     given = _get(e, "LOG")
     if given:
         return pathlib.Path(given).expanduser()
     a = agent if agent is not None else agent_from(e)[0]
-    return paths.bot_log(a, profile(e) if profile_name is None else profile_name)
+    r = log_root(e) if root is None else root
+    return paths.bot_log(a, profile(e) if profile_name is None else profile_name, r)
 
 
 def log_for_reader(environ=None, agent=None, root=None):
     """The bot's log as a reader finds it (`bot status`, bin/dc-env, bin/dc-log):
-    log_file, unless DC_LOG is unset and only the bot's old log is there,
-    <home>/bot.log (home, ROOT as given), which a bot that has not started on
-    this version yet still writes (paths.legacy_or)."""
+    log_file (under ROOT, as given), unless DC_LOG is unset and only the bot's
+    old log is there, <home>/bot.log (home, ROOT as given), which a bot that
+    has not started on this version yet still writes (paths.legacy_or)."""
     e = os.environ if environ is None else environ
-    new = log_file(e, agent)
+    new = log_file(e, agent, root=root)
     if _get(e, "LOG"):
         return new
     try:
@@ -659,11 +675,32 @@ def home_dir():
     as ROOT is): ROOT for the default profile, ROOT/<PROFILE> for a named one."""
     return ROOT / PROFILE if PROFILE else ROOT
 # The voice the bridge speaks in when nobody names one: a kokoro id (af_sky),
-# or a clone dir under ~/.voicemode/voices.
-VOICE = env("VOICE") or "af_sky"
+# or a clone dir under ~/.voicemode/voices. DEFAULT_VOICE is the one place the
+# default is written: `bot install` names it when the job sets no DC_VOICE.
+DEFAULT_VOICE = "af_sky"
+VOICE = env("VOICE") or DEFAULT_VOICE
 # GREETING and GREETING_OUT: built from GREETING_NAME on first use (bind_agent),
 # and again once the bot's start has settled its display name (settle_greetings).
-SAY = env("SAY") or "dc-say"                      # the reply hint in bridged mail
+
+
+def own_say(dirs=None):
+    """THIS install's dc-say as one shell word: its absolute path, shell-quoted,
+    found as PHONE-302 finds it (dctools.homes(): the console script in the
+    running interpreter's scripts folder first, else dcbin/'s file). None
+    there: the bare `dc-say`.
+
+    Always the path, never only when PATH's dc-say is foreign (PHONE-307): a
+    bare word is resolved by the READER's shell on the READER's PATH, which
+    the bot cannot see (under launchd its own PATH is service.BASE_PATH, with
+    no ~/.local/bin), so no check the bot can run tells the two apart. The
+    rule calls.tool_cmd() already applies to dc-answer and dc-hangup."""
+    dirs = dctools.homes() if dirs is None else [pathlib.Path(d) for d in dirs]
+    ours, _ = dctools._ours("dc-say", dirs)
+    return shlex.quote(ours) if ours else "dc-say"
+
+
+# The reply hint in bridged mail (say_cmd). DC_SAY, when set, is used verbatim.
+SAY = env("SAY") or own_say()
 # How an incoming call from an approved caller is answered:
 #   auto - the bot answers at once and greets in the agent's voice. Cheap:
 #          he says what he wants and it lands as mail, no agent turn needed.
@@ -761,17 +798,21 @@ def say_cmd(profile=None):
     return f"DC_OUTBOX={path('OUTBOX', 'outbox')} {SAY}" if profile else SAY
 
 
-def reply_hint(chat_id, call=None, profile=None, channel=None):
+def reply_hint(chat_id, call=None, profile=None, channel=None, quote=None):
     """How to answer a bridged mail. On a call the mouth leads and dc-say is
     only the fallback, for when the mouth has a problem. call is the call's
     id, the invite message's id.
     channel: the channel NAME the chat is listed as, so the hint names it, as
-    the agent would; the chat id otherwise."""
+    the agent would; the chat id otherwise.
+    quote: the Delta message id the mail carries (X-Delta-Chat-Msg-Id), so the
+    hint answers THAT line as a quote-reply (dc-say --quote). A call's hint
+    leads with the mouth and ignores it."""
     say = say_cmd(profile)
     if call:
         return (f'Answer with: mouth say --device call:{call} "text"\n'
                 f"If the mouth fails: {say} --call {call} {chat_id} 'text'")
-    return f"{say} {channel or chat_id} 'your reply'"
+    q = f"--quote {quote} " if quote is not None and str(quote).strip().isdigit() else ""
+    return f"{say} {q}{channel or chat_id} 'your reply'"
 
 
 if __name__ == "__main__":
@@ -790,4 +831,4 @@ if __name__ == "__main__":
                    ("SEEN", ("bridged-ids.txt",)), ("UNDELIVERED", ("undelivered",)),
                    ("PID_FILE", ("bot.pid",))):
         print(f"{k:12} {path(k, *rel)}")
-    print(f"{'LOG':12} {log_file(agent=AGENT, profile_name=PROFILE)}")
+    print(f"{'LOG':12} {log_file(agent=AGENT, profile_name=PROFILE, root=ROOT)}")

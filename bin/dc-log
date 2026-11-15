@@ -4,8 +4,9 @@
 One view of a call, to tail or to run once: what was said each way.
 
 Reads the bot's existing log. Nothing to restart, nothing to install.
-The log is DC_LOG, else ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log,
-for the bot dc-env picks (DC_AGENT, else the one `sessionphone bot install`
+The log is DC_LOG, else ~/.sessionkit/phone/log/<bot>[/<profile>]/bot.log
+under the default root, or <root>/log/<bot>[/<profile>]/bot.log under any
+other, for the bot dc-env picks (DC_AGENT, else the one `sessionphone bot install`
 would pick) and DC_PROFILE (dc-env's contract). A bot not started on this
 version yet still writes <root>/bot.log: while only that one is there, it is
 read. The root is DC_ROOT, else SESSIONPHONE_ROOT, else the root
@@ -27,7 +28,7 @@ import signal
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # `dc-log | head` ends quietly, not with a traceback
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent   # bin/ in a checkout; the env's own bin/ on a wheel install
+HERE = Path(__file__).resolve().parent   # bin/ in a checkout; sessionphone/dcbin/ when installed
 SRC = HERE.parent / "src"                # the package beside this tool, in a checkout
 _MOVED = "_DC_PY_PID"                    # set to this process's pid by the one move below
 
@@ -66,11 +67,15 @@ def root():
 
 def _python():
     """The Python that holds the package, in bin/dc-env's order: the checkout's
-    .venv, else the python beside this tool (a wheel install puts the tools in
-    its env's bin/, beside that env's python), else None: stay on this one,
-    the python3 the shebang found, with SRC on sys.path."""
-    for py in (HERE.parent / ".venv" / "bin" / "python", HERE / "python"):
-        if os.access(py, os.X_OK):
+    .venv, else DC_PYTHON (the interpreter the dc-* console script runs on,
+    sessionphone.dctools), else the python beside this tool (an old wheel
+    install put the tools in its env's bin/, beside that env's python), else
+    None: stay on this one, the python3 the shebang found, with SRC on
+    sys.path."""
+    hint = os.environ.get("DC_PYTHON")
+    for py in (HERE.parent / ".venv" / "bin" / "python", Path(hint) if hint else None,
+               HERE / "python"):
+        if py is not None and os.access(py, os.X_OK):
             return py
     return None
 

@@ -201,7 +201,8 @@ def test_m1_a_chat_message_is_kind_message_with_its_id_sender_and_channel(rig):
                  "X-Delta-Chat-Sender": OWNER, "X-Delta-Chat-Channel": "family"}
     assert argv[argv.index("-s") + 1] == "[chat12 12] Alice: hello there"    # Subject form unchanged
     assert body.startswith("hello there\n\n---\nchat: chat12 (id 12)\nfrom: Alice\n\n")
-    assert footer(body).endswith("To answer in that chat:\n  dc-say family 'your reply'\n")
+    # the footer answers THIS line, as a quote-reply (dc-say --quote, PHONE-310)
+    assert footer(body).endswith(f"To answer in that chat:\n  {dc_env.SAY} --quote 10 family 'your reply'\n")
 
 
 def test_m1_the_startup_sweep_carries_the_same_headers(rig):
@@ -211,7 +212,7 @@ def test_m1_the_startup_sweep_carries_the_same_headers(rig):
     _, h, body = one(rig)
     assert (h["X-Delta-Chat-Kind"], h["X-Delta-Chat-Msg-Id"], h["X-Delta-Chat-Sender"],
             h["X-Delta-Chat-Channel"]) == ("message", "11", OWNER, "owner")
-    assert "  dc-say owner 'your reply'\n" in footer(body)
+    assert f"  {dc_env.SAY} --quote 11 owner 'your reply'\n" in footer(body)
 
 
 def test_m2_a_held_request_is_kind_request_and_its_chat_is_not_listed(rig):
@@ -271,7 +272,7 @@ def test_m4_a_tap_in_a_listed_chat_names_its_channel(rig):
                                   status_update_serial=5))
     rig.run()
     _, h, body = one(rig)
-    assert h["X-Delta-Chat-Channel"] == "family" and "  dc-say family 'your reply'\n" in footer(body)
+    assert h["X-Delta-Chat-Channel"] == "family" and f"  {dc_env.SAY} family 'your reply'\n" in footer(body)
 
 
 # ---- M5: the call mails carry the kind, and nothing else new ------------------------
@@ -304,7 +305,7 @@ def test_the_public_profile_hint_names_its_outbox_and_its_list(rig, monkeypatch)
     monkeypatch.setattr(bot, "PROFILE", "public")
     outbox = dc_env.path("OUTBOX", "outbox")
     listed = bot.channel_hint(12, bot.Channel("family", "", rig.list))
-    assert listed == f"DC_OUTBOX={outbox} dc-say family 'your reply'"
+    assert listed == f"DC_OUTBOX={outbox} {dc_env.SAY} family 'your reply'"
     unlisted = bot.channel_hint(43, bot.Channel(None, f"not in {rig.list}", rig.list))
     assert f"DC_CHANNELS_FILE={rig.list} sessionphone channels add NAME chat:43" in unlisted
 
@@ -361,7 +362,7 @@ def test_a_bare_mail_in_is_as_before(rig):
     assert bot.mail_in("Team", 12, "Alice", "hello there") is True
     _, h, body = one(rig)
     assert h == {"X-Delta-Chat-Bridge": "1", "X-Delta-Chat-Id": "12"}
-    assert footer(body).endswith("To answer in that chat:\n  dc-say 12 'your reply'\n")
+    assert footer(body).endswith(f"To answer in that chat:\n  {dc_env.SAY} 12 'your reply'\n")
 
 
 # ---- the footer cut: the mail leg still stops at --- -------------------------------
@@ -377,6 +378,6 @@ def test_the_mail_leg_still_speaks_only_the_text_above_the_footer(rig):
 
 
 def test_reply_hint_takes_a_channel_name_but_a_call_ignores_it():
-    assert dc_env.reply_hint(12, profile="", channel="family") == "dc-say family 'your reply'"
-    assert dc_env.reply_hint(12, profile="") == "dc-say 12 'your reply'"
+    assert dc_env.reply_hint(12, profile="", channel="family") == f"{dc_env.SAY} family 'your reply'"
+    assert dc_env.reply_hint(12, profile="") == f"{dc_env.SAY} 12 'your reply'"
     assert dc_env.reply_hint(12, call=5, profile="", channel="family") == dc_env.reply_hint(12, call=5, profile="")

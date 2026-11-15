@@ -328,7 +328,7 @@ def test_migrate_pins_the_owner_line_with_one_candidate(tmp_path):
     p = old_file(tmp_path)
     logged = []
     ds = channels.migrate(Account([REAL, kf.Contact(20, "kid@example.org", kf.K2)]), p, logged.append)
-    assert [(d.name, d.kind) for d in ds] == [("owner", "pinned"), ("kid", "unpinned")]
+    assert [(d.name, d.kind, d.owner) for d in ds] == [("owner", "pinned", True), ("kid", "unpinned", False)]
     text = p.read_text()
     assert text.startswith(channels.MARKER + "\n# NAME TARGET # note\n")
     assert f"owner  {BOB}  key:{kf.FPR_K1}  # owner, joined 2030\n" in text

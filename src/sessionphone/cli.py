@@ -52,6 +52,16 @@ def _fail(exc: Exception, code: int) -> None:
     sys.exit(code)
 
 
+def _need_launchd(verb: str) -> None:
+    """The launchd verbs' first step: on a host without launchd, one plain
+    line naming the verb (it carries its own `sessionphone` prefix), exit 2."""
+    try:
+        service.need_launchd(verb)
+    except service.NoLaunchd as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(2)
+
+
 class _Main(click.Group):
     """The verbs, with one refusal shared by all of them: a phone.json that
     cannot be used, found where a verb asks for the root (paths.root reads
@@ -696,6 +706,12 @@ def bot(ctx: click.Context) -> None:
 @click.option("--forget", "forget", multiple=True, metavar="KEY",
               help="drop KEY (a DC_* name, or SESSIONPHONE_ROOT) from the settings this bot "
                    "keeps, for this run and every later one. Repeatable")
+@click.option("--set", "sets", multiple=True, metavar="KEY=VALUE",
+              help="write a host-only setting into phone.json for this bot, keeping its other "
+                   "keys: download_limit (bytes, 0 for no limit), download_types (kinds, "
+                   "comma-separated, or none) or save_dir (an absolute path). Read from the file "
+                   "alone, never from the environment, and never carried by the job. Refused "
+                   "(exit 2, writing nothing) for a bad value or a key a file locks. Repeatable")
 @click.option("--registry", default=None, metavar="DIR",
               type=click.Path(file_okay=False, dir_okay=True),
               help="give the bot a key, on any mail carrier: mint its seat into the seat "
@@ -717,8 +733,13 @@ def bot(ctx: click.Context) -> None:
                    "install refuses while one is up")
 def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None,
                 hear_here: bool = False, replace: tuple[str, ...] = (),
-                owner_key: str | None = None, force: bool = False) -> None:
+                owner_key: str | None = None, force: bool = False,
+                sets: tuple[str, ...] = ()) -> None:
     """Run the bot as this user's launchd job, now and at every login.
+
+    macOS only: on a host without launchd (Linux, or a PATH with no
+    launchctl), it refuses first (exit 2, writing nothing) in one line that
+    points at `sessionphone bot run`, the bot in the foreground.
 
     DC_* variables set in this shell are carried into the job, and so are
     sessionmail's mail-route settings (SESSIONMAIL_SENDMAIL, _RELAY_DOMAIN,
@@ -764,6 +785,13 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     `message`. The bot's own start check then runs on the job's environment,
     and the box Delta text goes to is made (`message setup --box <agent>`):
     a job that would refuse to start is never loaded.
+    --set KEY=VALUE writes a host-only key (download_limit, download_types,
+    save_dir) into phone.json under this bot's map. These keys are plain
+    snake_case and never DC_*: the bot reads them from phone.json and its
+    drop-ins alone, never from any shell, so a DC_DOWNLOAD_LIMIT changes
+    nothing. A bad value, or a key a file's `_locked` holds at another value,
+    is refused (exit 2, writing nothing), naming the file. The package's
+    schema for phone.json is installed beside it, as .phone.schema.json.
     Run it again after a plugin update, or to change them. `link` must not be
     running. The carrier is sessionmail's: SESSIONMAIL_SENDMAIL, else the
     `sendmail` key in its mail.json, else its default, the mail drop; the
@@ -828,8 +856,9 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     NO: every spoken reply would go to the caller as chat text, and it shows
     the fix.
     """
+    _need_launchd("bot install")        # FIRST: no launchd, no job to install; nothing is written
     try:
-        media.require("bot install")    # FIRST: a refusal writes no plist, no channels seed
+        media.require("bot install")    # then the pack: a refusal writes no plist, no channels seed
     except media.Missing as exc:
         _fail(exc, 2)
         return
@@ -838,10 +867,11 @@ def bot_install(owner: str | None, forget: tuple[str, ...], registry: str | None
     settled: list[settings.Resolved] = []
     unsaved: settings.NotSaved | None = None
     try:
+        given_sets = settings.parse_sets(sets)
         p = service.install(owner=owner, owner_key=owner_key, seeded=seeded.append, say=click.echo,
                             seated=lambda made, box: seated.append((made, box)),
                             forget=forget, settled=settled.append, registry=registry,
-                            replace=replace, force=force)
+                            replace=replace, force=force, sets=given_sets)
     except settings.NotSaved as exc:   # the job is loaded: say all of it, then why, exit 1
         p, unsaved = exc.plist, exc
     except (paths.NotConfigured, paths.Unsafe, service.NoMailHost, service.NoSTTModel,
@@ -1014,6 +1044,9 @@ def bot_uninstall(force: bool = False) -> None:
     """Stop the bot and remove its launchd job, and any job sessionphone 0.1.0
     left for it under the old label. The account stays.
 
+    macOS only, as `bot install` is: without launchd it refuses (exit 2) and
+    points at `sessionphone bot run`.
+
     Refused (exit 2, stopping and removing nothing) while a call is live on
     the bot, as `bot install` judges it: `a call is live; hang up or pass
     --force`, then the call. --force stops it anyway, and the call drops.
@@ -1023,6 +1056,7 @@ def bot_uninstall(force: bool = False) -> None:
     records, else the harness vendor's word (`session agent default`), else
     claude; with two or more recorded and no name, it refuses (exit 2). With
     no name in this shell, its first line, `bot:`, says which it picked."""
+    _need_launchd("bot uninstall")
     name, picked = _which_bot("bot uninstall")
     if picked:
         click.echo(picked)
@@ -1085,9 +1119,41 @@ def _undelivered(name: str | None) -> None:
     click.echo(f"undelivered: {waiting} waiting, {dead} dead ({d})")
 
 
+def _download(name: str, plist: pathlib.Path | None) -> None:
+    """`bot status`'s download policy lines, one per host-only key, read from
+    phone.json alone as the bot reads it (settings.policy), each with the file
+    that set it or `the default`; then one line per value that cannot be used.
+    save_dir's default is under the bot's home, as its job (PLIST) carries
+    it, else as this shell would run it."""
+    env = _job_env(plist)[0] if plist is not None else None
+    try:
+        home = dc_env.home(env if env is not None else os.environ)
+    except settings.Bad:
+        home = paths.default_root()
+    pol = settings.policy(name, home)
+    for line in pol.lines():
+        click.echo(line)
+    for why in pol.problems:
+        click.echo(f"download: {why}")
+
+
+def _dc_tools() -> None:
+    """`bot status`'s `dc tools:` lines (PHONE-302): is each dc-* tool this
+    shell's PATH runs first this install's own copy? A foreign copy ahead of
+    it answers instead of it, and wrongly, so name it, where it links, this
+    install's copy and the fix. A tool absent from PATH is not foreign. Said,
+    never a refusal: the exit code is the job's alone."""
+    from sessionphone import dctools
+    for line in dctools.status_lines(dctools.on_path()):
+        click.echo(line)
+
+
 @bot.command("status", context_settings=CTX)
 def bot_status() -> None:
     """Is the bot installed, loaded and running? Exit 0 running, 1 not.
+
+    macOS only, as `bot install` is: without launchd it refuses (exit 2) and
+    points at `sessionphone bot run`.
 
     With the job installed, a `hearing:` line says whether the STT at the
     job's DC_STT_URL answers a half-second test clip (capped at a few
@@ -1100,6 +1166,19 @@ def bot_status() -> None:
 
     An `undelivered:` line counts the agent mail waiting in the bot's spool
     and dead there (call turns included), from the spool its plist names.
+    Then the download policy, one line each for download_limit,
+    download_types and save_dir: its value and the file that set it, or `the
+    default`. These keys are read from phone.json alone, never from this
+    shell. A value the bot cannot use is said on a `download:` line, naming
+    the file and the key; that key takes its default.
+
+    A `dc tools:` line says whether each dc-* tool this shell's PATH runs
+    first is this install's own copy (a console script of the interpreter
+    running sessionphone, or the checkout's bin/). One that is not, an older
+    copy ahead on PATH, answers instead of it and can answer wrong: the line
+    names it, the PATH folder it is in, where it links, this install's copy
+    and the fix. A tool absent from PATH is not named. It never changes the
+    exit code.
 
     Its last line is the last line of the bot's log; before the bot has
     written one (a bot that refused to start), the last line of launchd's log
@@ -1109,6 +1188,7 @@ def bot_status() -> None:
     name in this shell, a `bot:` line says which), and its log is the one its
     plist names, else the one under the root: this shell's SESSIONPHONE_ROOT,
     else the one phone.json keeps, else the default (paths.root)."""
+    _need_launchd("bot status")
     name, picked = _which_bot("bot status")
     st = service.status(name)
     click.echo(f"job:     {st['label']} ({'installed' if st['installed'] else 'not installed'})")
@@ -1130,6 +1210,8 @@ def bot_status() -> None:
         _status_hearing(pathlib.Path(st["plist"]))
         _speaking(pathlib.Path(st["plist"]), head="speaking: ")
     _undelivered(name)
+    _download(name, pathlib.Path(st["plist"]) if st["installed"] else None)
+    _dc_tools()
     log, line, launchd = service.last_log(name)
     click.echo(f"log:     {log}")
     if line is None:

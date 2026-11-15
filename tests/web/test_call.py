@@ -9,8 +9,10 @@ or send, and records it.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import fractions
 import json
+import os
 import re
 import shutil
 import socket
@@ -36,6 +38,15 @@ from sessionphone.web.server import WebServer
 
 LIVE_PORTS = {8890, 2022, 8880}
 FLOOR = 300.0                    # RMS of a 8000-amplitude tone is ~5600; silence is 0
+
+# The rig's waits each cue on the event they wait for, never on a settle clock.
+# What bounds them is a deadline that only a real failure reaches: a busy
+# machine makes every step slower, and a wait begun too early must not be
+# what fails the test.
+DEADLINE_S = 30.0                # any one event: a socket message, the answer, the track, ICE, a frame
+HEARD_S = 6.0                    # heard()'s window: this much audio heard AND this long since its first frame
+HEARD_DEADLINE_S = 60.0          # heard()'s backstop, for a line that crawls so slowly it never fills the window
+BODY_S = 120.0                   # run()'s backstop, for an await that no named wait covers
 
 
 # ---- the guard: nothing reaches the live audio ports -------------------------
@@ -72,6 +83,33 @@ def test_the_guard_refuses_a_live_port(no_live_ports):
         s.close()
     assert no_live_ports == [("connect", ("127.0.0.1", 8890))]
     no_live_ports.clear()                 # it meant to: the teardown must pass
+
+
+# ---- the call stays on loopback ------------------------------------------------
+
+def loopback_only(use_ipv4: bool, use_ipv6: bool) -> list[str]:
+    """aioice's host addresses for a rig call: 127.0.0.1, and nothing else."""
+    return ["127.0.0.1"] if use_ipv4 else []
+
+
+@pytest.fixture(autouse=True)
+def loopback_ice(monkeypatch):
+    """Both peers of a rig call, the server's WebCall and the test's client, live
+    in this one process, and here they gather ICE on 127.0.0.1 only.
+
+    By default aioice offers every address of the machine EXCEPT loopback, so a
+    rig call was checked across the LAN, VPN and IPv6 addresses. A pair whose
+    checks go unanswered stays in `checking`, and when every pair that can carry
+    the call fails, the call never connects: the client's ICE sat in `checking`
+    for the whole 30 s deadline, with no frame sent or heard. Which address
+    carries a call is not what these tests measure."""
+    import aioice.ice
+    monkeypatch.setattr(aioice.ice, "get_host_addresses", loopback_only)
+
+
+def sdp_hosts(sdp: str) -> set[str]:
+    """The connection address of every a=candidate line in an SDP."""
+    return {line.split()[4] for line in sdp.splitlines() if line.startswith("a=candidate:")}
 
 
 # ---- rigs -------------------------------------------------------------------
@@ -114,22 +152,149 @@ def rms(pcm) -> float:
     return float(np.sqrt(np.mean(a * a))) if a.size else 0.0
 
 
-async def recv(ws) -> dict:
-    return json.loads(await asyncio.wait_for(ws.recv(), 10))
+# ---- what a call has measured: kept by the rig, printed by a failure ----------
+
+class Watch:
+    """What a call rig has measured so far. Every wait the rig makes names
+    itself here before it starts, so a failure says WHICH wait expired (its own,
+    or the one the body's timeout cut short) and what was measured by then:
+    each phase's wall time, the frames the client received, the best RMS
+    against FLOOR, and the call's own state. run() adds the report to any
+    failure as a note, before the rig is torn down."""
+
+    def __init__(self, rig=None):
+        self.rig, self.t0 = rig, time.monotonic()
+        self.phases: list[list] = []        # [name, start, end or None], seconds since t0
+        self.waiting: str | None = None     # the wait in flight, if any
+        self.expired: tuple | None = None   # (what, the TimeoutError) of a wait that ran out
+        self.frames = 0                     # frames the client's track gave, every heard()
+        self.heard: dict | None = None      # the last heard()'s own count
+        self.last_msg: str | None = None    # the type of the last socket message
+        self.tones: list = []               # the client mics, for the seconds they sent
+
+    def now(self) -> float:
+        return time.monotonic() - self.t0
+
+    def begin(self, name: str) -> None:
+        self.phases.append([name, self.now(), None])
+
+    def end(self, name: str) -> None:
+        for ph in reversed(self.phases):
+            if ph[0] == name and ph[2] is None:
+                ph[2] = self.now()
+                return
+
+    async def wait(self, aw, seconds: float, what: str):
+        """asyncio.wait_for, named: a TimeoutError carries which wait it was."""
+        outer, started, self.waiting = self.waiting, self.now(), f"{what} ({seconds:g}s wait)"
+        try:
+            got = await asyncio.wait_for(aw, seconds)
+        except TimeoutError as e:
+            if self.expired is not None and self.expired[1] is e:
+                raise                   # a wait inside this one ran out: it has named itself
+            e.add_note(f"wait expired: {what}: nothing in {seconds:g}s "
+                       f"(began at {started:.2f}s, gave up at {self.now():.2f}s)")
+            self.expired = (what, e)
+            raise
+        self.waiting = outer            # a wait inside another hands the name back
+        return got
+
+    def report(self, exc: BaseException | None = None, timeout: float | None = None) -> str:
+        out = [(f"call rig report, {self.now():.2f}s after the rig started "
+                f"(1-minute load {os.getloadavg()[0]:.1f}):")]
+        if self.expired is not None and self.expired[1] is exc:
+            out.append(f"  expired: {self.expired[0]}, the rig's own wait")
+        elif isinstance(exc, TimeoutError) and timeout is not None:
+            out.append(f"  expired: the body's {timeout:g}s timeout, cutting short: "
+                       f"{self.waiting or 'no named wait (between waits)'}")
+        else:
+            out.append(f"  in flight: {self.waiting or 'no wait'}")
+        for name, a, b in self.phases:
+            span = f"{b - a:.2f}s" if b is not None else f"OPEN, {self.now() - a:.2f}s so far"
+            out.append(f"  phase {name}: from {a:.2f}s, {span}")
+        if not self.phases:
+            out.append("  phase: none begun")
+        h = self.heard or {}
+        out.append(f"  frames: {self.frames} received in all; last heard(): {h.get('frames', 0)} frames, "
+                   f"{h.get('audio', 0.0):.2f}s of audio, "
+                   f"{h.get('windows', 0)} windows of 200 ms, best RMS {h.get('best', 0.0):.1f} "
+                   f"vs FLOOR {FLOOR:g}, {h.get('outcome', 'not run')}")
+        out.append(f"  socket: last message {self.last_msg!r}")
+        for i, t in enumerate(self.tones):
+            out.append(f"  client mic {i}: {t.t / 48000:.2f}s of tone sent")
+        rig = self.rig
+        if rig is not None:
+            for i, pc in enumerate(rig.pcs):
+                out.append(f"  client peer {i}: connection {pc.connectionState}, ice {pc.iceConnectionState}, "
+                           f"gathering {pc.iceGatheringState}")
+            desk = rig.desk
+            out.append(f"  desk: dialling {desk.dialling}, sessions {sorted(desk.sessions)}")
+            for n, c in sorted(desk.sessions.items()):
+                pc = c.pc
+                peer = (f"connection {pc.connectionState}, ice {pc.iceConnectionState}"
+                        if pc is not None else "no peer")
+                out.append(f"  call {n}: echo_mode {c.echo_mode}, ended {c.ended!r}, {peer}, "
+                           f"{c.wav_samples / 16000:.2f}s of caller audio in, {len(c.lines)} lines")
+            for row in rig.logs[-8:]:
+                out.append(f"  desk log: {json.dumps(row, default=str)}")
+        return "\n".join(out)
 
 
-async def heard(track, seconds=6.0) -> float:
-    """The loudest 200 ms the client's received track plays within `seconds`."""
-    end, buf, best = time.time() + seconds, [], 0.0
-    while time.time() < end:
-        f = await asyncio.wait_for(track.recv(), 5)
-        buf.append(f.to_ndarray().reshape(-1))
-        if len(buf) >= 10:
-            best = max(best, rms(np.concatenate(buf)))
-            buf = []
-            if best > FLOOR:
+WATCH: contextvars.ContextVar[Watch | None] = contextvars.ContextVar("call_rig_watch", default=None)
+
+
+def watch() -> Watch:
+    """The running rig's Watch; outside run(), a throwaway one."""
+    return WATCH.get() or Watch()
+
+
+async def recv(ws, what="a message on the socket") -> dict:
+    w = watch()
+    msg = json.loads(await w.wait(ws.recv(), DEADLINE_S, what))
+    w.last_msg = msg.get("type") if isinstance(msg, dict) else type(msg).__name__
+    return msg
+
+
+async def heard(track, seconds=HEARD_S) -> float:
+    """The loudest 200 ms the client's received track plays, listening until it
+    is louder than FLOOR or the window closes. The window is counted from the
+    track's FIRST frame, not from the call: it closes once `seconds` of audio
+    have been heard (the line's own clock: the far end sends a frame every
+    20 ms, silence included, however late they land) AND `seconds` have
+    passed since that first frame (so frames queued before this call, read in
+    one burst, do not close it early). A busy machine moves neither cue; a
+    silent line still closes it, and heard() returns the quiet it heard."""
+    w = watch()
+    w.heard = h = {"frames": 0, "audio": 0.0, "windows": 0, "best": 0.0,
+                   "outcome": f"still listening ({seconds:g}s window)"}
+    w.begin("first frame")
+    w.begin("loud frame")
+
+    async def listen() -> float:
+        f = await w.wait(track.recv(), DEADLINE_S, "the first frame on the call's track")
+        w.end("first frame")
+        first, buf, best = time.monotonic(), [], 0.0
+        while True:
+            w.frames += 1
+            h["frames"] += 1
+            h["audio"] += f.samples / f.sample_rate
+            buf.append(f.to_ndarray().reshape(-1))
+            if len(buf) >= 10:
+                best = max(best, rms(np.concatenate(buf)))
+                h["windows"] += 1
+                h["best"] = best
+                buf = []
+                if best > FLOOR:
+                    w.end("loud frame")
+                    h["outcome"] = "loud"
+                    return best
+            if h["audio"] >= seconds and time.monotonic() - first >= seconds:
+                h["outcome"] = (f"the window closed with no loud frame ({h['audio']:.2f}s of audio "
+                                f"in {time.monotonic() - first:.2f}s)")
                 return best
-    return best
+            f = await w.wait(track.recv(), DEADLINE_S, "a frame on the call's track")
+
+    return await w.wait(listen(), HEARD_DEADLINE_S, f"a loud frame, or {seconds:g}s of audio heard")
 
 
 class CallRig:
@@ -141,6 +306,7 @@ class CallRig:
                              log=self.logs.append)
         self.srv = WebServer(self.webdir, port=0, lookup=lambda: "", log=self.rows.append, desk=self.desk)
         self.pcs: list = []
+        self.watch = Watch(self)
 
     @property
     def origin(self):
@@ -157,9 +323,10 @@ class CallRig:
         await self.srv.close()
 
     async def signed_in(self):
+        self.watch.begin("sign-in")
         ws = await connect(f"ws://127.0.0.1:{self.srv.port}/ws", origin=self.origin)
-        await recv(ws)
-        o = await recv(ws)
+        await recv(ws, "the socket's hello")
+        o = await recv(ws, "the sign-in challenge")
         if o["mode"] == "enrol":
             code = self.srv.keyring.new_enrol_code()
             self.key = self.softkey(self.origin)
@@ -167,14 +334,18 @@ class CallRig:
                                       **self.key.create(o["challenge"])}))
         else:
             await ws.send(json.dumps({"type": "auth-finish", "mode": "login", **self.key.get(o["challenge"])}))
-        assert (await recv(ws))["type"] == "auth-ok"
+        assert (await recv(ws, "the sign-in result"))["type"] == "auth-ok"
+        self.watch.end("sign-in")
         return ws
 
     async def dial(self, ws):
         """Offer from a tone-mic peer; -> (pc, the track it receives, call id)."""
+        self.watch.begin("dial")
         pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         self.pcs.append(pc)
-        pc.addTrack(Tone())
+        tone = Tone()
+        self.watch.tones.append(tone)
+        pc.addTrack(tone)
         got = asyncio.get_running_loop().create_future()
 
         @pc.on("track")
@@ -184,18 +355,45 @@ class CallRig:
 
         await pc.setLocalDescription(await pc.createOffer())
         await ws.send(json.dumps({"type": "call", "sdp": pc.localDescription.sdp}))
-        r = await recv(ws)
+        r = await recv(ws, "the call's answer")   # the server gathers ICE before it answers
         assert r["type"] == "answer" and isinstance(r["call"], int), r
+        self.watch.end("dial")
+        ice = f"ICE, peer {len(self.pcs) - 1}"      # the client's own ICE, answer to connected
+        up = asyncio.get_running_loop().create_future()
+
+        @pc.on("iceconnectionstatechange")
+        def _ice():
+            state = pc.iceConnectionState
+            if state in ("connected", "completed"):
+                self.watch.end(ice)
+                if not up.done():
+                    up.set_result(state)
+            elif state in ("failed", "closed") and not up.done():
+                up.set_exception(ConnectionError(f"the client's ICE {state}"))
+
+        self.watch.begin(ice)
+        self.watch.begin("answer to remote track")
         await pc.setRemoteDescription(RTCSessionDescription(sdp=r["sdp"], type="answer"))
-        return pc, await asyncio.wait_for(got, 10), r["call"]
+        track = await self.watch.wait(got, DEADLINE_S, "the call's remote audio track")
+        self.watch.end("answer to remote track")
+        await self.watch.wait(up, DEADLINE_S, f"the client's ICE to connect ({ice})")   # media can flow
+        return pc, track, r["call"]
 
 
-def run(tmp_path, softkey, body, *, legs, timeout=40, seat=None, heard=None):
+def run(tmp_path, softkey, body, *, legs, timeout=BODY_S, seat=None, heard=None):
     async def main():
         rig = CallRig(tmp_path, softkey, legs=legs, seat=seat, heard=heard)
+        WATCH.set(rig.watch)
         await rig.start()
         try:
             return await asyncio.wait_for(body(rig), timeout)
+        except Exception as e:          # the report is taken BEFORE stop() ends the call
+            try:
+                note = rig.watch.report(e, timeout)
+            except Exception as bad:  # noqa: BLE001 - a broken report must never hide the failure itself
+                note = f"call rig report could not be made: {bad!r}"
+            e.add_note(note)
+            raise
         finally:
             await rig.stop()
     return asyncio.run(main())
@@ -212,6 +410,71 @@ async def ears_tap(path, call):
 async def ear_frame(r):
     head = await asyncio.wait_for(r.readexactly(5), 10)
     return head[:1], await r.readexactly(struct.unpack(">I", head[1:])[0])
+
+
+# ---- the rig's report: a failure says which wait and what it measured ---------
+
+def test_a_wait_that_runs_out_names_itself():
+    w = Watch()
+
+    async def main():
+        await w.wait(asyncio.get_running_loop().create_future(), 0.05, "a reply that never comes")
+
+    with pytest.raises(TimeoutError) as ei:
+        asyncio.run(main())
+    assert any("wait expired: a reply that never comes: nothing in 0.05s" in n for n in ei.value.__notes__)
+    assert "expired: a reply that never comes, the rig's own wait" in w.report(ei.value, 40)
+
+
+def test_a_failed_body_carries_the_rig_report(tmp_path, softkey):
+    async def body(rig):
+        await rig.signed_in()
+        raise AssertionError("the body failed")
+
+    with pytest.raises(AssertionError) as ei:
+        run(tmp_path, softkey, body, legs=False)
+    note = "\n".join(ei.value.__notes__)
+    assert "call rig report" in note and "in flight: no wait" in note
+    assert re.search(r"phase sign-in: from \d+\.\d\ds, \d+\.\d\ds", note), note
+    assert "desk: dialling False, sessions []" in note and "best RMS 0.0 vs FLOOR 300" in note
+
+
+def test_a_failed_call_times_ice_and_the_loud_frame(tmp_path, softkey):
+    async def body(rig):
+        ws = await rig.signed_in()
+        _, track, _ = await rig.dial(ws)
+        assert await heard(track) > FLOOR
+        raise AssertionError("the body failed after the caller was heard")
+
+    with pytest.raises(AssertionError) as ei:
+        run(tmp_path, softkey, body, legs=False)
+    note = "\n".join(ei.value.__notes__)
+    for phase in ("dial", "ICE, peer 0", "answer to remote track", "first frame", "loud frame"):
+        assert re.search(rf"phase {phase}: from \d+\.\d\ds, \d+\.\d\ds", note), (phase, note)
+    assert re.search(r"call \d+: echo_mode True", note), note
+
+
+def test_a_report_that_breaks_never_hides_the_failure(tmp_path, softkey, monkeypatch):
+    def broken(self, exc=None, timeout=None):
+        raise RuntimeError("no report")
+    monkeypatch.setattr(Watch, "report", broken)
+
+    async def body(rig):
+        raise AssertionError("the body failed")
+
+    with pytest.raises(AssertionError, match="the body failed") as ei:
+        run(tmp_path, softkey, body, legs=False)
+    assert "call rig report could not be made: RuntimeError('no report')" in ei.value.__notes__
+
+
+def test_the_body_timeout_names_the_wait_it_cut_short(tmp_path, softkey):
+    async def body(rig):
+        await watch().wait(asyncio.get_running_loop().create_future(), 30, "a slow thing")
+
+    with pytest.raises(TimeoutError) as ei:
+        run(tmp_path, softkey, body, legs=False, timeout=0.2)
+    note = "\n".join(ei.value.__notes__)
+    assert "expired: the body's 0.2s timeout, cutting short: a slow thing (30s wait)" in note
 
 
 # ---- the call ---------------------------------------------------------------
@@ -264,14 +527,131 @@ def test_the_mouth_reaches_the_caller(short_root, softkey):
     run(short_root, softkey, body, legs=True)
 
 
-def test_echo_mode_has_no_sockets_and_plays_the_caller_back(tmp_path, softkey):
+def echo_call(tmp_path):
+    """The echo test's body: no sockets anywhere, the caller heard back above
+    FLOOR, and the call is in echo mode."""
     async def body(rig):
         ws = await rig.signed_in()
         _, track, n = await rig.dial(ws)
         assert not list(rig.webdir.glob("*.sock")) and not list(tmp_path.rglob("*.sock"))
         assert await heard(track) > FLOOR
         assert rig.desk.sessions[n].echo_mode
-    run(tmp_path, softkey, body, legs=False)
+    return body
+
+
+def test_echo_mode_has_no_sockets_and_plays_the_caller_back(tmp_path, softkey):
+    run(tmp_path, softkey, echo_call(tmp_path), legs=False)
+
+
+# ---- the echo test on a slow machine: time injected, not the host loaded ------
+
+ICE_LATE_S = 6.5        # longer than the old rig's 5 s frame wait and its 6 s window, together
+
+
+@pytest.fixture
+def late_ice(monkeypatch):
+    """Both peers start ICE ICE_LATE_S late, as a busy machine would: the answer
+    is not held, only the connection after it. -> the starts, for the test."""
+    from aiortc.rtcicetransport import RTCIceTransport
+    real, starts = RTCIceTransport.start, []
+
+    async def late(self, remoteParameters):
+        starts.append(time.monotonic())
+        await asyncio.sleep(ICE_LATE_S)
+        return await real(self, remoteParameters)
+    monkeypatch.setattr(RTCIceTransport, "start", late)
+    return starts
+
+
+def test_the_echo_test_holds_when_ice_is_late(tmp_path, softkey, late_ice):
+    """The old rig began heard()'s window before ICE, so this failed it every
+    time. Cued on the client's ICE and the track's first frame, it passes, and
+    every assertion of the echo test still runs."""
+    t0 = time.monotonic()
+    run(tmp_path, softkey, echo_call(tmp_path), legs=False)
+    assert len(late_ice) == 2 and time.monotonic() - t0 >= ICE_LATE_S
+
+
+def test_a_silent_echo_still_fails_when_ice_is_late(tmp_path, softkey, late_ice, monkeypatch):
+    """The same late ICE with the echo gone silent (the server's track is given
+    nothing to play): the caller is never heard back, and the echo test fails
+    on its own assertion once the window closes, not on a deadline."""
+    monkeypatch.setattr(callmod.WebVoiceTrack, "say", lambda self, pcm: None)
+    with pytest.raises(AssertionError, match=r"assert \d+\.\d+ > 300\.0") as ei:
+        run(tmp_path, softkey, echo_call(tmp_path), legs=False)
+    note = "\n".join(ei.value.__notes__)
+    assert re.search(r"best RMS \d+\.\d vs FLOOR 300, the window closed with no loud frame", note), note
+    assert re.search(r"phase ICE, peer 0: from \d+\.\d\ds, \d+\.\d\ds", note), note
+
+
+class Frames:
+    """A fake received track: frames of `pcm` 20 ms each, `gap` seconds apart."""
+
+    def __init__(self, loud_at: float, gap: float = 0.0, first_after: float = 0.0):
+        self.loud_at, self.gap, self.first_after, self.t = loud_at, gap, first_after, 0
+
+    async def recv(self):
+        await asyncio.sleep(self.first_after if self.t == 0 else self.gap)
+        amp = 8000 if self.t / 48000 >= self.loud_at else 0
+        x = (amp * np.sin(2 * np.pi * 440 * np.arange(self.t, self.t + 960) / 48000)).astype(np.int16)
+        f = AudioFrame.from_ndarray(x.reshape(1, -1), format="s16", layout="mono")
+        f.sample_rate = 48000
+        self.t += 960
+        return f
+
+
+def test_heard_counts_its_window_in_audio_heard_not_in_wall_time():
+    """Frames that land in one burst (a starved loop catching up) are still
+    each 20 ms of the line: 5 s of silence then the tone is heard, in far less
+    than 5 s of wall time."""
+    t0 = time.monotonic()
+    assert asyncio.run(heard(Frames(loud_at=5.0), seconds=6.0)) > FLOOR
+    assert time.monotonic() - t0 < 5.0
+
+
+def test_heard_on_a_silent_line_closes_on_audio_and_time_both():
+    """Silence in a burst: the window stays open until `seconds` have also
+    passed since the first frame, then closes, quiet, with no deadline."""
+    w = Watch()
+
+    async def main():
+        WATCH.set(w)
+        return await heard(Frames(loud_at=99.0, gap=0.001), seconds=0.5)
+
+    t0 = time.monotonic()
+    assert asyncio.run(main()) == 0.0
+    assert time.monotonic() - t0 >= 0.5
+    assert w.heard["audio"] >= 0.5 and w.heard["outcome"].startswith("the window closed with no loud frame")
+
+
+def test_heard_waits_for_a_late_first_frame():
+    """The window starts at the first frame, however late it comes."""
+    assert asyncio.run(heard(Frames(loud_at=0.0, first_after=0.3), seconds=0.2)) > FLOOR
+
+
+def test_heard_on_a_stalled_track_fails_at_its_deadline(monkeypatch):
+    """A track that never gives a frame is a real failure: the deadline fires,
+    named."""
+    monkeypatch.setitem(globals(), "DEADLINE_S", 0.05)      # heard() reads it per call
+
+    class Stalled:
+        async def recv(self):
+            await asyncio.sleep(3600)
+
+    w = Watch()
+
+    async def main():
+        WATCH.set(w)
+        return await heard(Stalled())
+
+    with pytest.raises(TimeoutError) as ei:
+        asyncio.run(main())
+    # Only the wait that ran out names itself: heard()'s own 60 s backstop,
+    # which the frame wait's TimeoutError passes through, must not claim it.
+    expired = [n for n in ei.value.__notes__ if n.startswith("wait expired:")]
+    assert len(expired) == 1 and "the first frame on the call's track: nothing in 0.05s" in expired[0], expired
+    assert w.expired[0] == "the first frame on the call's track"
+    assert "expired: the first frame on the call's track, the rig's own wait" in w.report(ei.value)
 
 
 def test_busy_while_a_call_is_live(tmp_path, softkey):
@@ -391,6 +771,30 @@ def test_a_trickled_candidate_is_taken(tmp_path, softkey):
     run(tmp_path, softkey, body, legs=False)
 
 
+def test_a_rig_call_offers_and_answers_on_loopback_only(tmp_path, softkey):
+    """The loopback_ice fixture holds for both peers: the client's offer and the
+    server's answer carry 127.0.0.1 candidates and no others, and the call's ICE
+    connects on them."""
+    seen = {}
+
+    async def body(rig):
+        ws = await rig.signed_in()
+        pc, _, _ = await rig.dial(ws)                  # returns once the client's ICE is connected
+        seen["offer"] = sdp_hosts(pc.localDescription.sdp)
+        seen["answer"] = sdp_hosts(pc.remoteDescription.sdp)
+        seen["ice"] = pc.iceConnectionState
+    run(tmp_path, softkey, body, legs=False)
+    assert seen["offer"] == {"127.0.0.1"}, seen
+    assert seen["answer"] == {"127.0.0.1"}, seen
+    assert seen["ice"] in ("connected", "completed"), seen
+
+
+def test_loopback_only_offers_no_other_address():
+    assert loopback_only(True, True) == ["127.0.0.1"]
+    assert loopback_only(True, False) == ["127.0.0.1"]
+    assert loopback_only(False, True) == []
+
+
 # ---- the legs: explicit paths, and the --legs guard ---------------------------
 
 def test_the_legs_are_served_at_explicit_paths_never_the_import_default(tmp_path, monkeypatch):
@@ -419,6 +823,21 @@ def test_the_legs_are_served_at_explicit_paths_never_the_import_default(tmp_path
     assert seen == [tmp_path / "web" / "call-ears.sock", tmp_path / "web" / "call-mouth.sock"]
     assert all(p is not None for p in seen)
     assert tmp_path not in earleg.SOCK.parents and tmp_path not in mouthleg.SOCK.parents
+
+
+def test_the_demo_legs_publish_nothing_in_the_call_socket_index(short_root, home_is_tmp):
+    """Only the bot's legs link their sockets under ~/.sessionkit/phone/run/: a
+    reader there would take the web demo for a bot."""
+    from sessionphone import paths
+    desk = CallDesk(short_root / "web", legs=True, voicemode=None, spool=None, log=lambda m: None)
+
+    async def main():
+        await desk.start()
+        assert all(p.is_socket() for p in desk.sock_paths())
+        await desk.stop()
+    asyncio.run(main())
+    assert paths.run_dir() == home_is_tmp / ".sessionkit" / "phone" / "run"
+    assert not paths.exists(paths.run_dir())
 
 
 def test_legs_refused_on_the_default_root(tmp_path):

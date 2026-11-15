@@ -289,7 +289,8 @@ def test_hang_up_cancels_the_watchdog(rig, monkeypatch):
     task = run(go())
     assert task.cancelled() and s.noreply_task is None
     assert rig.spoken == [] and rig.noreply() == []
-    assert rig.verdicts() == ["CALL TURN 1 taken=unknown: no reply before hang-up"]
+    # PHONE-297: a close is logged as its own call, so its verdicts carry its id
+    assert rig.verdicts() == ["CALL TURN 1 taken=unknown: no reply before hang-up [call 5531]"]
 
 
 # ---- the knobs: dc_env, the printout, the start line ----

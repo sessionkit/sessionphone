@@ -18,7 +18,7 @@ import sys
 import time
 
 import pytest
-from _kit_log import kit_log
+from _kit_log import root_log
 
 from sessionphone import channels, settings
 from sessionphone.bridge import bot, dc_env
@@ -37,8 +37,8 @@ KEYS = (("ACCOUNTS", "accounts"), ("OUTBOX", "outbox"), ("CALLS_DIR", "calls"),
         ("WAIT_MUSIC", "wait-music.opus"), ("EARS_SOCK", "call-ears.sock"),
         ("MOUTH_SOCK", "call-mouth.sock"))
 ROOT_WIDE = {"VOICES", "WAIT_MUSIC"}     # not about an account: shared by every profile
-# The bot's log is out of the root: ~/.sessionkit/phone/log/<bot>[/<profile>]/
-# (dc_env.log_file, _kit_log), per bot and per profile, never in KEYS.
+# The bot's log is in its own folder, per bot and per profile (dc_env.log_file,
+# _kit_log): <root>/log/<bot>[/<profile>]/ for these tmp roots, never in KEYS.
 
 PROBE = r"""
 import sys
@@ -91,8 +91,8 @@ def test_the_default_profile_resolves_every_path_exactly_as_before(tmp_path):
     assert got["spool"] == f"{tmp_path}/undelivered"
     assert got["earleg"] == f"{tmp_path}/call-ears.sock"
     assert got["mouthleg"] == f"{tmp_path}/call-mouth.sock"
-    assert got["say_cmd"] == "dc-say"
-    assert got["LOG"] == str(kit_log("ada"))     # the one path that moved: out of the root
+    assert got["say_cmd"] == dc_env.own_say()    # this install's, by path (PHONE-307)
+    assert got["LOG"] == str(root_log(tmp_path, "ada"))     # a root not the default: its log/ (PHONE-305)
 
 
 def test_an_empty_profile_is_the_default_profile(tmp_path):
@@ -112,8 +112,8 @@ def test_a_named_profile_keeps_every_per_account_file_in_its_home(tmp_path):
     # the sockets were already per profile: the same place, now by the home
     assert got["earleg"] == f"{tmp_path}/public/call-ears.sock"
     assert got["mouthleg"] == f"{tmp_path}/public/call-mouth.sock"
-    assert got["say_cmd"] == f"DC_OUTBOX={tmp_path}/public/outbox dc-say"
-    assert got["LOG"] == str(kit_log("ada", "public"))     # its own log folder, in the bot's
+    assert got["say_cmd"] == f"DC_OUTBOX={tmp_path}/public/outbox {dc_env.own_say()}"
+    assert got["LOG"] == str(root_log(tmp_path, "ada", "public"))     # its own log folder, in the bot's
 
 
 def test_two_bots_on_one_root_share_no_list_callers_or_outbox(tmp_path):
@@ -130,7 +130,7 @@ def test_an_explicit_setting_still_wins_on_a_named_profile(tmp_path):
     got = resolved(tmp_path, "public", DC_OUTBOX=str(mine), DC_CHANNELS_FILE=str(tmp_path / "x.txt"))
     assert got["OUTBOX"] == str(mine)
     assert got["channels_file"] == got["CHANNELS_FILE"] == str(tmp_path / "x.txt")
-    assert got["LOG"] == str(kit_log("ada", "public"))
+    assert got["LOG"] == str(root_log(tmp_path, "ada", "public"))
     mine = resolved(tmp_path, "public", DC_LOG=str(tmp_path / "own.log"))
     assert mine["LOG"] == str(tmp_path / "own.log")             # DC_LOG still wins
 

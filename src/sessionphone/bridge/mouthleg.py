@@ -10,7 +10,9 @@ id, as with ``dc-say --call``).
 
 THE SOCKET: ``<ROOT>/call-mouth.sock``, or ``<ROOT>/<PROFILE>/call-mouth.sock``
 for a named profile (DC_MOUTH_SOCK overrides). Mode 0600, served on the calls
-loop. One connection is one exchange:
+loop. The bot links the socket it bound into the call sockets' index,
+``~/.sessionkit/phone/run/<bot>[.<profile>]/`` (sockindex.py), where a reader
+finds it whatever the bot's root is. One connection is one exchange:
 
   probe:  mouth -> {"probe": true}\\n
           bot   -> {"ok": true, "agent": "claude", "profile": "", "calls": [N, ...], "sounds": true}\\n
@@ -63,7 +65,7 @@ import traceback
 
 import numpy as np
 
-from sessionphone.bridge import dc_env
+from sessionphone.bridge import dc_env, sockindex
 
 PROFILE = dc_env.env("PROFILE", "")
 SOCK = dc_env.path("MOUTH_SOCK", "call-mouth.sock")   # under the profile's home: <ROOT>/<PROFILE>/ for a named one
@@ -284,6 +286,16 @@ async def serve(manager, path=None, log=print):
     return server
 
 
+async def serve_published(manager, path=None, log=print):
+    """serve(), then link the socket it bound into the call sockets' index
+    (sockindex), so a reader finds it whatever this bot's root is. The bridge's
+    leg only: the web demo calls serve() and publishes nothing. A link that
+    cannot be made is logged; the leg serves on."""
+    server = await serve(manager, path, log)
+    sockindex.published(sockindex.MOUTH, pathlib.Path(path or SOCK), log=log)
+    return server
+
+
 def start(manager, log=print, path=None):
-    """From any thread: serve the socket on the calls loop."""
-    return asyncio.run_coroutine_threadsafe(serve(manager, path, log), manager.loop)
+    """From any thread: serve the socket on the calls loop, and publish it."""
+    return asyncio.run_coroutine_threadsafe(serve_published(manager, path, log), manager.loop)

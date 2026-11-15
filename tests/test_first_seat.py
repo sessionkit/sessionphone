@@ -5,7 +5,8 @@ With no signer and a sessionmail whose `message seat agent --help` says
 agent --install <agent>-chat`) and the job carries the SEAT_SOCKET and
 SEAT_PUB it prints, parsed, never evaluated. A seat not minted, a refusal or a
 failure stops install before it writes anything, with sessionmail's own line
-and the step that fixes it. Without that capability, install refuses before
+and the step that fixes it; an exit 3 (the agent runs, its service file not
+written) goes on with the signer and says one warning line. Without that capability, install refuses before
 it says "installed" or loads anything, naming the steps by hand. With a
 signer, it pins DC_MESSAGE, runs the bot's own start check, and makes the box
 Delta text goes to. `bot status` shows the last log line. The default To is
@@ -25,7 +26,7 @@ import stat
 import subprocess
 
 import pytest
-from _kit_log import kit_log
+from _kit_log import kit_log, root_log
 from click.testing import CliRunner
 
 from sessionphone import seat, service, settings
@@ -535,6 +536,99 @@ def test_t7_a_timeout_is_a_failure_and_sets_no_signer(rig, monkeypatch):
     assert "DC_SIGNER_SOCK" not in env and "DC_SIGNER_PUB" not in env
 
 
+# ---- T7b: exit 3: the agent runs, its service file was not written (SM-1006) -------
+# sessionmail installed the job and its agent answered, then could not write
+# ~/.sessionkit/mail/services/seat-agents/<seat>.json. The signer stands:
+# install goes on with it and says ONE warning line, with the fix.
+
+# Byte-for-byte what sessionmail SM-1006 (2a29b9b) writes on exit 3: _install's
+# line, then _declare()'s FAILED line wrapping _service_file.COULD_NOT_WRITE.
+UNDECLARED_FAILED = ("message seat agent: FAILED - service could not write /h/.sessionkit/mail/services/"
+                     "seat-agents/claude-chat.json: Permission denied; the previous file is unchanged. "
+                     "The job is installed and its agent answers; re-run --install to write the file")
+
+
+def _undeclared_err(rig) -> str:
+    """The exit-3 stderr, its first line naming the rig's own socket."""
+    return (f"message seat agent: installed and loaded {LABEL}; the agent answers on {rig.sock}\n"
+            f"{UNDECLARED_FAILED}\n")
+
+
+def _undeclared_warning(failed: str = UNDECLARED_FAILED) -> str:
+    return ("warning: `message seat agent --install claude-chat` answered 3: its agent runs and the "
+            "bot signs with it, but the seat agent's service file "
+            "~/.sessionkit/mail/services/seat-agents/claude-chat.json was not written "
+            f"({failed}). Run `message seat agent --install claude-chat` again to write it.")
+
+
+def test_t7b_run_agent_takes_exit_3_with_a_signer_as_0_and_warns(rig):
+    rig.answer("install", 3, rig.install_out(), _undeclared_err(rig))
+    env = {"PATH": os.environ["PATH"]}
+    made = seat.run_agent(env, "claude-chat", env)
+    assert (env["DC_SIGNER_SOCK"], env["DC_SIGNER_PUB"]) == (rig.sock, str(rig.pub))   # as on 0
+    assert (made.name, made.pub, made.sock, made.label) == ("claude-chat", str(rig.pub), rig.sock, LABEL)
+    assert made.warning == _undeclared_warning()
+    assert "\n" not in made.warning                                  # ONE line
+
+
+def test_t7b_the_warning_quotes_only_the_failed_line(rig):
+    # whatever sessionmail quotes after its FAILED line stays out of the one line
+    rig.answer("install", 3, rig.install_out(), _undeclared_err(rig) + "  a quoted tail\n")
+    env = {"PATH": os.environ["PATH"]}
+    made = seat.run_agent(env, "claude-chat", env)
+    assert made.warning == _undeclared_warning() and "quoted tail" not in made.warning
+
+
+def test_t7b_exit_3_with_no_failed_line_quotes_what_it_said(rig):
+    rig.answer("install", 3, rig.install_out(), "message seat agent: service file not written\n")
+    env = {"PATH": os.environ["PATH"]}
+    made = seat.run_agent(env, "claude-chat", env)
+    assert made.warning == _undeclared_warning("message seat agent: service file not written")
+
+
+def test_t7b_exit_0_carries_no_warning(rig):
+    env = {"PATH": os.environ["PATH"]}
+    assert seat.run_agent(env, "claude-chat", env).warning == ""
+
+
+def test_t7b_exit_3_with_no_socket_or_pub_is_a_failure_and_sets_no_signer(rig):
+    rig.answer("install", 3, f"SEAT_LABEL={LABEL}\n", _undeclared_err(rig))
+    env = {"PATH": os.environ["PATH"]}
+    with pytest.raises(seat.SeatFailed) as e:
+        seat.run_agent(env, "claude-chat", env)
+    assert "answered 3 but printed no SEAT_SOCKET and SEAT_PUB" in str(e.value)
+    assert "--uninstall claude-chat" in str(e.value)
+    assert "DC_SIGNER_SOCK" not in env and "DC_SIGNER_PUB" not in env
+
+
+def test_t7b_bot_install_on_exit_3_installs_and_says_one_warning(rig, monkeypatch):
+    _no_signer(monkeypatch)
+    rig.answer("install", 3, rig.install_out(), _undeclared_err(rig))
+    r = _install()
+    assert r.exit_code == 0, r.output
+    assert _installs(rig) == [["seat", "agent", "--install", "claude-chat"]]
+    assert rig.plist.exists() and "bootstrap" in rig.launchd.verbs()       # the job is installed
+    env = _job_env(rig)
+    assert env["DC_SIGNER_SOCK"] == rig.sock and env["DC_SIGNER_PUB"] == str(rig.pub)
+    lines = r.output.splitlines()
+    assert lines.count(_undeclared_warning()) == 1
+    assert [ln for ln in lines if "service file" in ln] == [_undeclared_warning()]
+    assert lines.index(_undeclared_warning()) < lines.index(next(ln for ln in lines
+                                                                 if ln.startswith("installed:")))
+    assert f"seat:      claude-chat, {MTA_SIGNED}, key {rig.pub}, agent {LABEL} on {rig.sock}" in r.output
+    assert "nothing of the bot was installed" not in r.output
+
+
+def test_t7b_bot_install_on_exit_3_with_no_socket_or_pub_installs_nothing(rig, monkeypatch):
+    _no_signer(monkeypatch)
+    rig.answer("install", 3, f"SEAT_LABEL={LABEL}\n", _undeclared_err(rig))
+    r = _install()
+    assert r.exit_code == 1, r.output
+    assert "answered 3 but printed no SEAT_SOCKET and SEAT_PUB" in r.output
+    assert "warning:" not in r.output
+    _nothing_written(rig)
+
+
 # ---- T8: the answer is parsed, never evaluated -------------------------------------
 
 def test_t8_an_unknown_line_is_ignored_never_evaluated(rig, monkeypatch, tmp_path):
@@ -652,15 +746,17 @@ def _write_plist(rig, env: dict, err: str | None = None):
     rig.plist.write_bytes(plistlib.dumps(j))
 
 
-def _kit_log_at(text, name="bot.log"):
-    p = kit_log("ada", name=name)
+def _kit_log_at(root, text, name="bot.log"):
+    """The log the rule names for bot ada under ROOT, a root not the default:
+    <root>/log/ada/ (PHONE-305)."""
+    p = root_log(root, "ada", name=name)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
     return p
 
 
 def test_t11_status_shows_the_bots_last_line(rig, status_rig):
-    log = _kit_log_at("started\nonline as bot@relay - listening\n\n")
+    log = _kit_log_at(status_rig, "started\nonline as bot@relay - listening\n\n")
     out = _status()
     assert f"log:     {log}" in out
     assert "last:    online as bot@relay - listening" in out
@@ -685,7 +781,7 @@ def test_t11_with_neither_it_says_no_log_yet(rig, status_rig):
 def test_t11_dc_log_in_the_plist_names_the_bots_log(rig, status_rig, tmp_path):
     mine = tmp_path / "elsewhere.log"
     mine.write_text("a line\nthe last line\n")
-    _kit_log_at("not this one\n")
+    _kit_log_at(status_rig, "not this one\n")
     (status_rig / "bot.log").write_text("not this one either\n")
     _write_plist(rig, {"SESSIONPHONE_ROOT": str(status_rig), "DC_LOG": str(mine)})
     out = _status()
@@ -1020,6 +1116,16 @@ def test_registry_with_no_key_mints_runs_the_agent_and_saves_the_signer(rig, on_
     assert "from `message seat agent --install`, for --registry (saved)" in r.output
     assert "REQUIRE_SIGNATURE" not in " ".join(env)       # must-sign is the bot's own, at each send
     assert seatmail.child_env(env)["SESSIONMAIL_REQUIRE_SIGNATURE"] == "1"
+
+
+def test_registry_on_exit_3_installs_saves_the_signer_and_warns(rig, monkeypatch, tmp_path):
+    _no_signer(monkeypatch)
+    rig.answer("install", 3, rig.install_out(), _undeclared_err(rig))
+    r = _install("--registry", _registry(tmp_path))
+    assert r.exit_code == 0, r.output
+    assert _inits(rig) == []                                        # a key there: never minted
+    assert r.output.splitlines().count(_undeclared_warning()) == 1
+    assert _saved()["DC_SIGNER_SOCK"] == rig.sock and _saved()["DC_SIGNER_PUB"] == str(rig.pub)
 
 
 def test_registry_on_an_mta_mints_too(rig, monkeypatch, tmp_path):

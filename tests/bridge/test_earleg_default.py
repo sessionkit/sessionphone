@@ -74,7 +74,6 @@ class Tap:
 def session(monkeypatch, tmp_path, taps=()):
     monkeypatch.setattr(calls, "EARS", False)   # the default: no ears in process
     monkeypatch.setattr(calls, "_hooks", calls.Hooks(lambda m: None, lambda p: "", lambda *a, **k: None))
-    monkeypatch.setattr(calls, "_recorder", None)
     s = calls.CallSession.__new__(calls.CallSession)
     s.dir, s.ear_taps = tmp_path / "call", list(taps)
     s.rec_state = types.SimpleNamespace(keep=False)     # recording off, read once

@@ -134,7 +134,6 @@ def run(call, tmp_path, monkeypatch, starve=None):
     logs = []
     monkeypatch.setenv("EARS_RECORD", "1")     # the wav and its clock are kept only with recording on
     monkeypatch.setattr(calls, "_hooks", calls.Hooks(logs.append, lambda p: "", lambda *a, **k: None))
-    monkeypatch.setattr(calls, "_recorder", None)
     monkeypatch.setitem(sys.modules, "ears", types.ModuleType("ears"))
     monkeypatch.setitem(sys.modules, "ears.cli", types.SimpleNamespace(Pipeline=Pipeline))
     clock = Clock()

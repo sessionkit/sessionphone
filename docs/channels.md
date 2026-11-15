@@ -21,6 +21,17 @@ page has the rest.
   yourself send: it is the owner's list. [README.md][readme] has the whole
   contract.
 
+## Answering a line
+
+`dc-say --quote N CHAT "text"` posts the text as a quote-reply to message N,
+so in a busy group the reader sees which line you answer. N is the
+`X-Delta-Chat-Msg-Id` of the mail you are answering; its footer gives the
+whole command. N must be a message in CHAT: the bot refuses any other
+(exit 3, the reason on stderr, nothing sent or spoken). N that is not a
+positive number is a usage error (exit 1, nothing queued). `--quote`
+combines with `--call`, `--text-only`, `--html` and `--who`; the quote is on
+the chat message only, never spoken.
+
 ## Taking a message back
 
 `dc-delete MSG_ID...` takes back your own message (the `msg M` your send

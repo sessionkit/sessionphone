@@ -369,7 +369,7 @@ def test_stop_ends_the_call_removes_its_file_and_survives_a_close_that_raises(ca
         ended = []
         s = _session(calls, m, end=ended.append)
 
-        async def close(why):
+        async def close(why, by_bot=False):
             raise RuntimeError("close broke")
         s.close = close
         s._live_write()
