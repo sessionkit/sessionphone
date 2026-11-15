@@ -86,7 +86,7 @@ dc-xdc-realtime = "sessionphone.dctools:main"
 dc-xdc-update = "sessionphone.dctools:main"
 
 [build-system]
-requires = ["uv_build>=0.11.9,<0.12.0"]
+requires = ["uv_build>=0.11.9,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
